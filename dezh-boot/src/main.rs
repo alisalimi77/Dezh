@@ -351,6 +351,26 @@ extern "C" fn trap_handler(frame: *mut TrapFrame) {
         return;
     }
 
+    // Page faults (instruction/load/store). With paging on, a U-mode task that
+    // reaches outside its U=1 region (e.g. the UART or kernel RAM) lands here.
+    if matches!(code, 12 | 13 | 15) {
+        let stval: usize;
+        let sstatus: usize;
+        unsafe {
+            asm!("csrr {}, stval", out(reg) stval);
+            asm!("csrr {}, sstatus", out(reg) sstatus);
+        }
+        // SPP == 0 means the trap came from U-mode.
+        if (sstatus >> 8) & 1 == 0 {
+            kprintln!(
+                "  [kernel] DENIED: task faulted (scause {code}) on {stval:#x} (outside its memory grant) — killing task"
+            );
+            unsafe { restore_kernel_ctx() }
+        }
+        kprintln!("\n[dezh-boot] kernel page fault on {stval:#x} (scause {code}) — halting");
+        shutdown(FINISH_FAIL);
+    }
+
     kprintln!("\n[dezh-boot] unexpected trap scause={scause:#x} — halting");
     shutdown(FINISH_FAIL);
 }
@@ -361,28 +381,47 @@ extern "C" fn trap_handler(frame: *mut TrapFrame) {
 // capabilities. The task is granted PRINT but not TIME, so `sys_uptime` is
 // denied at the kernel boundary.
 
-const USER_STACK_SIZE: usize = 16 * 1024;
-#[repr(align(16))]
-#[allow(dead_code)]
-struct UserStack([u8; USER_STACK_SIZE]);
-static mut USER_STACK: UserStack = UserStack([0; USER_STACK_SIZE]);
+// The user region bounds come from the linker: a 2 MiB-aligned span that the
+// page tables map U=1. User code lives at the bottom; the user stack grows down
+// from the top. Everything outside this span is supervisor-only.
+extern "C" {
+    static __user_start: u8;
+    static __user_end: u8;
+}
 
+fn user_region() -> (usize, usize) {
+    (
+        core::ptr::addr_of!(__user_start) as usize,
+        core::ptr::addr_of!(__user_end) as usize,
+    )
+}
+
+// --- Syscall wrappers — these run in U-mode, so they live in the user region. --
+#[link_section = ".user.text"]
+#[inline(never)]
 fn sys_print(s: &[u8]) -> usize {
     let mut a0 = s.as_ptr() as usize;
     unsafe { asm!("ecall", inout("a0") a0, in("a1") s.len(), in("a7") SYS_PRINT) };
     a0
 }
 
+#[link_section = ".user.text"]
+#[inline(never)]
 fn sys_uptime() -> usize {
     let mut a0: usize = 0;
     unsafe { asm!("ecall", inout("a0") a0, in("a7") SYS_UPTIME) };
     a0
 }
 
+#[link_section = ".user.text"]
+#[inline(never)]
 fn sys_exit(code: usize) -> ! {
     unsafe { asm!("ecall", in("a0") code, in("a7") SYS_EXIT, options(noreturn)) }
 }
 
+/// A well-behaved U-mode task: granted PRINT but not TIME, so its `sys_uptime`
+/// is denied at the kernel boundary, then it exits cleanly.
+#[link_section = ".user.text"]
 #[no_mangle]
 extern "C" fn user_task() -> ! {
     sys_print(b"  [task] hello from a U-mode task (zero ambient authority)\n");
@@ -396,16 +435,91 @@ extern "C" fn user_task() -> ! {
     sys_exit(0)
 }
 
-/// Spawn the demo task in U-mode with the given capability set, then return.
-fn spawn_user_task(task_caps: usize) {
+/// A misbehaving U-mode task: it tries to touch the UART directly (ambient
+/// hardware access). With paging on, the UART is a supervisor-only page, so the
+/// store page-faults and the kernel kills the task — proof that authority is
+/// denied at the hardware memory boundary, not just at the syscall boundary.
+#[link_section = ".user.text"]
+#[no_mangle]
+extern "C" fn rogue_task() -> ! {
+    // Store straight to the UART MMIO. We emit the `sb` inline (not via
+    // core::ptr::write_volatile, which in a debug build is an out-of-line call
+    // into kernel text) so the fault lands on the UART address itself.
+    unsafe {
+        asm!("sb {v}, 0({p})", v = in(reg) b'!' as usize, p = in(reg) 0x1000_0000usize);
+    }
+    // Unreachable: the store above faults and the kernel never resumes us here.
+    sys_print(b"  [task] (BUG) ambient UART write was NOT blocked\n");
+    sys_exit(0)
+}
+
+/// Spawn a task at `entry` in U-mode with `task_caps`, then return when it exits
+/// or is killed.
+fn spawn_task(entry: usize, task_caps: usize) {
     CURRENT_TASK_CAPS.store(task_caps, Ordering::SeqCst);
     // Mask the timer for the task window so the only trap is the synchronous
-    // ecall (no nested interrupt on the user stack).
+    // ecall / fault (no nested interrupt on the user stack).
     unsafe { asm!("csrc sie, {}", in(reg) STIE) };
-    let ustack = (core::ptr::addr_of_mut!(USER_STACK) as usize) + USER_STACK_SIZE;
-    unsafe { enter_user(user_task as usize, ustack) };
+    let (_start, end) = user_region();
+    let ustack = end; // user stack grows down from the top of the U=1 region
+    unsafe { enter_user(entry, ustack) };
     // Back in S-mode via restore_kernel_ctx; re-arm the timer.
     unsafe { asm!("csrs sie, {}", in(reg) STIE) };
+}
+
+// --- Sv39 paging: confine U-mode tasks to their own region. -----------------
+// PMP cannot distinguish S-mode from U-mode, so memory isolation between the
+// kernel and a user task is done with page tables: kernel + MMIO pages are
+// supervisor-only (U=0); only the user region is U=1. A U-mode access anywhere
+// else page-faults.
+#[repr(align(4096))]
+struct PageTable([u64; 512]);
+static mut ROOT: PageTable = PageTable([0; 512]);
+static mut L1: PageTable = PageTable([0; 512]);
+
+const PTE_V: u64 = 1 << 0;
+const PTE_R: u64 = 1 << 1;
+const PTE_W: u64 = 1 << 2;
+const PTE_X: u64 = 1 << 3;
+const PTE_U: u64 = 1 << 4;
+const PTE_A: u64 = 1 << 6;
+const PTE_D: u64 = 1 << 7;
+
+fn leaf(pa: u64, user: bool) -> u64 {
+    let mut flags = PTE_V | PTE_R | PTE_W | PTE_X | PTE_A | PTE_D;
+    if user {
+        flags |= PTE_U;
+    }
+    ((pa >> 12) << 10) | flags
+}
+
+fn build_page_tables() {
+    let (us, ue) = user_region();
+    unsafe {
+        let root = &mut (*core::ptr::addr_of_mut!(ROOT)).0;
+        let l1 = &mut (*core::ptr::addr_of_mut!(L1)).0;
+        // 0x0..0x4000_0000 as one kernel-only gigapage (covers UART + finisher).
+        root[0] = leaf(0x0, false);
+        // 0x8000_0000..0xC000_0000 via an L1 table of 2 MiB megapages.
+        let l1_pa = core::ptr::addr_of!(L1) as u64;
+        root[2] = ((l1_pa >> 12) << 10) | PTE_V; // non-leaf pointer
+        for i in 0..512usize {
+            let pa = 0x8000_0000u64 + (i as u64) * 0x20_0000;
+            let is_user = (pa as usize) >= us && (pa as usize) < ue;
+            l1[i] = leaf(pa, is_user);
+        }
+    }
+}
+
+fn enable_paging() {
+    let root_pa = core::ptr::addr_of!(ROOT) as u64;
+    let satp = (8u64 << 60) | (root_pa >> 12); // mode 8 = Sv39
+    unsafe {
+        asm!("sfence.vma");
+        asm!("csrw satp, {}", in(reg) satp);
+        asm!("sfence.vma");
+        asm!("csrs sstatus, {}", in(reg) 1usize << 18); // SUM: S-mode may read U pages
+    }
 }
 
 // --- Console capabilities ----------------------------------------------------
@@ -433,6 +547,7 @@ const COMMANDS: &[CommandSpec] = &[
     CommandSpec { name: "uptime", cap: cap::TIME, cap_name: "TIME", help: "show timer uptime" },
     CommandSpec { name: "echo", cap: cap::ECHO, cap_name: "ECHO", help: "echo <text>" },
     CommandSpec { name: "run", cap: cap::SPAWN, cap_name: "SPAWN", help: "run a capability-limited U-mode task" },
+    CommandSpec { name: "rogue", cap: cap::SPAWN, cap_name: "SPAWN", help: "run a task that tries forbidden memory (gets killed)" },
     CommandSpec { name: "secret", cap: cap::SECRET, cap_name: "SECRET", help: "(needs a cap the console lacks)" },
     CommandSpec { name: "halt", cap: cap::HALT, cap_name: "HALT", help: "power off the machine" },
 ];
@@ -514,8 +629,13 @@ fn dispatch(cmd: &str, arg: &str, plan: &KernelPlan, memory: &[MemoryRegion], he
         "echo" => kprintln!("{arg}"),
         "run" => {
             kprintln!("[kernel] spawning U-mode task; granted capability: PRINT (not TIME)");
-            spawn_user_task(TASK_PRINT);
+            spawn_task(user_task as usize, TASK_PRINT);
             kprintln!("[kernel] task returned; back in the S-mode console");
+        }
+        "rogue" => {
+            kprintln!("[kernel] spawning a rogue U-mode task (it will try to touch the UART directly)");
+            spawn_task(rogue_task as usize, TASK_PRINT);
+            kprintln!("[kernel] rogue task handled; console survived");
         }
         "halt" => {
             kprintln!("halting.");
@@ -583,6 +703,10 @@ pub extern "C" fn kmain() -> ! {
         asm!("csrs sie, {}", in(reg) STIE);
         asm!("csrs sstatus, {}", in(reg) 1usize << 1); // SIE: global supervisor interrupts
     }
+
+    kprintln!("[dezh-boot] enabling Sv39 paging (U-mode confined to its own region)...");
+    build_page_tables();
+    enable_paging();
 
     let held = cap::INSPECT | cap::TIME | cap::ECHO | cap::HALT | cap::SPAWN;
     console(&plan, &memory, held);

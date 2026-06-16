@@ -24,8 +24,13 @@ boundary every earlier spike ran around.
   authority of its own. The task can only reach the kernel through `ecall`s,
   each checked against the *task's* capabilities; a syscall it wasn't granted
   (`sys_uptime`, lacking `TIME`) is denied at the kernel boundary. A real
-  S→U→S context switch returns control to the console afterward. This is the
-  Step 1 thesis enforced by **hardware privilege levels**, not just types.
+  S→U→S context switch returns control to the console afterward.
+- **Hardware memory isolation** (Sv39 paging): kernel + MMIO pages are
+  supervisor-only (U=0); only the task's own region is U=1. A task that touches
+  anything else (`rogue` writes the UART directly) takes a **page fault** and is
+  killed by the kernel — the console survives. The no-ambient-authority thesis
+  is now enforced at both the **syscall** and the **hardware memory** boundary,
+  not just by Rust types.
 - Exits QEMU cleanly via the SiFive test finisher when you run `halt`.
 
 ## Layout
@@ -89,13 +94,14 @@ QEMU exits with code 0 after `halt`.
 gated by a capability the console holds. `secret` requires a capability the
 console is never granted, so it is always denied (the no-ambient-authority demo).
 `run` spawns a U-mode task granted only `PRINT` (not `TIME`); watch `sys_uptime`
-get denied at the kernel boundary, then control return to the console.
+get denied at the kernel boundary, then control return to the console. `rogue`
+spawns a task that writes the UART directly; watch it take a page fault and get
+killed while the console survives.
 
 ## Not yet
 
-The U-mode task still shares the address space (no paging/PMP), so isolation is
-enforced at the *syscall* boundary, not yet at the *memory* boundary. Next
-milestone: PMP/paging so a U-mode task physically cannot touch kernel/MMIO
-memory (only its granted capabilities) — extending the no-ambient-authority
-thesis from syscalls to hardware memory protection. After that: multiple tasks
-with scheduling, then the first real Pol personality on the kernel.
+A single task at a time, and the kernel/user split uses coarse 1 GiB / 2 MiB
+pages with one shared user region (W^X not yet enforced). Next milestones:
+multiple tasks with scheduling and per-task regions, then the first real Pol
+personality (Linux) running on the kernel — each step under the
+no-ambient-authority thesis, now enforced at the hardware boundary.

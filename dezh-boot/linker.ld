@@ -39,4 +39,16 @@ SECTIONS
     . = ALIGN(16);
     . = . + 0x40000;            /* 256 KiB boot stack */
     __stack_top = .;
+
+    /* User region: a 2 MiB-aligned span mapped U=1 (user-accessible) by the
+     * page tables. Holds U-mode task code; the user stack grows down from the
+     * top of the region. Everything else is supervisor-only. */
+    . = ALIGN(0x200000);
+    __user_start = .;
+    .user : {
+        *(.user.text .user.text.*)
+        *(.user.rodata .user.rodata.*)
+    }
+    . = ALIGN(0x200000);
+    __user_end = .;
 }

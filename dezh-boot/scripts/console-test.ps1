@@ -35,7 +35,7 @@ $ev = Register-ObjectEvent -InputObject $p -EventName OutputDataReceived -Messag
 $p.BeginOutputReadLine()
 Start-Sleep -Milliseconds 700
 
-$commands = @('help', 'caps', 'mem', 'services', 'echo hello dezh', 'secret', 'bogus', 'uptime', 'halt')
+$commands = @('help', 'caps', 'mem', 'services', 'echo hello dezh', 'secret', 'run', 'rogue', 'uptime', 'halt')
 foreach ($c in $commands) {
     $p.StandardInput.Write($c + "`n")
     $p.StandardInput.Flush()

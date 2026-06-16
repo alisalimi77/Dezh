@@ -40,10 +40,13 @@ capability-gated console** over the UART, and from the console `run` drops a tas
 to **U-mode** (zero ambient authority) that can only reach the kernel via
 `ecall`s checked against the *task's* capabilities — an ungranted syscall
 (`sys_uptime`) is denied at the kernel boundary, then a real S→U→S context switch
-returns to the console. The capability thesis is now enforced by **hardware
-privilege levels**, not just types. Next: PMP/paging so a U-mode task physically
-cannot touch kernel/MMIO memory (memory-boundary isolation), then multiple tasks
-with scheduling, then the first real Pol personality on the kernel.
+returns to the console. **Sv39 paging** then confines each U-mode task to its own
+region: kernel + MMIO pages are supervisor-only, so a task touching the UART
+directly (`rogue`) takes a page fault and is killed while the console survives.
+The no-ambient-authority thesis is now enforced at **both the syscall boundary
+and the hardware memory boundary**, not just by Rust types. Next: multiple tasks
+with scheduling and per-task regions, then the first real Pol personality (Linux)
+on the kernel.
 
 ## Names (ours — user-approved)
 
