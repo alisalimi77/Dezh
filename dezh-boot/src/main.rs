@@ -1180,6 +1180,14 @@ fn read_line(buf: &mut [u8]) -> usize {
 #[no_mangle]
 pub extern "C" fn kmain() -> ! {
     Uart.init();
+    // Small fortress banner (Dezh = دژ, "citadel"). Pure ASCII so it renders on
+    // any serial console.
+    kprintln!();
+    kprintln!("  ___________");
+    kprintln!(" |_-_-_-_-_-_|");
+    kprintln!(" | DEZH  OS  |");
+    kprintln!(" |___________|");
+    kprintln!("  capability-secure microkernel  -  no ambient authority");
     kprintln!();
     kprintln!("[dezh-boot] alive on bare metal (qemu virt, riscv64, S-mode)");
 
