@@ -35,12 +35,15 @@ direction, still a hypothesis, deferred, or rejected.
 
 Step 1 through Step 10 are validated. Step 10 boots for real: `dezh-boot` comes
 up on bare-metal QEMU `virt` (RISC-V), prints the validated kernel contract
-banner, installs an S-mode trap vector + SBI timer (background uptime), and runs
-**Dezh's own capability-gated console** over the UART — an interactive REPL where
-each command requires an explicit capability and an ungranted command is denied
-(no-ambient-authority, now interactive on bare metal). Next: launch a first
-capability-seeded user-space task (drop to U-mode, service its `ecall` as a
-capability-checked request), keeping every step under the thesis.
+banner, installs an S-mode trap vector + SBI timer (background uptime), runs **Dezh's own
+capability-gated console** over the UART, and from the console `run` drops a task
+to **U-mode** (zero ambient authority) that can only reach the kernel via
+`ecall`s checked against the *task's* capabilities — an ungranted syscall
+(`sys_uptime`) is denied at the kernel boundary, then a real S→U→S context switch
+returns to the console. The capability thesis is now enforced by **hardware
+privilege levels**, not just types. Next: PMP/paging so a U-mode task physically
+cannot touch kernel/MMIO memory (memory-boundary isolation), then multiple tasks
+with scheduling, then the first real Pol personality on the kernel.
 
 ## Names (ours — user-approved)
 

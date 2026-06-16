@@ -20,6 +20,12 @@ boundary every earlier spike ran around.
   narrow capability set and **denies** any command whose capability it was not
   granted (`secret` in the demo) — no-ambient-authority, now interactive on
   bare metal.
+- **U-mode tasks** (`run`): drops a task to the **U privilege level** with zero
+  authority of its own. The task can only reach the kernel through `ecall`s,
+  each checked against the *task's* capabilities; a syscall it wasn't granted
+  (`sys_uptime`, lacking `TIME`) is denied at the kernel boundary. A real
+  S→U→S context switch returns control to the console afterward. This is the
+  Step 1 thesis enforced by **hardware privilege levels**, not just types.
 - Exits QEMU cleanly via the SiFive test finisher when you run `halt`.
 
 ## Layout
@@ -79,14 +85,17 @@ QEMU exits with code 0 after `halt`.
 
 ## Commands
 
-`help`, `caps`, `mem`, `services`, `uptime`, `echo <text>`, `halt` — each gated by
-a capability the console holds. `secret` requires a capability the console is
-never granted, so it is always denied (the no-ambient-authority demo).
+`help`, `caps`, `mem`, `services`, `uptime`, `echo <text>`, `run`, `halt` — each
+gated by a capability the console holds. `secret` requires a capability the
+console is never granted, so it is always denied (the no-ambient-authority demo).
+`run` spawns a U-mode task granted only `PRINT` (not `TIME`); watch `sys_uptime`
+get denied at the kernel boundary, then control return to the console.
 
 ## Not yet
 
-No paging/virtual memory, and no actual user-space service launch. Done so far:
-boot contract + S-mode trap vector + SBI timer + a capability-gated console.
-Next milestone: launch a first capability-seeded user-space task (drop to
-U-mode, handle its `ecall` as a capability-checked request), keeping each step
-under the no-ambient-authority thesis.
+The U-mode task still shares the address space (no paging/PMP), so isolation is
+enforced at the *syscall* boundary, not yet at the *memory* boundary. Next
+milestone: PMP/paging so a U-mode task physically cannot touch kernel/MMIO
+memory (only its granted capabilities) — extending the no-ambient-authority
+thesis from syscalls to hardware memory protection. After that: multiple tasks
+with scheduling, then the first real Pol personality on the kernel.
