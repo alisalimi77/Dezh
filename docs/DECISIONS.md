@@ -31,12 +31,13 @@ direction, still a hypothesis, deferred, or rejected.
 
 ## Current phase
 
-Step 1 through Step 10 are validated. Step 10 now boots for real: `dezh-boot`
-comes up on bare-metal QEMU `virt` (RISC-V) and prints the validated kernel
-contract banner. The simulation → bare-metal boundary is crossed. Next: grow
-the kernel from "prints the contract" toward actually launching a user-space
-service (e.g. a trap/timer setup, then a first capability-seeded service),
-keeping every step under the no-ambient-authority thesis.
+Step 1 through Step 10 are validated. Step 10 boots for real: `dezh-boot` comes
+up on bare-metal QEMU `virt` (RISC-V), prints the validated kernel contract
+banner, then installs an S-mode trap vector, arms the SBI timer, and services
+real timer interrupts — the kernel's first hardware event loop. Next: launch a
+first capability-seeded user-space task (drop to U-mode, service its `ecall` as
+a capability-checked request), keeping every step under the no-ambient-authority
+thesis.
 
 ## Canonical authority model
 

@@ -12,6 +12,9 @@ boundary every earlier spike ran around.
 - The boot plan is checked by the **same `plan_boot` contract** that has unit
   tests — capability seeds are bound to declared services (no ambient authority)
   even at the first instruction after firmware.
+- **First real hardware event loop:** installs an S-mode trap vector (`stvec`),
+  arms the SBI timer, enables supervisor interrupts, and services real timer
+  interrupts in `trap_handler` before halting.
 - Exits QEMU cleanly via the SiFive test finisher.
 
 ## Layout
@@ -44,7 +47,7 @@ qemu-system-riscv64 -machine virt -nographic -bios default \
 
 Expected tail of the output:
 
-```
+```text
 [dezh-boot] alive on bare metal (qemu virt, riscv64, S-mode)
 [dezh-boot] boot contract VALIDATED
 [dezh-boot] banner: dezh-kernel-boot-v0:qemu-virtio-riscv64:services=4:usable_bytes=132120576
@@ -54,13 +57,21 @@ Expected tail of the output:
               - wasm-runtime
               - virtio-block
 [dezh-boot] no ambient authority: capability seeds bound to declared services only
-[dezh-boot] OK — halting
+[dezh-boot] enabling supervisor timer interrupts...
+[dezh-boot] timer tick 1/5
+[dezh-boot] timer tick 2/5
+[dezh-boot] timer tick 3/5
+[dezh-boot] timer tick 4/5
+[dezh-boot] timer tick 5/5
+[dezh-boot] 5 timer interrupts handled — halting
 ```
 
 QEMU exits with code 0 on success.
 
 ## Not yet
 
-No traps, timer, paging, or actual service launch. Next milestone: set up the
-trap vector + timer, then launch a first capability-seeded user-space service —
-keeping each step under the no-ambient-authority thesis.
+No paging/virtual memory, and no actual user-space service launch. Done so far:
+boot contract + S-mode trap vector + SBI timer interrupts. Next milestone:
+launch a first capability-seeded user-space task (drop to U-mode, handle its
+ecall as a capability-checked request), keeping each step under the
+no-ambient-authority thesis.
