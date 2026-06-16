@@ -12,10 +12,15 @@ boundary every earlier spike ran around.
 - The boot plan is checked by the **same `plan_boot` contract** that has unit
   tests — capability seeds are bound to declared services (no ambient authority)
   even at the first instruction after firmware.
-- **First real hardware event loop:** installs an S-mode trap vector (`stvec`),
-  arms the SBI timer, enables supervisor interrupts, and services real timer
-  interrupts in `trap_handler` before halting.
-- Exits QEMU cleanly via the SiFive test finisher.
+- **Hardware event loop:** installs an S-mode trap vector (`stvec`), arms the
+  SBI timer, enables supervisor interrupts, and counts a silent background
+  uptime tick in `trap_handler`.
+- **Dezh's own console** over the UART: a real read/eval/print loop where every
+  command is gated by an explicit capability. The console holds a fixed,
+  narrow capability set and **denies** any command whose capability it was not
+  granted (`secret` in the demo) — no-ambient-authority, now interactive on
+  bare metal.
+- Exits QEMU cleanly via the SiFive test finisher when you run `halt`.
 
 ## Layout
 
@@ -38,6 +43,8 @@ rustup target add riscv64gc-unknown-none-elf
 # QEMU with RISC-V system support (qemu-system-riscv64) on PATH
 ```
 
+Interactive (type commands yourself; `halt` exits):
+
 ```sh
 cd dezh-boot
 cargo build
@@ -45,33 +52,41 @@ qemu-system-riscv64 -machine virt -nographic -bios default \
     -kernel target/riscv64gc-unknown-none-elf/debug/dezh-boot
 ```
 
-Expected tail of the output:
+Automated, reproducible transcript (boots, scripts the commands, drains output):
 
-```text
-[dezh-boot] alive on bare metal (qemu virt, riscv64, S-mode)
-[dezh-boot] boot contract VALIDATED
-[dezh-boot] banner: dezh-kernel-boot-v0:qemu-virtio-riscv64:services=4:usable_bytes=132120576
-[dezh-boot] init services (each launched with explicit caps):
-              - init
-              - cairn
-              - wasm-runtime
-              - virtio-block
-[dezh-boot] no ambient authority: capability seeds bound to declared services only
-[dezh-boot] enabling supervisor timer interrupts...
-[dezh-boot] timer tick 1/5
-[dezh-boot] timer tick 2/5
-[dezh-boot] timer tick 3/5
-[dezh-boot] timer tick 4/5
-[dezh-boot] timer tick 5/5
-[dezh-boot] 5 timer interrupts handled — halting
+```sh
+pwsh dezh-boot/scripts/console-test.ps1
 ```
 
-QEMU exits with code 0 on success.
+Example console session:
+
+```text
+Dezh console. Every command requires an explicit capability.
+Type 'help'. The console holds: INSPECT TIME ECHO HALT
+dezh> caps
+console capabilities: INSPECT TIME ECHO HALT
+dezh> echo hello dezh
+hello dezh
+dezh> secret
+denied: 'secret' requires capability SECRET (not held)
+dezh> uptime
+uptime: 19 ticks (~1.9 s)
+dezh> halt
+halting.
+```
+
+QEMU exits with code 0 after `halt`.
+
+## Commands
+
+`help`, `caps`, `mem`, `services`, `uptime`, `echo <text>`, `halt` — each gated by
+a capability the console holds. `secret` requires a capability the console is
+never granted, so it is always denied (the no-ambient-authority demo).
 
 ## Not yet
 
 No paging/virtual memory, and no actual user-space service launch. Done so far:
-boot contract + S-mode trap vector + SBI timer interrupts. Next milestone:
-launch a first capability-seeded user-space task (drop to U-mode, handle its
-ecall as a capability-checked request), keeping each step under the
-no-ambient-authority thesis.
+boot contract + S-mode trap vector + SBI timer + a capability-gated console.
+Next milestone: launch a first capability-seeded user-space task (drop to
+U-mode, handle its `ecall` as a capability-checked request), keeping each step
+under the no-ambient-authority thesis.

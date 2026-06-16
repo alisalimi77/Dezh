@@ -33,11 +33,12 @@ direction, still a hypothesis, deferred, or rejected.
 
 Step 1 through Step 10 are validated. Step 10 boots for real: `dezh-boot` comes
 up on bare-metal QEMU `virt` (RISC-V), prints the validated kernel contract
-banner, then installs an S-mode trap vector, arms the SBI timer, and services
-real timer interrupts — the kernel's first hardware event loop. Next: launch a
-first capability-seeded user-space task (drop to U-mode, service its `ecall` as
-a capability-checked request), keeping every step under the no-ambient-authority
-thesis.
+banner, installs an S-mode trap vector + SBI timer (background uptime), and runs
+**Dezh's own capability-gated console** over the UART — an interactive REPL where
+each command requires an explicit capability and an ungranted command is denied
+(no-ambient-authority, now interactive on bare metal). Next: launch a first
+capability-seeded user-space task (drop to U-mode, service its `ecall` as a
+capability-checked request), keeping every step under the thesis.
 
 ## Canonical authority model
 
