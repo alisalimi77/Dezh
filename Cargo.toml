@@ -1,0 +1,21 @@
+# Dezh workspace root.
+#
+# Members are the host-target crates for each architecture spike (capability
+# core, Cairn, identity, IR, IPC, kernel, Linux personality, runtime,
+# scheduler). The example WASM guests in `guests/` are a SEPARATE workspace
+# compiled to `wasm32-unknown-unknown` by dezh-host's build.rs, so they are
+# deliberately EXCLUDED here.
+[workspace]
+resolver = "2"
+members = [
+    "dezh-cairn",
+    "dezh-host",
+    "dezh-identity",
+    "dezh-ir",
+    "dezh-ipc",
+    "dezh-kernel",
+    "dezh-linux",
+    "dezh-runtime",
+    "dezh-scheduler",
+]
+exclude = ["guests"]

@@ -1,0 +1,12 @@
+[package]
+name = "dezh-linux"
+version = "0.1.0"
+edition = "2021"
+description = "Dezh Step 9 - Linux personality server spike with capability-mediated filesystem view."
+
+[dependencies]
+dezh-cairn = { path = "../dezh-cairn" }
+dezh-identity = { path = "../dezh-identity" }
+
+[lib]
+path = "src/lib.rs"

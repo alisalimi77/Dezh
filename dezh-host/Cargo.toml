@@ -1,0 +1,20 @@
+[package]
+name = "dezh-host"
+version = "0.1.0"
+edition = "2021"
+description = "Dezh Step 1 — capability runtime + in-memory resource backend for WASM guests."
+
+[dependencies]
+# Sole runtime dependency. WASI is never enabled; guests get zero ambient access.
+wasmtime = "27"
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "dezh-demo"
+path = "src/main.rs"
+
+[[bin]]
+name = "cap-bench"
+path = "src/bin/cap_bench.rs"

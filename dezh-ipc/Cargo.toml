@@ -1,0 +1,15 @@
+[package]
+name = "dezh-ipc"
+version = "0.1.0"
+edition = "2021"
+description = "Dezh Step 6 — user-space actor IPC spike with capability transfer."
+
+[dependencies]
+dezh-identity = { path = "../dezh-identity" }
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "ipc-bench"
+path = "src/bin/ipc_bench.rs"

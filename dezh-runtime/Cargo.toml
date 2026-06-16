@@ -1,0 +1,19 @@
+[package]
+name = "dezh-runtime"
+version = "0.1.0"
+edition = "2021"
+description = "Dezh Step 4 — integrate WASM capabilities with Cairn and identity provenance."
+
+[dependencies]
+dezh-cairn = { path = "../dezh-cairn" }
+dezh-identity = { path = "../dezh-identity" }
+dezh-ir = { path = "../dezh-ir" }
+wat = "1"
+wasmtime = "27"
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "runtime-boundary-bench"
+path = "src/bin/runtime_boundary_bench.rs"

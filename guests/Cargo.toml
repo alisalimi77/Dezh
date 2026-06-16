@@ -1,0 +1,12 @@
+# Guest workspace — compiled to wasm32-unknown-unknown by dezh-host/build.rs.
+# Separate from the root workspace so it has its own target dir (no lock clash
+# during the recursive build) and so the host target never tries to build cdylibs.
+[workspace]
+resolver = "2"
+members = ["g_granted", "g_denied", "g_attenuate"]
+
+# Small, deterministic wasm. No deps anywhere in this workspace.
+[profile.release]
+opt-level = "s"
+lto = true
+panic = "abort"

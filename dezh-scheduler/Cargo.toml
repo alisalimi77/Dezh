@@ -1,0 +1,14 @@
+[package]
+name = "dezh-scheduler"
+version = "0.1.0"
+edition = "2021"
+description = "Dezh Step 7 — task placement scheduler spike."
+
+[dependencies]
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "scheduler-bench"
+path = "src/bin/scheduler_bench.rs"

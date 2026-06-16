@@ -1,0 +1,11 @@
+[package]
+name = "dezh-cairn"
+version = "0.1.0"
+edition = "2021"
+description = "Dezh Step 2 — Cairn content-addressed immutable object store."
+
+[dependencies]
+blake3 = "1"
+
+[lib]
+path = "src/lib.rs"

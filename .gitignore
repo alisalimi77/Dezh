@@ -1,0 +1,6 @@
+# Rust build artifacts
+/target
+/guests/target
+
+# graphify tool output (not part of the project)
+graphify-out/
