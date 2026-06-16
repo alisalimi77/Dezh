@@ -28,6 +28,8 @@ direction, still a hypothesis, deferred, or rejected.
 | D010 | accepted | GUI access is mediated by compositor capabilities. | Apps must not read global input, screenshots, clipboard, or other surfaces by default. | GUI spike after core runtime integration. |
 | D011 | validated | Linux compatibility comes before Windows and Android; macOS is not v1. | Linux ABI is the most stable first bridge; macOS frameworks and policy make it unrealistic for v1. | Step 9 starts with a Linux personality server spike before any Windows, Android, or macOS compatibility work. |
 | D012 | validated | Kernel boot is QEMU-first with user-space services seeded by explicit capabilities. | Boot work should start on a narrow virtio/QEMU surface and preserve the capability model from the first instruction after init. | Step 10 boots for real: `dezh-boot` is a `no_std` RISC-V kernel that comes up in S-mode on QEMU `virt` (via OpenSBI), runs the boot description through the validated `dezh-kernel` contract, prints the banner + init service plan over UART, and exits cleanly. Crosses the simulation → bare-metal boundary. |
+| D013 | accepted | Dezh is an agent-first OS: AI agents are first-class principals, not bolt-ons. | An agent OS must make agent actions capability-bound, rollbackable, and provenance-tracked *by construction* — which is exactly what Dezh's core provides, so agents are a primary target, not an afterthought. | Partially backed already: identity principals/delegation (Step 3), guest actions → Cairn commits + invocation provenance (Step 4), Cairn rollback (Step 2). A dedicated agent runtime layer is deferred (name TBD, to be approved). |
+| D014 | accepted | Legacy app compatibility is delivered by **Pol** — capability-mediated personality servers. | Each legacy app runs inside a capability sandbox; its syscalls are translated and gated, so Linux/Android/Windows apps get **zero ambient authority by construction** (compatibility as a security upgrade, not a hole). Order: Linux → Android → Windows; macOS not v1. Performance target: near-native compute, with minimized — not zero — syscall-translation overhead. | First Pol personality (Linux) spiked in user space at Step 9 (`dezh-linux`): legacy paths → Cairn refs, capability-mediated, writes record provenance, unsupported syscalls return `ENOSYS`. Android and Windows personalities not started. Refines D007 (bridge) and D011 (order). |
 
 ## Current phase
 
@@ -39,6 +41,18 @@ each command requires an explicit capability and an ungranted command is denied
 (no-ambient-authority, now interactive on bare metal). Next: launch a first
 capability-seeded user-space task (drop to U-mode, service its `ecall` as a
 capability-checked request), keeping every step under the thesis.
+
+## Names (ours — user-approved)
+
+Dezh's proper nouns are deliberate and **require the user's approval** before
+use; proposed names are not adopted until approved.
+
+- **Dezh** — the OS itself (دژ, "fortress/citadel": security by construction).
+- **Cairn** — the content-addressed immutable object store (D004).
+- **Pol** — the legacy-compatibility subsystem: capability-mediated personality
+  servers (پل, "bridge"; D014). `dezh-linux` is the first Pol personality.
+
+The agent-runtime layer (D013) is intentionally **unnamed for now**.
 
 ## Canonical authority model
 
