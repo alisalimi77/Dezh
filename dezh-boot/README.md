@@ -31,6 +31,11 @@ boundary every earlier spike ran around.
   killed by the kernel — the console survives. The no-ambient-authority thesis
   is now enforced at both the **syscall** and the **hardware memory** boundary,
   not just by Rust types.
+- **Multitasking + scheduler** (`multi`): several U-mode tasks share the CPU
+  round-robin, each with its own stack and capability set. A full register
+  context switch (`utrap`) saves/restores every task; tasks cooperate via a
+  `yield` syscall and their output interleaves. (Cooperative for now; timer
+  preemption is a planned refinement.)
 - Exits QEMU cleanly via the SiFive test finisher when you run `halt`.
 
 ## Layout
@@ -96,12 +101,13 @@ console is never granted, so it is always denied (the no-ambient-authority demo)
 `run` spawns a U-mode task granted only `PRINT` (not `TIME`); watch `sys_uptime`
 get denied at the kernel boundary, then control return to the console. `rogue`
 spawns a task that writes the UART directly; watch it take a page fault and get
-killed while the console survives.
+killed while the console survives. `multi` runs three cooperative tasks that
+interleave via `yield`.
 
 ## Not yet
 
-A single task at a time, and the kernel/user split uses coarse 1 GiB / 2 MiB
-pages with one shared user region (W^X not yet enforced). Next milestones:
-multiple tasks with scheduling and per-task regions, then the first real Pol
-personality (Linux) running on the kernel — each step under the
+Scheduling is cooperative (no timer preemption yet) and tasks share one user
+region; the kernel/user split uses coarse 1 GiB / 2 MiB pages (W^X not yet
+enforced). Next milestones: timer preemption and per-task regions, then more of
+the first real Pol personality (Linux) on the kernel — each step under the
 no-ambient-authority thesis, now enforced at the hardware boundary.

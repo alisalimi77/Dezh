@@ -144,6 +144,132 @@ extern "C" {
     fn restore_kernel_ctx() -> !;
 }
 
+// --- Multitasking trap path: full register context switch between U-mode tasks.
+// `utrap` saves the *entire* integer register file + sepc of the trapping task
+// into that task's frame (located via sscratch), runs the scheduler on a
+// dedicated kernel stack, then restores whichever task the scheduler chose and
+// `sret`s into it. `run_first` saves the kernel context (so the scheduler can
+// longjmp back to the console when every task is done) and launches the first
+// task. Frame layout: index n-1 holds xN; index 31 holds sepc.
+global_asm!(
+    r#"
+    .section .bss
+    .align 16
+    .globl ktrap_stack
+ktrap_stack:
+    .space 8192
+    .globl ktrap_top
+ktrap_top:
+
+    .section .text
+    .align 4
+    .globl utrap
+utrap:
+    csrrw   sp, sscratch, sp        # sp = &frame, sscratch = user sp
+    sd      x1, 0(sp)
+    sd      x3, 16(sp)
+    sd      x4, 24(sp)
+    sd      x5, 32(sp)
+    csrr    x5, sscratch            # x5 = user sp (x5 already saved)
+    sd      x5, 8(sp)
+    sd      x6, 40(sp)
+    sd      x7, 48(sp)
+    sd      x8, 56(sp)
+    sd      x9, 64(sp)
+    sd      x10, 72(sp)
+    sd      x11, 80(sp)
+    sd      x12, 88(sp)
+    sd      x13, 96(sp)
+    sd      x14, 104(sp)
+    sd      x15, 112(sp)
+    sd      x16, 120(sp)
+    sd      x17, 128(sp)
+    sd      x18, 136(sp)
+    sd      x19, 144(sp)
+    sd      x20, 152(sp)
+    sd      x21, 160(sp)
+    sd      x22, 168(sp)
+    sd      x23, 176(sp)
+    sd      x24, 184(sp)
+    sd      x25, 192(sp)
+    sd      x26, 200(sp)
+    sd      x27, 208(sp)
+    sd      x28, 216(sp)
+    sd      x29, 224(sp)
+    sd      x30, 232(sp)
+    sd      x31, 240(sp)
+    csrr    x5, sepc
+    sd      x5, 248(sp)
+    mv      a0, sp                  # a0 = &frame
+    la      sp, ktrap_top
+    call    utrap_handler           # returns &resume_frame in a0
+    j       frame_restore
+
+    # restore the frame pointed to by a0 and sret into it
+    .globl run_first
+run_first:                          # a0 = &first_frame
+    la      t0, KCTX
+    sd      ra, 0(t0)
+    sd      sp, 8(t0)
+    sd      s0, 16(t0)
+    sd      s1, 24(t0)
+    sd      s2, 32(t0)
+    sd      s3, 40(t0)
+    sd      s4, 48(t0)
+    sd      s5, 56(t0)
+    sd      s6, 64(t0)
+    sd      s7, 72(t0)
+    sd      s8, 80(t0)
+    sd      s9, 88(t0)
+    sd      s10, 96(t0)
+    sd      s11, 104(t0)
+    # fall through into the restore with a0 = first frame
+
+frame_restore:                      # a0 = &frame to resume
+    mv      t0, a0
+    ld      t1, 248(t0)
+    csrw    sepc, t1
+    csrw    sscratch, t0            # sscratch = &frame for the next trap
+    ld      sp, 8(t0)               # user sp
+    ld      x1, 0(t0)
+    ld      x3, 16(t0)
+    ld      x4, 24(t0)
+    ld      x6, 40(t0)
+    ld      x7, 48(t0)
+    ld      x8, 56(t0)
+    ld      x9, 64(t0)
+    ld      x11, 80(t0)
+    ld      x12, 88(t0)
+    ld      x13, 96(t0)
+    ld      x14, 104(t0)
+    ld      x15, 112(t0)
+    ld      x16, 120(t0)
+    ld      x17, 128(t0)
+    ld      x18, 136(t0)
+    ld      x19, 144(t0)
+    ld      x20, 152(t0)
+    ld      x21, 160(t0)
+    ld      x22, 168(t0)
+    ld      x23, 176(t0)
+    ld      x24, 184(t0)
+    ld      x25, 192(t0)
+    ld      x26, 200(t0)
+    ld      x27, 208(t0)
+    ld      x28, 216(t0)
+    ld      x29, 224(t0)
+    ld      x30, 232(t0)
+    ld      x31, 240(t0)
+    ld      x10, 72(t0)             # a0
+    ld      x5, 32(t0)              # t0 itself, last
+    sret
+"#
+);
+
+extern "C" {
+    fn utrap();
+    fn run_first(frame: *const usize);
+}
+
 /// Saved kernel context for the U-mode round trip (ra, sp, s0..s11).
 #[no_mangle]
 static mut KCTX: [usize; 14] = [0; 14];
@@ -282,6 +408,7 @@ fn sbi_set_timer(stime: u64) {
 const SYS_EXIT: usize = 0;
 const SYS_PRINT: usize = 1;
 const SYS_UPTIME: usize = 2;
+const SYS_YIELD: usize = 3;
 const SYS_DENIED: usize = usize::MAX; // result sentinel for "capability not held"
 
 // --- Per-task capabilities (what the running U-mode task is allowed to do). --
@@ -522,6 +649,201 @@ fn enable_paging() {
     }
 }
 
+// --- Cooperative multitasking scheduler -------------------------------------
+// Several U-mode tasks share the CPU by yielding (round-robin). Each has a full
+// register frame (saved/restored by utrap), its own 64 KiB stack carved from the
+// top of the user region, and its own capability set. Timer preemption is a
+// future refinement; for now switches happen on yield/exit (cooperative).
+const MAX_TASKS: usize = 4;
+
+#[derive(Clone, Copy, PartialEq)]
+enum TaskState {
+    Unused,
+    Ready,
+    Done,
+}
+
+static mut FRAMES: [[usize; 32]; MAX_TASKS] = [[0; 32]; MAX_TASKS];
+static mut TSTATE: [TaskState; MAX_TASKS] = [TaskState::Unused; MAX_TASKS];
+static mut TCAPS: [usize; MAX_TASKS] = [0; MAX_TASKS];
+static mut CURRENT: usize = 0;
+
+// Frame index of register xN is N-1; a0=x10 -> 9, a1=x11 -> 10, a7=x17 -> 16,
+// sp=x2 -> 1, sepc -> 31.
+const F_A0: usize = 9;
+const F_A1: usize = 10;
+const F_A7: usize = 16;
+const F_SP: usize = 1;
+const F_SEPC: usize = 31;
+
+fn frame_ptr(i: usize) -> *mut usize {
+    unsafe { core::ptr::addr_of_mut!(FRAMES[i]) as *mut usize }
+}
+
+unsafe fn pick_next() -> Option<usize> {
+    for off in 0..MAX_TASKS {
+        let i = (CURRENT + 1 + off) % MAX_TASKS;
+        if TSTATE[i] == TaskState::Ready {
+            return Some(i);
+        }
+    }
+    None
+}
+
+/// Pick the next Ready task and return its frame, or longjmp back to the console
+/// if every task is finished.
+unsafe fn schedule_or_return() -> *const usize {
+    match pick_next() {
+        Some(i) => {
+            CURRENT = i;
+            frame_ptr(i) as *const usize
+        }
+        None => restore_kernel_ctx(),
+    }
+}
+
+#[no_mangle]
+extern "C" fn utrap_handler(frame_ptr: *mut usize) -> *const usize {
+    let scause: usize;
+    unsafe { asm!("csrr {}, scause", out(reg) scause) };
+    let interrupt = scause >> (usize::BITS - 1) == 1;
+    let code = scause & (!0 >> 1);
+    let frame = unsafe { core::slice::from_raw_parts_mut(frame_ptr, 32) };
+
+    unsafe {
+        let cur = CURRENT; // snapshot before any reschedule (avoids &static_mut)
+        if interrupt {
+            kprintln!("\n[dezh-boot] unexpected interrupt in task (scause={scause:#x}) — halting");
+            shutdown(FINISH_FAIL);
+        }
+
+        // A task that touches memory outside its region is killed (thesis at the
+        // hardware boundary still holds for scheduled tasks).
+        if matches!(code, 12 | 13 | 15) {
+            let stval: usize;
+            asm!("csrr {}, stval", out(reg) stval);
+            kprintln!(
+                "  [kernel] task {} DENIED: faulted on {stval:#x} (outside its grant) — killing",
+                cur
+            );
+            TSTATE[CURRENT] = TaskState::Done;
+            return schedule_or_return();
+        }
+
+        if code == 8 {
+            frame[F_SEPC] += 4; // resume after the ecall
+            let caps = TCAPS[CURRENT];
+            match frame[F_A7] {
+                SYS_YIELD => {
+                    TSTATE[CURRENT] = TaskState::Ready;
+                    return schedule_or_return();
+                }
+                SYS_EXIT => {
+                    kprintln!("  [kernel] task {} exited (code {})", cur, frame[F_A0]);
+                    TSTATE[CURRENT] = TaskState::Done;
+                    return schedule_or_return();
+                }
+                SYS_PRINT => {
+                    if caps & TASK_PRINT != 0 {
+                        let s = core::slice::from_raw_parts(frame[F_A0] as *const u8, frame[F_A1]);
+                        for &b in s {
+                            Uart.putc(b);
+                        }
+                        frame[F_A0] = 0;
+                    } else {
+                        frame[F_A0] = SYS_DENIED;
+                    }
+                    return frame_ptr;
+                }
+                SYS_UPTIME => {
+                    if caps & TASK_TIME != 0 {
+                        frame[F_A0] = TICKS.load(Ordering::Relaxed) as usize;
+                    } else {
+                        frame[F_A0] = SYS_DENIED;
+                    }
+                    return frame_ptr;
+                }
+                _ => {
+                    frame[F_A0] = SYS_DENIED;
+                    return frame_ptr;
+                }
+            }
+        }
+
+        kprintln!("\n[dezh-boot] unexpected trap in task (scause={scause:#x}) — halting");
+        shutdown(FINISH_FAIL);
+    }
+}
+
+/// Set up `specs` as Ready tasks and run them round-robin until all finish.
+/// Each spec is (entry, caps). Returns when every task is Done.
+fn run_tasks(specs: &[(usize, usize)]) {
+    let (_us, ue) = user_region();
+    let n = specs.len().min(MAX_TASKS);
+    unsafe {
+        for i in 0..MAX_TASKS {
+            TSTATE[i] = TaskState::Unused;
+        }
+        for (i, &(entry, caps)) in specs.iter().take(n).enumerate() {
+            let f = &mut FRAMES[i];
+            *f = [0; 32];
+            f[F_SEPC] = entry;
+            f[F_SP] = ue - i * 0x1_0000; // 64 KiB stack per task, top-down
+            TCAPS[i] = caps;
+            TSTATE[i] = TaskState::Ready;
+        }
+        CURRENT = 0;
+        // Switch to the multitasking trap path; mask the timer (cooperative).
+        asm!("csrw stvec, {}", in(reg) utrap as usize);
+        asm!("csrc sie, {}", in(reg) STIE);
+        run_first(frame_ptr(0) as *const usize);
+        // Returned via restore_kernel_ctx once every task is Done.
+        asm!("csrw stvec, {}", in(reg) trap_entry as usize);
+        asm!("csrs sie, {}", in(reg) STIE);
+    }
+}
+
+// Worker tasks (run in U-mode, so they live in the user region). Each prints a
+// couple of steps and yields between them, so their output interleaves.
+#[link_section = ".user.text"]
+#[inline(never)]
+fn sys_yield() {
+    unsafe { asm!("ecall", in("a7") SYS_YIELD, lateout("a0") _, lateout("a1") _) };
+}
+
+#[link_section = ".user.text"]
+#[no_mangle]
+extern "C" fn worker_a() -> ! {
+    sys_print(b"    [task A] step 1\n");
+    sys_yield();
+    sys_print(b"    [task A] step 2\n");
+    sys_yield();
+    sys_print(b"    [task A] finished\n");
+    sys_exit(0)
+}
+
+#[link_section = ".user.text"]
+#[no_mangle]
+extern "C" fn worker_b() -> ! {
+    sys_print(b"    [task B] step 1\n");
+    sys_yield();
+    sys_print(b"    [task B] step 2\n");
+    sys_yield();
+    sys_print(b"    [task B] finished\n");
+    sys_exit(0)
+}
+
+#[link_section = ".user.text"]
+#[no_mangle]
+extern "C" fn worker_c() -> ! {
+    sys_print(b"    [task C] step 1\n");
+    sys_yield();
+    sys_print(b"    [task C] step 2\n");
+    sys_yield();
+    sys_print(b"    [task C] finished\n");
+    sys_exit(0)
+}
+
 // --- Console capabilities ----------------------------------------------------
 mod cap {
     pub const INSPECT: u32 = 1 << 0;
@@ -548,6 +870,7 @@ const COMMANDS: &[CommandSpec] = &[
     CommandSpec { name: "echo", cap: cap::ECHO, cap_name: "ECHO", help: "echo <text>" },
     CommandSpec { name: "run", cap: cap::SPAWN, cap_name: "SPAWN", help: "run a capability-limited U-mode task" },
     CommandSpec { name: "rogue", cap: cap::SPAWN, cap_name: "SPAWN", help: "run a task that tries forbidden memory (gets killed)" },
+    CommandSpec { name: "multi", cap: cap::SPAWN, cap_name: "SPAWN", help: "run 3 cooperative U-mode tasks (round-robin)" },
     CommandSpec { name: "secret", cap: cap::SECRET, cap_name: "SECRET", help: "(needs a cap the console lacks)" },
     CommandSpec { name: "halt", cap: cap::HALT, cap_name: "HALT", help: "power off the machine" },
 ];
@@ -636,6 +959,15 @@ fn dispatch(cmd: &str, arg: &str, plan: &KernelPlan, memory: &[MemoryRegion], he
             kprintln!("[kernel] spawning a rogue U-mode task (it will try to touch the UART directly)");
             spawn_task(rogue_task as usize, TASK_PRINT);
             kprintln!("[kernel] rogue task handled; console survived");
+        }
+        "multi" => {
+            kprintln!("[kernel] spawning 3 cooperative U-mode tasks (round-robin via yield)");
+            run_tasks(&[
+                (worker_a as usize, TASK_PRINT),
+                (worker_b as usize, TASK_PRINT),
+                (worker_c as usize, TASK_PRINT),
+            ]);
+            kprintln!("[kernel] all tasks done; back in the console");
         }
         "halt" => {
             kprintln!("halting.");
