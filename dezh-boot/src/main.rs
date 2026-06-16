@@ -1180,16 +1180,6 @@ fn read_line(buf: &mut [u8]) -> usize {
 #[no_mangle]
 pub extern "C" fn kmain() -> ! {
     Uart.init();
-    // Small fortress banner (Dezh = دژ, "citadel"). Pure ASCII so it renders on
-    // any serial console.
-    kprintln!();
-    kprintln!("  ___________");
-    kprintln!(" |_-_-_-_-_-_|");
-    kprintln!(" | DEZH  OS  |");
-    kprintln!(" |___________|");
-    kprintln!("  capability-secure microkernel  -  no ambient authority");
-    kprintln!();
-    kprintln!("[dezh-boot] alive on bare metal (qemu virt, riscv64, S-mode)");
 
     let memory = vec![
         MemoryRegion::new(0x8000_0000, 0x20_0000, MemoryKind::Reserved),
@@ -1206,6 +1196,22 @@ pub extern "C" fn kmain() -> ! {
         }
     };
 
+    // Dezh banner (ASCII so it renders on any serial console). The info line is
+    // filled from the validated boot plan.
+    kprintln!();
+    kprintln!(r"   ____            _");
+    kprintln!(r"  |  _ \  ___  ___| |__");
+    kprintln!(r"  | | | |/ _ \/_  / '_ \");
+    kprintln!(r"  | |_| |  __/ / /| | | |");
+    kprintln!(r"  |____/ \___//___|_| |_|");
+    kprintln!("  Dezh OS - capability-secure - no ambient authority");
+    kprintln!(
+        "  v0 - riscv64 - {} MiB usable - {} services",
+        plan.usable_bytes / 1024 / 1024,
+        plan.services.len()
+    );
+    kprintln!();
+    kprintln!("[dezh-boot] alive on bare metal (qemu virt, riscv64, S-mode)");
     kprintln!("[dezh-boot] boot contract VALIDATED");
     kprintln!("[dezh-boot] banner: {}", boot_banner(&plan));
     kprintln!("[dezh-boot] no ambient authority: capability seeds bound to declared services only");
