@@ -109,7 +109,8 @@ get denied at the kernel boundary, then control return to the console. `rogue`
 spawns a task that writes the UART directly; watch it take a page fault and get
 killed while the console survives. `multi` runs three cooperative tasks that
 interleave via `yield`. `linux` runs a Linux-ABI app through the Pol layer
-(watch `close()` come back as `ENOSYS`).
+(watch `close()` come back as `ENOSYS`). `bench` measures the ecall round-trip
+cost (see [BENCH.md](BENCH.md) for the real-hardware comparison vs Linux).
 
 ## Not yet
 

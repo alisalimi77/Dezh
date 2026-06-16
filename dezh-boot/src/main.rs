@@ -409,6 +409,8 @@ const SYS_EXIT: usize = 0;
 const SYS_PRINT: usize = 1;
 const SYS_UPTIME: usize = 2;
 const SYS_YIELD: usize = 3;
+const SYS_NULL: usize = 4; // minimal syscall (returns immediately) — for benchmarking
+const SYS_REPORT: usize = 5; // report a benchmark result (a0=ticks, a1=iterations)
 const SYS_DENIED: usize = usize::MAX; // result sentinel for "capability not held"
 
 // --- Per-task capabilities (what the running U-mode task is allowed to do). --
@@ -820,6 +822,25 @@ extern "C" fn utrap_handler(frame_ptr: *mut usize) -> *const usize {
                     }
                     return frame_ptr;
                 }
+                SYS_NULL => {
+                    // Minimal syscall: the cheapest possible round trip.
+                    return frame_ptr;
+                }
+                SYS_REPORT => {
+                    let ticks = frame[F_A0];
+                    let iters = frame[F_A1];
+                    // QEMU `virt` time CSR is 10 MHz => 1 tick = 100 ns.
+                    let ns = if iters > 0 {
+                        ticks.saturating_mul(100) / iters
+                    } else {
+                        0
+                    };
+                    kprintln!(
+                        "  [bench] ecall round-trip: ~{ns} ns/call  ({ticks} ticks / {iters} calls, QEMU-emulated)"
+                    );
+                    frame[F_A0] = 0;
+                    return frame_ptr;
+                }
                 _ => {
                     frame[F_A0] = SYS_DENIED;
                     return frame_ptr;
@@ -932,6 +953,45 @@ fn linux_exit(code: usize) -> ! {
     unsafe { asm!("ecall", in("a0") code, in("a7") LINUX_EXIT, options(noreturn)) }
 }
 
+// --- Benchmark task: measure the cost of a syscall (ecall) round trip. -------
+// Times N minimal syscalls with the U-mode-readable `time` CSR and reports the
+// per-call cost back to the kernel. (Under QEMU this is an emulated figure; see
+// BENCH.md for the real-hardware comparison.)
+#[link_section = ".user.text"]
+#[inline(never)]
+fn sys_null() {
+    unsafe { asm!("ecall", in("a7") SYS_NULL, lateout("a0") _, lateout("a1") _) };
+}
+
+#[link_section = ".user.text"]
+#[inline(never)]
+fn rdtime_u() -> usize {
+    let t: usize;
+    unsafe { asm!("rdtime {}", out(reg) t) };
+    t
+}
+
+#[link_section = ".user.text"]
+#[inline(never)]
+fn sys_report(ticks: usize, iters: usize) {
+    unsafe { asm!("ecall", inout("a0") ticks => _, in("a1") iters, in("a7") SYS_REPORT) };
+}
+
+#[link_section = ".user.text"]
+#[no_mangle]
+extern "C" fn bench_task() -> ! {
+    let n: usize = 500_000;
+    let t0 = rdtime_u();
+    let mut i = 0;
+    while i < n {
+        sys_null();
+        i += 1;
+    }
+    let t1 = rdtime_u();
+    sys_report(t1.wrapping_sub(t0), n);
+    sys_exit(0)
+}
+
 #[link_section = ".user.text"]
 #[no_mangle]
 extern "C" fn linux_app() -> ! {
@@ -974,6 +1034,7 @@ const COMMANDS: &[CommandSpec] = &[
     CommandSpec { name: "rogue", cap: cap::SPAWN, cap_name: "SPAWN", help: "run a task that tries forbidden memory (gets killed)" },
     CommandSpec { name: "multi", cap: cap::SPAWN, cap_name: "SPAWN", help: "run 3 cooperative U-mode tasks (round-robin)" },
     CommandSpec { name: "linux", cap: cap::SPAWN, cap_name: "SPAWN", help: "run a Linux-ABI app via the Pol personality" },
+    CommandSpec { name: "bench", cap: cap::SPAWN, cap_name: "SPAWN", help: "measure ecall round-trip cost (U-mode task)" },
     CommandSpec { name: "secret", cap: cap::SECRET, cap_name: "SECRET", help: "(needs a cap the console lacks)" },
     CommandSpec { name: "halt", cap: cap::HALT, cap_name: "HALT", help: "power off the machine" },
 ];
@@ -1077,6 +1138,11 @@ fn dispatch(cmd: &str, arg: &str, plan: &KernelPlan, memory: &[MemoryRegion], he
             run_tasks(&[(linux_app as usize, TASK_PRINT, PERS_LINUX)]);
             kprintln!("[kernel] Linux app done; back in the console");
         }
+        "bench" => {
+            kprintln!("[kernel] running ecall round-trip microbenchmark (500000 calls)...");
+            run_tasks(&[(bench_task as usize, 0, PERS_NATIVE)]);
+            kprintln!("[kernel] benchmark done");
+        }
         "halt" => {
             kprintln!("halting.");
             shutdown(FINISH_PASS);
@@ -1142,6 +1208,7 @@ pub extern "C" fn kmain() -> ! {
         sbi_set_timer(rdtime() + TIMER_DELTA);
         asm!("csrs sie, {}", in(reg) STIE);
         asm!("csrs sstatus, {}", in(reg) 1usize << 1); // SIE: global supervisor interrupts
+        asm!("csrw scounteren, {}", in(reg) 0x7usize); // let U-mode read cycle/time/instret
     }
 
     kprintln!("[dezh-boot] enabling Sv39 paging (U-mode confined to its own region)...");
