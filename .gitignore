@@ -1,6 +1,5 @@
-# Rust build artifacts
-/target
-/guests/target
+# Rust build artifacts (any crate / nested workspace)
+target/
 
 # graphify tool output (not part of the project)
 graphify-out/

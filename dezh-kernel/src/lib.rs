@@ -155,6 +155,15 @@ impl BootInfo {
             ],
         }
     }
+
+    /// Same minimal init plan, but targeting the QEMU `virt` RISC-V machine —
+    /// the board the real `dezh-boot` kernel boots on. Services and explicit
+    /// capability seeds are identical; only the boot target differs.
+    pub fn qemu_minimal_riscv(memory: Vec<MemoryRegion>) -> Self {
+        let mut info = Self::qemu_minimal(memory);
+        info.target = BootTarget::QemuVirtioRiscV64;
+        info
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -299,6 +308,18 @@ mod tests {
             .services
             .iter()
             .any(|s| s.kind == ServiceKind::WasmRuntime));
+    }
+
+    #[test]
+    fn qemu_riscv_plan_uses_riscv_target_and_banner() {
+        let info = BootInfo::qemu_minimal_riscv(memory());
+
+        let plan = plan_boot(&info).unwrap();
+
+        assert_eq!(plan.target, BootTarget::QemuVirtioRiscV64);
+        let banner = boot_banner(&plan);
+        assert!(banner.starts_with("dezh-kernel-boot-v0:qemu-virtio-riscv64"));
+        assert!(plan.services.iter().any(|s| s.kind == ServiceKind::Init));
     }
 
     #[test]

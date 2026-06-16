@@ -1,0 +1,5 @@
+# Default this crate's build to the RISC-V bare-metal target so a plain
+# `cargo build` in dezh-boot/ produces a bootable ELF. The linker script is
+# applied via build.rs (rustc-link-arg).
+[build]
+target = "riscv64gc-unknown-none-elf"

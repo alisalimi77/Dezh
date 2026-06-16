@@ -27,13 +27,16 @@ direction, still a hypothesis, deferred, or rejected.
 | D009 | validated | Scheduling is task placement, not only thread time slicing. | Dezh must span mobile, desktop, server, accelerators, and eventually clusters. | Step 7 validates policy-driven placement using workload hints, data locality, queue pressure, energy, and NUMA penalties. |
 | D010 | accepted | GUI access is mediated by compositor capabilities. | Apps must not read global input, screenshots, clipboard, or other surfaces by default. | GUI spike after core runtime integration. |
 | D011 | validated | Linux compatibility comes before Windows and Android; macOS is not v1. | Linux ABI is the most stable first bridge; macOS frameworks and policy make it unrealistic for v1. | Step 9 starts with a Linux personality server spike before any Windows, Android, or macOS compatibility work. |
-| D012 | hypothesis | Kernel boot is QEMU-first with user-space services seeded by explicit capabilities. | Boot work should start on a narrow virtio/QEMU surface and preserve the capability model from the first instruction after init. | Step 10 has a no_std boot contract scaffold; validation requires a real QEMU boot printing the kernel contract banner. |
+| D012 | validated | Kernel boot is QEMU-first with user-space services seeded by explicit capabilities. | Boot work should start on a narrow virtio/QEMU surface and preserve the capability model from the first instruction after init. | Step 10 boots for real: `dezh-boot` is a `no_std` RISC-V kernel that comes up in S-mode on QEMU `virt` (via OpenSBI), runs the boot description through the validated `dezh-kernel` contract, prints the banner + init service plan over UART, and exits cleanly. Crosses the simulation → bare-metal boundary. |
 
 ## Current phase
 
-Step 1 through Step 9 are complete. Step 10 has started with a no_std kernel
-boot contract scaffold, but it is not validated yet. The next Step 10 milestone
-is a real QEMU boot target that prints the kernel contract banner.
+Step 1 through Step 10 are validated. Step 10 now boots for real: `dezh-boot`
+comes up on bare-metal QEMU `virt` (RISC-V) and prints the validated kernel
+contract banner. The simulation → bare-metal boundary is crossed. Next: grow
+the kernel from "prints the contract" toward actually launching a user-space
+service (e.g. a trap/timer setup, then a first capability-seeded service),
+keeping every step under the no-ambient-authority thesis.
 
 ## Canonical authority model
 

@@ -1,0 +1,26 @@
+# dezh-boot — the actual bare-metal kernel binary (Step 10).
+#
+# Standalone workspace, EXCLUDED from the root workspace, because it targets
+# riscv64gc-unknown-none-elf (no_std, no host linker) rather than the host.
+# It boots on QEMU `virt` and prints the validated dezh-kernel boot contract.
+[package]
+name = "dezh-boot"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+dezh-kernel = { path = "../dezh-kernel" }
+
+[[bin]]
+name = "dezh-boot"
+path = "src/main.rs"
+
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"
+lto = true
+
+[workspace]
