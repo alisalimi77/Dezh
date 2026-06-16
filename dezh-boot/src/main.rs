@@ -666,7 +666,24 @@ enum TaskState {
 static mut FRAMES: [[usize; 32]; MAX_TASKS] = [[0; 32]; MAX_TASKS];
 static mut TSTATE: [TaskState; MAX_TASKS] = [TaskState::Unused; MAX_TASKS];
 static mut TCAPS: [usize; MAX_TASKS] = [0; MAX_TASKS];
+static mut TPERS: [u8; MAX_TASKS] = [0; MAX_TASKS];
 static mut CURRENT: usize = 0;
+
+// A task's syscall personality: which ABI its `ecall`s speak.
+const PERS_NATIVE: u8 = 0; // Dezh native syscalls (SYS_*)
+const PERS_LINUX: u8 = 1; // Linux RISC-V syscall ABI, serviced by the Pol layer
+
+// Frame index of the third arg register a2 = x12 -> 11.
+const F_A2: usize = 11;
+
+// Linux (riscv64 generic) syscall numbers we recognize; everything else ENOSYS.
+const LINUX_WRITE: usize = 64;
+const LINUX_EXIT: usize = 93;
+const LINUX_EXIT_GROUP: usize = 94;
+// Linux negative errno values, as returned in a0.
+const LINUX_EBADF: usize = (-9i64) as usize;
+const LINUX_EACCES: usize = (-13i64) as usize;
+const LINUX_ENOSYS: usize = (-38i64) as usize;
 
 // Frame index of register xN is N-1; a0=x10 -> 9, a1=x11 -> 10, a7=x17 -> 16,
 // sp=x2 -> 1, sepc -> 31.
@@ -726,21 +743,61 @@ extern "C" fn utrap_handler(frame_ptr: *mut usize) -> *const usize {
                 "  [kernel] task {} DENIED: faulted on {stval:#x} (outside its grant) — killing",
                 cur
             );
-            TSTATE[CURRENT] = TaskState::Done;
+            TSTATE[cur] = TaskState::Done;
             return schedule_or_return();
         }
 
         if code == 8 {
             frame[F_SEPC] += 4; // resume after the ecall
-            let caps = TCAPS[CURRENT];
+            let caps = TCAPS[cur];
+
+            // Pol: a Linux-personality task speaks the Linux syscall ABI. We
+            // translate each Linux syscall into a capability-checked Dezh action;
+            // anything we do not support returns ENOSYS, just like the user-space
+            // Linux personality spike (D014).
+            if TPERS[cur] == PERS_LINUX {
+                match frame[F_A7] {
+                    LINUX_WRITE => {
+                        let fd = frame[F_A0];
+                        if fd == 1 || fd == 2 {
+                            if caps & TASK_PRINT != 0 {
+                                let s = core::slice::from_raw_parts(
+                                    frame[F_A1] as *const u8,
+                                    frame[F_A2],
+                                );
+                                for &b in s {
+                                    Uart.putc(b);
+                                }
+                                frame[F_A0] = frame[F_A2]; // bytes written
+                            } else {
+                                frame[F_A0] = LINUX_EACCES;
+                            }
+                        } else {
+                            frame[F_A0] = LINUX_EBADF;
+                        }
+                        return frame_ptr;
+                    }
+                    LINUX_EXIT | LINUX_EXIT_GROUP => {
+                        kprintln!("  [pol/linux] app exit (code {})", frame[F_A0]);
+                        TSTATE[cur] = TaskState::Done;
+                        return schedule_or_return();
+                    }
+                    other => {
+                        kprintln!("  [pol/linux] unsupported syscall {other} -> ENOSYS");
+                        frame[F_A0] = LINUX_ENOSYS;
+                        return frame_ptr;
+                    }
+                }
+            }
+
             match frame[F_A7] {
                 SYS_YIELD => {
-                    TSTATE[CURRENT] = TaskState::Ready;
+                    TSTATE[cur] = TaskState::Ready;
                     return schedule_or_return();
                 }
                 SYS_EXIT => {
                     kprintln!("  [kernel] task {} exited (code {})", cur, frame[F_A0]);
-                    TSTATE[CURRENT] = TaskState::Done;
+                    TSTATE[cur] = TaskState::Done;
                     return schedule_or_return();
                 }
                 SYS_PRINT => {
@@ -777,19 +834,20 @@ extern "C" fn utrap_handler(frame_ptr: *mut usize) -> *const usize {
 
 /// Set up `specs` as Ready tasks and run them round-robin until all finish.
 /// Each spec is (entry, caps). Returns when every task is Done.
-fn run_tasks(specs: &[(usize, usize)]) {
+fn run_tasks(specs: &[(usize, usize, u8)]) {
     let (_us, ue) = user_region();
     let n = specs.len().min(MAX_TASKS);
     unsafe {
         for i in 0..MAX_TASKS {
             TSTATE[i] = TaskState::Unused;
         }
-        for (i, &(entry, caps)) in specs.iter().take(n).enumerate() {
+        for (i, &(entry, caps, pers)) in specs.iter().take(n).enumerate() {
             let f = &mut FRAMES[i];
             *f = [0; 32];
             f[F_SEPC] = entry;
             f[F_SP] = ue - i * 0x1_0000; // 64 KiB stack per task, top-down
             TCAPS[i] = caps;
+            TPERS[i] = pers;
             TSTATE[i] = TaskState::Ready;
         }
         CURRENT = 0;
@@ -844,6 +902,50 @@ extern "C" fn worker_c() -> ! {
     sys_exit(0)
 }
 
+// --- A Linux-ABI app, run unmodified through the Pol personality layer. -------
+// It speaks the real Linux riscv64 syscall ABI (write=64, exit=93). The kernel's
+// Pol layer translates each into a capability-checked Dezh action; an
+// unsupported syscall returns ENOSYS. The app has zero ambient authority — it
+// only reaches the console because it holds the PRINT capability.
+#[link_section = ".user.text"]
+#[inline(never)]
+fn linux_write(fd: usize, s: &[u8]) -> i64 {
+    let mut a0 = fd;
+    unsafe {
+        asm!("ecall", inout("a0") a0, in("a1") s.as_ptr() as usize, in("a2") s.len(), in("a7") LINUX_WRITE)
+    };
+    a0 as i64
+}
+
+#[link_section = ".user.text"]
+#[inline(never)]
+fn linux_close(fd: usize) -> i64 {
+    let mut a0 = fd;
+    // 57 = Linux `close`; the Pol layer does not support it -> ENOSYS.
+    unsafe { asm!("ecall", inout("a0") a0, in("a7") 57usize) };
+    a0 as i64
+}
+
+#[link_section = ".user.text"]
+#[inline(never)]
+fn linux_exit(code: usize) -> ! {
+    unsafe { asm!("ecall", in("a0") code, in("a7") LINUX_EXIT, options(noreturn)) }
+}
+
+#[link_section = ".user.text"]
+#[no_mangle]
+extern "C" fn linux_app() -> ! {
+    linux_write(1, b"    [linux] hello from a Linux-ABI app, serviced by Pol\n");
+    let r = linux_close(3);
+    if r == -38 {
+        linux_write(
+            1,
+            b"    [linux] close(3) returned ENOSYS -> unsupported syscall, denied cleanly\n",
+        );
+    }
+    linux_exit(0)
+}
+
 // --- Console capabilities ----------------------------------------------------
 mod cap {
     pub const INSPECT: u32 = 1 << 0;
@@ -871,6 +973,7 @@ const COMMANDS: &[CommandSpec] = &[
     CommandSpec { name: "run", cap: cap::SPAWN, cap_name: "SPAWN", help: "run a capability-limited U-mode task" },
     CommandSpec { name: "rogue", cap: cap::SPAWN, cap_name: "SPAWN", help: "run a task that tries forbidden memory (gets killed)" },
     CommandSpec { name: "multi", cap: cap::SPAWN, cap_name: "SPAWN", help: "run 3 cooperative U-mode tasks (round-robin)" },
+    CommandSpec { name: "linux", cap: cap::SPAWN, cap_name: "SPAWN", help: "run a Linux-ABI app via the Pol personality" },
     CommandSpec { name: "secret", cap: cap::SECRET, cap_name: "SECRET", help: "(needs a cap the console lacks)" },
     CommandSpec { name: "halt", cap: cap::HALT, cap_name: "HALT", help: "power off the machine" },
 ];
@@ -963,11 +1066,16 @@ fn dispatch(cmd: &str, arg: &str, plan: &KernelPlan, memory: &[MemoryRegion], he
         "multi" => {
             kprintln!("[kernel] spawning 3 cooperative U-mode tasks (round-robin via yield)");
             run_tasks(&[
-                (worker_a as usize, TASK_PRINT),
-                (worker_b as usize, TASK_PRINT),
-                (worker_c as usize, TASK_PRINT),
+                (worker_a as usize, TASK_PRINT, PERS_NATIVE),
+                (worker_b as usize, TASK_PRINT, PERS_NATIVE),
+                (worker_c as usize, TASK_PRINT, PERS_NATIVE),
             ]);
             kprintln!("[kernel] all tasks done; back in the console");
+        }
+        "linux" => {
+            kprintln!("[kernel] running a Linux-ABI app through the Pol personality layer");
+            run_tasks(&[(linux_app as usize, TASK_PRINT, PERS_LINUX)]);
+            kprintln!("[kernel] Linux app done; back in the console");
         }
         "halt" => {
             kprintln!("halting.");

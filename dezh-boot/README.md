@@ -36,6 +36,12 @@ boundary every earlier spike ran around.
   context switch (`utrap`) saves/restores every task; tasks cooperate via a
   `yield` syscall and their output interleaves. (Cooperative for now; timer
   preemption is a planned refinement.)
+- **Pol / Linux personality** (`linux`): a U-mode app speaking the real Linux
+  riscv64 syscall ABI (`write`=64, `exit`=93) runs unmodified — the kernel's Pol
+  layer translates each Linux syscall into a capability-checked Dezh action, and
+  an unsupported syscall returns `ENOSYS`. The app has zero ambient authority;
+  it only reaches the console because it holds the `PRINT` capability. A first
+  taste of legacy compatibility *on the kernel* (D014).
 - Exits QEMU cleanly via the SiFive test finisher when you run `halt`.
 
 ## Layout
@@ -102,7 +108,8 @@ console is never granted, so it is always denied (the no-ambient-authority demo)
 get denied at the kernel boundary, then control return to the console. `rogue`
 spawns a task that writes the UART directly; watch it take a page fault and get
 killed while the console survives. `multi` runs three cooperative tasks that
-interleave via `yield`.
+interleave via `yield`. `linux` runs a Linux-ABI app through the Pol layer
+(watch `close()` come back as `ENOSYS`).
 
 ## Not yet
 
