@@ -823,6 +823,15 @@ fn vq(off: usize) -> usize {
     core::ptr::addr_of_mut!(VIRTQ) as usize + off
 }
 
+/// The current BLKREQ.data as text, up to the first NUL (capped for display).
+fn blkreq_str() -> &'static str {
+    unsafe {
+        let d = &(*core::ptr::addr_of!(BLKREQ.data))[..];
+        let n = d.iter().position(|&b| b == 0).unwrap_or(64).min(64);
+        core::str::from_utf8(&d[..n]).unwrap_or("<non-utf8>")
+    }
+}
+
 fn virtio_blk_init(base: usize) -> bool {
     mmio_w32(base + VR_STATUS, 0); // reset
     mmio_w32(base + VR_STATUS, ST_ACK);
@@ -1774,6 +1783,9 @@ const COMMANDS: &[CommandSpec] = &[
     CommandSpec { name: "disk", cap: cap::INSPECT, cap_name: "INSPECT", help: "probe virtio-mmio slots for a block device" },
     CommandSpec { name: "bwrite", cap: cap::SPAWN, cap_name: "SPAWN", help: "write a marker to disk sector 0 (virtio-blk)" },
     CommandSpec { name: "bread", cap: cap::INSPECT, cap_name: "INSPECT", help: "read disk sector 0 (proves persistence)" },
+    CommandSpec { name: "pset", cap: cap::SPAWN, cap_name: "SPAWN", help: "durable Cairn: set current value (persisted) <text>" },
+    CommandSpec { name: "pget", cap: cap::INSPECT, cap_name: "INSPECT", help: "durable Cairn: read current value" },
+    CommandSpec { name: "prollback", cap: cap::SPAWN, cap_name: "SPAWN", help: "durable Cairn: roll back to previous value" },
     CommandSpec { name: "services", cap: cap::INSPECT, cap_name: "INSPECT", help: "list init services" },
     CommandSpec { name: "uptime", cap: cap::TIME, cap_name: "TIME", help: "show timer uptime" },
     CommandSpec { name: "echo", cap: cap::ECHO, cap_name: "ECHO", help: "echo <text>" },
@@ -1888,6 +1900,42 @@ fn dispatch(cmd: &str, arg: &str, plan: &KernelPlan, memory: &[MemoryRegion], he
                 }
                 let st = virtio_blk_rw(base, 0, true);
                 kprintln!("  wrote sector 0 (status={st}, 0=OK): \"{}\"", core::str::from_utf8(marker).unwrap());
+            }
+        },
+        "pset" => match find_virtio_block() {
+            None => kprintln!("  no virtio block device (start QEMU with a disk)"),
+            Some(base) => {
+                virtio_blk_init(base);
+                // Durable Cairn (v0): sector 0 = current value, sector 1 = previous.
+                // Save current -> previous so the change is rollbackable, then store new.
+                virtio_blk_rw(base, 0, false); // read current into BLKREQ.data
+                virtio_blk_rw(base, 1, true); // persist it as "previous"
+                unsafe {
+                    let d = core::ptr::addr_of_mut!(BLKREQ.data) as *mut u8;
+                    core::ptr::write_bytes(d, 0, SECTOR_SIZE);
+                    let a = arg.as_bytes();
+                    let n = a.len().min(SECTOR_SIZE - 1);
+                    core::ptr::copy_nonoverlapping(a.as_ptr(), d, n);
+                }
+                virtio_blk_rw(base, 0, true);
+                kprintln!("  cairn: set current = \"{arg}\" (previous saved, persisted to disk)");
+            }
+        },
+        "pget" => match find_virtio_block() {
+            None => kprintln!("  no virtio block device (start QEMU with a disk)"),
+            Some(base) => {
+                virtio_blk_init(base);
+                virtio_blk_rw(base, 0, false);
+                kprintln!("  cairn: current = \"{}\"", blkreq_str());
+            }
+        },
+        "prollback" => match find_virtio_block() {
+            None => kprintln!("  no virtio block device (start QEMU with a disk)"),
+            Some(base) => {
+                virtio_blk_init(base);
+                virtio_blk_rw(base, 1, false); // read previous
+                virtio_blk_rw(base, 0, true); // restore it as current
+                kprintln!("  cairn: rolled back; current = \"{}\" (persisted)", blkreq_str());
             }
         },
         "bread" => match find_virtio_block() {
