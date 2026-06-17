@@ -743,6 +743,155 @@ fn frame_free(f: usize) {
 /// embedded here. The loader maps it into a fresh address space at runtime.
 const USERPROG_ELF: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/userprog.elf"));
 
+// --- virtio-mmio block device (persistence) ---------------------------------
+// QEMU `virt` exposes virtio transports as MMIO at 0x1000_1000, 8 slots spaced
+// 0x1000. We probe them for a block device (device-id 2). The driver will later
+// move to a user-space process holding the device's MMIO capability.
+const VIRTIO_MMIO_BASE: usize = 0x1000_1000;
+const VIRTIO_MMIO_STRIDE: usize = 0x1000;
+const VIRTIO_MMIO_COUNT: usize = 8;
+const VIRTIO_MAGIC: u32 = 0x7472_6976; // "virt"
+const VIRTIO_ID_BLOCK: u32 = 2;
+
+fn mmio_r32(addr: usize) -> u32 {
+    unsafe { core::ptr::read_volatile(addr as *const u32) }
+}
+
+fn mmio_w32(addr: usize, val: u32) {
+    unsafe { core::ptr::write_volatile(addr as *mut u32, val) }
+}
+
+/// Scan the virtio-mmio slots; return the base address of the first block device.
+fn find_virtio_block() -> Option<usize> {
+    for i in 0..VIRTIO_MMIO_COUNT {
+        let base = VIRTIO_MMIO_BASE + i * VIRTIO_MMIO_STRIDE;
+        if mmio_r32(base) == VIRTIO_MAGIC && mmio_r32(base + 0x008) == VIRTIO_ID_BLOCK {
+            return Some(base);
+        }
+    }
+    None
+}
+
+// --- Minimal legacy virtio-blk driver (sector read/write for persistence) ----
+// QEMU's virtio-mmio defaults to the legacy (version 1) layout: a single
+// contiguous virtqueue placed at QueuePFN. One split queue, polled completion.
+const VR_HOST_FEATURES_SEL: usize = 0x014;
+const VR_HOST_FEATURES: usize = 0x010;
+const VR_GUEST_FEATURES: usize = 0x020;
+const VR_GUEST_FEATURES_SEL: usize = 0x024;
+const VR_GUEST_PAGE_SIZE: usize = 0x028;
+const VR_QUEUE_SEL: usize = 0x030;
+const VR_QUEUE_NUM_MAX: usize = 0x034;
+const VR_QUEUE_NUM: usize = 0x038;
+const VR_QUEUE_ALIGN: usize = 0x03c;
+const VR_QUEUE_PFN: usize = 0x040;
+const VR_QUEUE_NOTIFY: usize = 0x050;
+const VR_STATUS: usize = 0x070;
+
+const ST_ACK: u32 = 1;
+const ST_DRIVER: u32 = 2;
+const ST_DRIVER_OK: u32 = 4;
+
+const VQ_SIZE: usize = 8;
+const DESC_OFF: usize = 0; // 16 * VQ_SIZE = 128 bytes
+const AVAIL_OFF: usize = 128;
+const USED_OFF: usize = 4096; // QueueAlign
+
+const VIRTQ_DESC_F_NEXT: u16 = 1;
+const VIRTQ_DESC_F_WRITE: u16 = 2; // buffer is device-writable
+
+const SECTOR_SIZE: usize = 512;
+
+#[repr(align(4096))]
+#[allow(dead_code)]
+struct Virtq([u8; 8192]);
+static mut VIRTQ: Virtq = Virtq([0; 8192]);
+
+#[repr(align(16))]
+struct BlkReq {
+    hdr: [u8; 16], // type:u32, reserved:u32, sector:u64
+    data: [u8; SECTOR_SIZE],
+    status: u8,
+}
+static mut BLKREQ: BlkReq = BlkReq {
+    hdr: [0; 16],
+    data: [0; SECTOR_SIZE],
+    status: 0,
+};
+
+fn vq(off: usize) -> usize {
+    core::ptr::addr_of_mut!(VIRTQ) as usize + off
+}
+
+fn virtio_blk_init(base: usize) -> bool {
+    mmio_w32(base + VR_STATUS, 0); // reset
+    mmio_w32(base + VR_STATUS, ST_ACK);
+    mmio_w32(base + VR_STATUS, ST_ACK | ST_DRIVER);
+    mmio_w32(base + VR_HOST_FEATURES_SEL, 0);
+    let _ = mmio_r32(base + VR_HOST_FEATURES);
+    mmio_w32(base + VR_GUEST_FEATURES_SEL, 0);
+    mmio_w32(base + VR_GUEST_FEATURES, 0); // accept no optional features
+    mmio_w32(base + VR_GUEST_PAGE_SIZE, 4096);
+    mmio_w32(base + VR_QUEUE_SEL, 0);
+    if mmio_r32(base + VR_QUEUE_NUM_MAX) == 0 {
+        return false;
+    }
+    mmio_w32(base + VR_QUEUE_NUM, VQ_SIZE as u32);
+    mmio_w32(base + VR_QUEUE_ALIGN, 4096);
+    let pfn = (core::ptr::addr_of!(VIRTQ) as usize >> 12) as u32;
+    mmio_w32(base + VR_QUEUE_PFN, pfn);
+    mmio_w32(base + VR_STATUS, ST_ACK | ST_DRIVER | ST_DRIVER_OK);
+    true
+}
+
+/// Read or write one 512-byte sector via the block device. Returns the device
+/// status byte (0 = OK). Caller fills BLKREQ.data before a write / reads it after.
+fn virtio_blk_rw(base: usize, sector: u64, write: bool) -> u8 {
+    unsafe {
+        let hdr = core::ptr::addr_of_mut!(BLKREQ.hdr) as usize;
+        core::ptr::write_volatile(hdr as *mut u32, if write { 1 } else { 0 }); // type
+        core::ptr::write_volatile((hdr + 4) as *mut u32, 0); // reserved
+        core::ptr::write_volatile((hdr + 8) as *mut u64, sector);
+        let data = core::ptr::addr_of_mut!(BLKREQ.data) as usize;
+        let status = core::ptr::addr_of_mut!(BLKREQ.status) as usize;
+        core::ptr::write_volatile(status as *mut u8, 0xff);
+
+        // Descriptor chain: header (device-read) -> data -> status (device-write).
+        let d = vq(DESC_OFF);
+        let put = |i: usize, addr: u64, len: u32, flags: u16, next: u16| {
+            let e = d + i * 16;
+            core::ptr::write_volatile(e as *mut u64, addr);
+            core::ptr::write_volatile((e + 8) as *mut u32, len);
+            core::ptr::write_volatile((e + 12) as *mut u16, flags);
+            core::ptr::write_volatile((e + 14) as *mut u16, next);
+        };
+        put(0, hdr as u64, 16, VIRTQ_DESC_F_NEXT, 1);
+        let data_flags = VIRTQ_DESC_F_NEXT | if write { 0 } else { VIRTQ_DESC_F_WRITE };
+        put(1, data as u64, SECTOR_SIZE as u32, data_flags, 2);
+        put(2, status as u64, 1, VIRTQ_DESC_F_WRITE, 0);
+
+        // Available ring: publish descriptor head 0.
+        let a = vq(AVAIL_OFF);
+        let avail_idx = core::ptr::read_volatile((a + 2) as *const u16);
+        core::ptr::write_volatile(
+            (a + 4 + (avail_idx as usize % VQ_SIZE) * 2) as *mut u16,
+            0,
+        );
+        core::sync::atomic::fence(Ordering::SeqCst);
+        core::ptr::write_volatile((a + 2) as *mut u16, avail_idx.wrapping_add(1));
+        core::sync::atomic::fence(Ordering::SeqCst);
+
+        let used = vq(USED_OFF);
+        let used_before = core::ptr::read_volatile((used + 2) as *const u16);
+        mmio_w32(base + VR_QUEUE_NOTIFY, 0);
+        // Poll the used ring for completion.
+        while core::ptr::read_volatile((used + 2) as *const u16) == used_before {
+            core::hint::spin_loop();
+        }
+        core::ptr::read_volatile(status as *const u8)
+    }
+}
+
 // --- Program loader + per-process address space ------------------------------
 // A loaded program gets its OWN page table (satp) built from frames: the kernel
 // is mapped (U=0) so traps work, and the program's segments + a stack are mapped
@@ -1622,6 +1771,9 @@ const COMMANDS: &[CommandSpec] = &[
     CommandSpec { name: "caps", cap: cap::INSPECT, cap_name: "INSPECT", help: "show the console's capabilities" },
     CommandSpec { name: "mem", cap: cap::INSPECT, cap_name: "INSPECT", help: "show the memory map" },
     CommandSpec { name: "frames", cap: cap::INSPECT, cap_name: "INSPECT", help: "frame allocator self-test (alloc/zero/free)" },
+    CommandSpec { name: "disk", cap: cap::INSPECT, cap_name: "INSPECT", help: "probe virtio-mmio slots for a block device" },
+    CommandSpec { name: "bwrite", cap: cap::SPAWN, cap_name: "SPAWN", help: "write a marker to disk sector 0 (virtio-blk)" },
+    CommandSpec { name: "bread", cap: cap::INSPECT, cap_name: "INSPECT", help: "read disk sector 0 (proves persistence)" },
     CommandSpec { name: "services", cap: cap::INSPECT, cap_name: "INSPECT", help: "list init services" },
     CommandSpec { name: "uptime", cap: cap::TIME, cap_name: "TIME", help: "show timer uptime" },
     CommandSpec { name: "echo", cap: cap::ECHO, cap_name: "ECHO", help: "echo <text>" },
@@ -1704,6 +1856,53 @@ fn dispatch(cmd: &str, arg: &str, plan: &KernelPlan, memory: &[MemoryRegion], he
                 kprintln!("  {:#012x}..{:#012x}  {:?}", r.start, end, r.kind);
             }
         }
+        "disk" => {
+            let mut found = false;
+            for i in 0..VIRTIO_MMIO_COUNT {
+                let base = VIRTIO_MMIO_BASE + i * VIRTIO_MMIO_STRIDE;
+                let magic = mmio_r32(base);
+                if magic != VIRTIO_MAGIC {
+                    continue;
+                }
+                let ver = mmio_r32(base + 0x004);
+                let dev = mmio_r32(base + 0x008);
+                if dev != 0 {
+                    let kind = if dev == VIRTIO_ID_BLOCK { " (block)" } else { "" };
+                    kprintln!("  virtio-mmio[{i}] @ {base:#x}: version={ver} device-id={dev}{kind}");
+                    found = true;
+                }
+            }
+            if !found {
+                kprintln!("  no virtio devices found (start QEMU with a -drive + virtio-blk-device)");
+            }
+        }
+        "bwrite" => match find_virtio_block() {
+            None => kprintln!("  no virtio block device (start QEMU with a disk)"),
+            Some(base) => {
+                virtio_blk_init(base);
+                let marker = b"DEZH-PERSISTENT-DISK-OK";
+                unsafe {
+                    let data = core::ptr::addr_of_mut!(BLKREQ.data) as *mut u8;
+                    core::ptr::write_bytes(data, 0, SECTOR_SIZE);
+                    core::ptr::copy_nonoverlapping(marker.as_ptr(), data, marker.len());
+                }
+                let st = virtio_blk_rw(base, 0, true);
+                kprintln!("  wrote sector 0 (status={st}, 0=OK): \"{}\"", core::str::from_utf8(marker).unwrap());
+            }
+        },
+        "bread" => match find_virtio_block() {
+            None => kprintln!("  no virtio block device (start QEMU with a disk)"),
+            Some(base) => {
+                virtio_blk_init(base);
+                unsafe {
+                    core::ptr::write_bytes(core::ptr::addr_of_mut!(BLKREQ.data) as *mut u8, 0, SECTOR_SIZE);
+                }
+                let st = virtio_blk_rw(base, 0, false);
+                let bytes = unsafe { &(*core::ptr::addr_of!(BLKREQ.data))[..23] };
+                let s = core::str::from_utf8(bytes).unwrap_or("<non-utf8>");
+                kprintln!("  read sector 0 (status={st}, 0=OK): \"{s}\"");
+            }
+        },
         "frames" => {
             let free0 = unsafe { FRAME_FREE };
             kprintln!("frames: {} total, {} free", unsafe { FRAME_TOTAL }, free0);

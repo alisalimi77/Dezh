@@ -3,3 +3,7 @@ target/
 
 # graphify tool output (not part of the project)
 graphify-out/
+
+# virtio-blk disk image (runtime artifact)
+dezh-boot/dezh-disk.img
+*.img
