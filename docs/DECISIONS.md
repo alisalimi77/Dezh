@@ -64,6 +64,23 @@ use; proposed names are not adopted until approved.
 
 The agent-runtime layer (D013) is intentionally **unnamed for now**.
 
+## Kernel foundation status (dezh-boot)
+
+Built bottom-up, each "not like Linux/Windows" where it matters:
+
+- **Physical memory:** a frame allocator (4 KiB frames, zero-on-alloc — no
+  cross-owner leaks).
+- **Real processes:** separate programs are loaded from their own ELF into their
+  own per-process address space (Sv39, kernel mapped U=0 for traps). `spawn`
+  grants **zero ambient authority** — a process gets only the capabilities passed
+  to it. **No `fork`** (Linux's fork inherits the parent's whole authority, the
+  ambient-authority mistake we refuse).
+- **Drivers:** a device is reachable only through a **device capability** (its
+  MMIO mapped into a process). Drivers are user processes holding device
+  capabilities, **not in-kernel code** (anti-monolithic; D008).
+- **Deferred (next epic):** virtio-blk user-space driver + persistent Cairn
+  (durable rollback); per-segment W^X for loaded programs.
+
 ## Canonical authority model
 
 `dezh-identity::Authority` (with `AuthorityGrant` / delegation chains) is the
