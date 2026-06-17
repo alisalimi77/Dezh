@@ -55,5 +55,18 @@ extern "C" fn main() -> ! {
     sys_print(&buf[..tag.len()]);
     sys_print(b"\n");
 
+    // Direct device access: write straight to the UART. This works ONLY because
+    // the kernel granted this program a capability mapping the device's MMIO into
+    // its address space at 0x5000_0000. A process without that grant faults (see
+    // `rogue`). This is the user-space-driver model: a driver is just a process
+    // holding a device capability — not kernel code.
+    let dev = 0x5000_0000 as *mut u8;
+    let m = b"    [userprog] wrote this line straight to the UART via a granted device capability\n";
+    let mut j = 0;
+    while j < m.len() {
+        unsafe { core::ptr::write_volatile(dev, m[j]) };
+        j += 1;
+    }
+
     sys_exit(0)
 }

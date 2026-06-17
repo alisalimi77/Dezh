@@ -871,6 +871,12 @@ fn build_address_space() -> (usize, usize) {
         s += FRAME_SIZE;
     }
 
+    // Grant a DEVICE capability: map the UART's MMIO page into this address space
+    // at 0x5000_0000. This is how a user-space driver reaches hardware — only a
+    // process the kernel hands the device to can touch it (drivers are user
+    // processes with device capabilities, not kernel code).
+    map_page(root, 0x5000_0000, UART_BASE as usize, PTE_U | PTE_R | PTE_W);
+
     (root, entry)
 }
 
