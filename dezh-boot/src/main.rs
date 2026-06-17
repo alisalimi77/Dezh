@@ -699,6 +699,59 @@ fn enable_paging() {
     }
 }
 
+// --- Physical frame allocator (the bedrock for dynamic memory). --------------
+// A free list of 4 KiB physical frames over a RAM pool above all static
+// regions. Every frame is ZEROED on allocation, so memory handed to a new
+// process can never leak a previous owner's bytes — capability hygiene, and an
+// avoidable mistake we do not repeat.
+const FRAME_SIZE: usize = 4096;
+const FRAME_POOL_BASE: usize = 0x8100_0000; // 16 MiB into RAM (above kernel/.user/stacks)
+const FRAME_POOL_END: usize = 0x8800_0000; // end of the 128 MiB QEMU `virt` RAM
+
+static mut FRAME_FREE_HEAD: usize = 0; // 0 = empty; otherwise a free frame's address
+static mut FRAME_TOTAL: usize = 0;
+static mut FRAME_FREE: usize = 0;
+
+fn frames_init() {
+    unsafe {
+        FRAME_FREE_HEAD = 0;
+        FRAME_TOTAL = 0;
+        FRAME_FREE = 0;
+        // Link every frame into the free list (each free frame stores the next).
+        let mut a = FRAME_POOL_BASE;
+        while a + FRAME_SIZE <= FRAME_POOL_END {
+            *(a as *mut usize) = FRAME_FREE_HEAD;
+            FRAME_FREE_HEAD = a;
+            FRAME_TOTAL += 1;
+            FRAME_FREE += 1;
+            a += FRAME_SIZE;
+        }
+    }
+}
+
+/// Allocate one zeroed physical frame, or 0 if out of memory.
+fn frame_alloc() -> usize {
+    unsafe {
+        let f = FRAME_FREE_HEAD;
+        if f == 0 {
+            return 0;
+        }
+        FRAME_FREE_HEAD = *(f as *const usize);
+        FRAME_FREE -= 1;
+        core::ptr::write_bytes(f as *mut u8, 0, FRAME_SIZE); // zero on alloc
+        f
+    }
+}
+
+/// Return a frame to the free list.
+fn frame_free(f: usize) {
+    unsafe {
+        *(f as *mut usize) = FRAME_FREE_HEAD;
+        FRAME_FREE_HEAD = f;
+        FRAME_FREE += 1;
+    }
+}
+
 // --- Cooperative multitasking scheduler -------------------------------------
 // Several U-mode tasks share the CPU by yielding (round-robin). Each has a full
 // register frame (saved/restored by utrap), its own 64 KiB stack carved from the
@@ -1386,6 +1439,7 @@ const COMMANDS: &[CommandSpec] = &[
     CommandSpec { name: "help", cap: 0, cap_name: "-", help: "list commands" },
     CommandSpec { name: "caps", cap: cap::INSPECT, cap_name: "INSPECT", help: "show the console's capabilities" },
     CommandSpec { name: "mem", cap: cap::INSPECT, cap_name: "INSPECT", help: "show the memory map" },
+    CommandSpec { name: "frames", cap: cap::INSPECT, cap_name: "INSPECT", help: "frame allocator self-test (alloc/zero/free)" },
     CommandSpec { name: "services", cap: cap::INSPECT, cap_name: "INSPECT", help: "list init services" },
     CommandSpec { name: "uptime", cap: cap::TIME, cap_name: "TIME", help: "show timer uptime" },
     CommandSpec { name: "echo", cap: cap::ECHO, cap_name: "ECHO", help: "echo <text>" },
@@ -1465,6 +1519,20 @@ fn dispatch(cmd: &str, arg: &str, plan: &KernelPlan, memory: &[MemoryRegion], he
                 let end = r.start + r.len;
                 kprintln!("  {:#012x}..{:#012x}  {:?}", r.start, end, r.kind);
             }
+        }
+        "frames" => {
+            let free0 = unsafe { FRAME_FREE };
+            kprintln!("frames: {} total, {} free", unsafe { FRAME_TOTAL }, free0);
+            let a = frame_alloc();
+            let b = frame_alloc();
+            let c = frame_alloc();
+            let first = unsafe { *(a as *const u64) };
+            kprintln!("  allocated {a:#x} {b:#x} {c:#x}; first word of {a:#x} = {first} (zeroed)");
+            kprintln!("  free now: {}", unsafe { FRAME_FREE });
+            frame_free(a);
+            frame_free(b);
+            frame_free(c);
+            kprintln!("  after free: {} (back to {})", unsafe { FRAME_FREE }, free0);
         }
         "services" => {
             kprintln!("init services ({} total):", plan.services.len());
@@ -1626,6 +1694,15 @@ pub extern "C" fn kmain() -> ! {
     kprintln!("[dezh-boot] enabling Sv39 paging (U-mode confined to its own region)...");
     build_page_tables();
     enable_paging();
+    frames_init();
+    {
+        let (total, free) = unsafe { (FRAME_TOTAL, FRAME_FREE) };
+        kprintln!(
+            "[dezh-boot] frame allocator: {} x 4 KiB frames ({} MiB free)",
+            total,
+            (free * FRAME_SIZE) / (1024 * 1024)
+        );
+    }
 
     let held = cap::INSPECT | cap::TIME | cap::ECHO | cap::HALT | cap::SPAWN;
     console(&plan, &memory, held);
