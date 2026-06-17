@@ -1759,11 +1759,19 @@ fn dispatch(cmd: &str, arg: &str, plan: &KernelPlan, memory: &[MemoryRegion], he
             Some(s) => kprintln!("  cairn: rolled back; current = \"{s}\" (persisted)"),
         },
         "agent" => {
-            kprintln!("[kernel] Dezh-IR agent program (push 2, push 3, add, print) on the kernel");
-            kprintln!("  run with the PRINT capability:");
-            ir::run_ir(ir::AGENT_IR, true);
-            kprintln!("  run WITHOUT the PRINT capability:");
-            ir::run_ir(ir::AGENT_IR, false);
+            kprintln!("[kernel] Dezh-IR: sandboxed, verified, capability-gated agent programs");
+            kprintln!("  prog 1 (loop: sum 1..=5, then print) WITH the PRINT capability:");
+            if let Err(t) = ir::run(&ir::demo_sum(), ir::CAP_PRINT) {
+                kprintln!("  [ir] TRAP: {}", t.msg());
+            }
+            kprintln!("  prog 1 again WITHOUT the PRINT capability:");
+            if let Err(t) = ir::run(&ir::demo_sum(), 0) {
+                kprintln!("  [ir] TRAP: {}", t.msg());
+            }
+            kprintln!("  prog 2 (write to Cairn, then read it back) with WRITE+READ+PRINT:");
+            if let Err(t) = ir::run(&ir::demo_cairn(), ir::CAP_WRITE | ir::CAP_READ | ir::CAP_PRINT) {
+                kprintln!("  [ir] TRAP: {}", t.msg());
+            }
         }
         "frames" => {
             let free0 = unsafe { FRAME_FREE };

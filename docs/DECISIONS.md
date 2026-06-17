@@ -84,12 +84,19 @@ Built bottom-up, each "not like Linux/Windows" where it matters:
   store (current + previous sector) provides rollback that survives reboot.
 - **W^X:** loaded programs honor per-segment permissions (code R+X, data R+W;
   never W+X).
-- **Agent-runtime v0:** the kernel interprets a portable Dezh-IR bytecode with
-  capability-gated effects (the substrate seed for D003/D016).
-- **Deferred (next epics):** a full wasm interpreter (wasmi, no_std) on the
-  kernel for real agents + multi-ISA; relocating the virtio-blk driver into a
-  user-space process (device-MMIO + DMA capabilities) so drivers are fully out
-  of the kernel.
+- **Agent runtime (Dezh-IR):** the kernel runs agents as a small, **verifiable**
+  bytecode (our own stack machine), not native code and not a large embedded
+  engine — keeping the trusted core small (D002). The program is sandboxed
+  (own operand stack + bounds-checked linear memory), a `verify` pass rejects
+  malformed programs (unknown opcode, truncated immediate, off-boundary branch
+  target) before execution, and **every effect is a capability-gated host call**.
+  Demonstrated (`agent`): a loop computes a sum and prints it (with PRINT), is
+  denied without PRINT, and a sandboxed program writes+reads the durable Cairn
+  via WRITE/READ host calls. A real wasm frontend can later compile to this IR
+  (D003/D016) — kept outside the trusted core by design.
+- **Deferred (next epics):** a wasm→Dezh-IR frontend (outside the kernel) for
+  real agents + multi-ISA; relocating the virtio-blk driver into a user-space
+  process (device-MMIO + DMA capabilities) so drivers are fully out of the kernel.
 
 ## Canonical authority model
 

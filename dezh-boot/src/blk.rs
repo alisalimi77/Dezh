@@ -207,13 +207,31 @@ pub fn bread() -> Option<(u8, &'static str)> {
 
 /// Durable Cairn: set the current value (saving the old as previous). Persisted.
 pub fn store_set(text: &str) -> Option<()> {
+    store_set_bytes(text.as_bytes())
+}
+
+/// Durable Cairn: set the current value from raw bytes (saving the old as
+/// previous). Persisted. Used by the Dezh-IR `cairn_put` host call.
+pub fn store_set_bytes(bytes: &[u8]) -> Option<()> {
     let base = find_block()?;
     init(base);
     rw(base, 0, false); // read current
     rw(base, 1, true); // persist it as previous
-    set_data(text.as_bytes());
+    set_data(bytes);
     rw(base, 0, true);
     Some(())
+}
+
+/// Durable Cairn: copy the current value (up to the first NUL) into `buf`,
+/// returning the number of bytes written. Used by `cairn_get`.
+pub fn store_get_into(buf: &mut [u8]) -> Option<usize> {
+    let base = find_block()?;
+    init(base);
+    rw(base, 0, false);
+    let s = data_str().as_bytes();
+    let n = s.len().min(buf.len());
+    buf[..n].copy_from_slice(&s[..n]);
+    Some(n)
 }
 
 /// Durable Cairn: read the current value.
