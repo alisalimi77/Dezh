@@ -36,6 +36,14 @@ boundary every earlier spike ran around.
   context switch (`utrap`) saves/restores every task; tasks cooperate via a
   `yield` syscall and their output interleaves. (Cooperative for now; timer
   preemption is a planned refinement.)
+- **Capability-passing IPC** (`ipc`): the microkernel keystone. One task sends
+  another a message carrying a *delegated* capability; the kernel enforces that
+  a sender can only delegate authority it holds (attenuation, never widening).
+  Demo: a `service` task starts with no authority and is denied when it tries to
+  print; an `agent` task then delegates its `PRINT` capability over IPC, and only
+  then can the service print. This is how agents call services and spawn
+  sub-agents with reduced authority — the foundation for the agent-first OS
+  (D008/D013). (Zero-copy object handoff per D018 is a later optimization.)
 - **Pol / Linux personality** (`linux`): a U-mode app speaking the real Linux
   riscv64 syscall ABI (`write`=64, `exit`=93) runs unmodified — the kernel's Pol
   layer translates each Linux syscall into a capability-checked Dezh action, and
@@ -109,8 +117,12 @@ get denied at the kernel boundary, then control return to the console. `rogue`
 spawns a task that writes the UART directly; watch it take a page fault and get
 killed while the console survives. `multi` runs three cooperative tasks that
 interleave via `yield`. `linux` runs a Linux-ABI app through the Pol layer
-(watch `close()` come back as `ENOSYS`). `bench` measures the ecall round-trip
-cost (see [BENCH.md](BENCH.md) for the real-hardware comparison vs Linux).
+(watch `close()` come back as `ENOSYS`). `ipc` runs an agent that delegates its
+`PRINT` capability to a no-authority service over a message (watch the service be
+denied, then succeed once the capability is delegated). `bench` measures the
+ecall round-trip cost (see [BENCH.md](BENCH.md) for the real-hardware comparison
+vs Linux). `ipc`
+shows an agent delegating a capability to a service over a message.
 
 ## Not yet
 

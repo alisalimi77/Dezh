@@ -411,6 +411,8 @@ const SYS_UPTIME: usize = 2;
 const SYS_YIELD: usize = 3;
 const SYS_NULL: usize = 4; // minimal syscall (returns immediately) — for benchmarking
 const SYS_REPORT: usize = 5; // report a benchmark result (a0=ticks, a1=iterations)
+const SYS_SEND: usize = 6; // IPC: send payload + granted capability to a task
+const SYS_RECV: usize = 7; // IPC: block until a message, receive payload + caps
 const SYS_DENIED: usize = usize::MAX; // result sentinel for "capability not held"
 
 // --- Per-task capabilities (what the running U-mode task is allowed to do). --
@@ -662,8 +664,29 @@ const MAX_TASKS: usize = 4;
 enum TaskState {
     Unused,
     Ready,
+    Blocked, // waiting on msg_recv until a message arrives
     Done,
 }
+
+// One-slot mailbox per task for capability-passing IPC. A message carries a
+// small payload plus a *granted* capability set (attenuated to what the sender
+// holds). This is the microkernel keystone: services and sub-agents get
+// authority only because someone delegated it to them over IPC.
+#[derive(Clone, Copy)]
+struct Mailbox {
+    full: bool,
+    from: usize,
+    len: usize,
+    grant: usize,
+    buf: [u8; 64],
+}
+static mut MBOX: [Mailbox; MAX_TASKS] = [Mailbox {
+    full: false,
+    from: 0,
+    len: 0,
+    grant: 0,
+    buf: [0; 64],
+}; MAX_TASKS];
 
 static mut FRAMES: [[usize; 32]; MAX_TASKS] = [[0; 32]; MAX_TASKS];
 static mut TSTATE: [TaskState; MAX_TASKS] = [TaskState::Unused; MAX_TASKS];
@@ -691,6 +714,7 @@ const LINUX_ENOSYS: usize = (-38i64) as usize;
 // sp=x2 -> 1, sepc -> 31.
 const F_A0: usize = 9;
 const F_A1: usize = 10;
+const F_A3: usize = 12;
 const F_A7: usize = 16;
 const F_SP: usize = 1;
 const F_SEPC: usize = 31;
@@ -810,6 +834,7 @@ extern "C" fn utrap_handler(frame_ptr: *mut usize) -> *const usize {
                         }
                         frame[F_A0] = 0;
                     } else {
+                        kprintln!("  [kernel] DENIED print: task {cur} holds no PRINT capability");
                         frame[F_A0] = SYS_DENIED;
                     }
                     return frame_ptr;
@@ -841,6 +866,50 @@ extern "C" fn utrap_handler(frame_ptr: *mut usize) -> *const usize {
                     frame[F_A0] = 0;
                     return frame_ptr;
                 }
+                SYS_SEND => {
+                    // msg_send(to=a0, ptr=a1, len=a2, grant_caps=a3)
+                    let to = frame[F_A0];
+                    let len = frame[F_A2].min(64);
+                    let requested = frame[F_A3];
+                    if to >= MAX_TASKS || TSTATE[to] == TaskState::Unused {
+                        frame[F_A0] = SYS_DENIED;
+                        return frame_ptr;
+                    }
+                    // ATTENUATION: a sender can only delegate capabilities it
+                    // itself holds — never widen. (caps = sender's TCAPS.)
+                    let granted = requested & caps;
+                    let src = core::slice::from_raw_parts(frame[F_A1] as *const u8, len);
+                    MBOX[to].buf[..len].copy_from_slice(src);
+                    MBOX[to].len = len;
+                    MBOX[to].from = cur;
+                    MBOX[to].grant = granted;
+                    MBOX[to].full = true;
+                    if TSTATE[to] == TaskState::Blocked {
+                        TSTATE[to] = TaskState::Ready;
+                    }
+                    frame[F_A0] = 0;
+                    return frame_ptr;
+                }
+                SYS_RECV => {
+                    // msg_recv(dest=a0, dest_cap=a1) -> bytes received in a0.
+                    // Blocks (restartably) until a message is present.
+                    if MBOX[cur].full {
+                        let n = MBOX[cur].len.min(frame[F_A1]);
+                        let dst = core::slice::from_raw_parts_mut(frame[F_A0] as *mut u8, n);
+                        dst.copy_from_slice(&MBOX[cur].buf[..n]);
+                        // CAPABILITY TRANSFER: the receiver gains exactly the
+                        // capabilities the sender delegated (already attenuated).
+                        TCAPS[cur] |= MBOX[cur].grant;
+                        MBOX[cur].full = false;
+                        frame[F_A0] = n;
+                        return frame_ptr;
+                    } else {
+                        // Re-run the ecall when we are scheduled again.
+                        frame[F_SEPC] -= 4;
+                        TSTATE[cur] = TaskState::Blocked;
+                        return schedule_or_return();
+                    }
+                }
                 _ => {
                     frame[F_A0] = SYS_DENIED;
                     return frame_ptr;
@@ -861,6 +930,7 @@ fn run_tasks(specs: &[(usize, usize, u8)]) {
     unsafe {
         for i in 0..MAX_TASKS {
             TSTATE[i] = TaskState::Unused;
+            MBOX[i].full = false;
         }
         for (i, &(entry, caps, pers)) in specs.iter().take(n).enumerate() {
             let f = &mut FRAMES[i];
@@ -920,6 +990,59 @@ extern "C" fn worker_c() -> ! {
     sys_print(b"    [task C] step 2\n");
     sys_yield();
     sys_print(b"    [task C] finished\n");
+    sys_exit(0)
+}
+
+// --- IPC demo: an agent delegates a capability to a service over a message. ---
+// The service starts with NO authority; it cannot print until the agent sends it
+// a message that *delegates* the PRINT capability. The kernel enforces that the
+// agent can only delegate what it holds (attenuation, never widening) — the
+// microkernel keystone for agents calling services and spawning sub-agents.
+#[link_section = ".user.text"]
+#[inline(never)]
+fn sys_send(to: usize, s: &[u8], grant: usize) -> usize {
+    let mut a0 = to;
+    unsafe {
+        asm!("ecall", inout("a0") a0, in("a1") s.as_ptr() as usize, in("a2") s.len(), in("a3") grant, in("a7") SYS_SEND)
+    };
+    a0
+}
+
+#[link_section = ".user.text"]
+#[inline(never)]
+fn sys_recv(buf: &mut [u8]) -> usize {
+    let mut a0 = buf.as_mut_ptr() as usize;
+    unsafe { asm!("ecall", inout("a0") a0, in("a1") buf.len(), in("a7") SYS_RECV) };
+    a0 // bytes received
+}
+
+// Raw write wrapper: takes ptr+len so user code never calls a (non-inlined,
+// kernel-resident) core slicing helper — which a U-mode task cannot fetch.
+#[link_section = ".user.text"]
+#[inline(never)]
+fn sys_write(ptr: *const u8, len: usize) -> usize {
+    let mut a0 = ptr as usize;
+    unsafe { asm!("ecall", inout("a0") a0, in("a1") len, in("a7") SYS_PRINT) };
+    a0
+}
+
+#[link_section = ".user.text"]
+#[no_mangle]
+extern "C" fn service_task() -> ! {
+    // No authority yet: this print is denied by the kernel.
+    sys_print(b"    [service] (pre-IPC) I have no capabilities; this print is denied\n");
+    let mut buf = [0u8; 64];
+    let n = sys_recv(&mut buf); // blocks until the agent delegates a capability
+    sys_print(b"    [service] received a delegated PRINT capability via IPC; now I can print:\n");
+    sys_write(buf.as_ptr(), n); // echo the payload (no slice indexing)
+    sys_exit(0)
+}
+
+#[link_section = ".user.text"]
+#[no_mangle]
+extern "C" fn agent_task() -> ! {
+    sys_print(b"    [agent] delegating my PRINT capability to the service over IPC\n");
+    sys_send(0, b"    [service] <payload delivered with a delegated PRINT cap>\n", TASK_PRINT);
     sys_exit(0)
 }
 
@@ -1035,6 +1158,7 @@ const COMMANDS: &[CommandSpec] = &[
     CommandSpec { name: "multi", cap: cap::SPAWN, cap_name: "SPAWN", help: "run 3 cooperative U-mode tasks (round-robin)" },
     CommandSpec { name: "linux", cap: cap::SPAWN, cap_name: "SPAWN", help: "run a Linux-ABI app via the Pol personality" },
     CommandSpec { name: "bench", cap: cap::SPAWN, cap_name: "SPAWN", help: "measure ecall round-trip cost (U-mode task)" },
+    CommandSpec { name: "ipc", cap: cap::SPAWN, cap_name: "SPAWN", help: "agent delegates a capability to a service via IPC" },
     CommandSpec { name: "secret", cap: cap::SECRET, cap_name: "SECRET", help: "(needs a cap the console lacks)" },
     CommandSpec { name: "halt", cap: cap::HALT, cap_name: "HALT", help: "power off the machine" },
 ];
@@ -1142,6 +1266,15 @@ fn dispatch(cmd: &str, arg: &str, plan: &KernelPlan, memory: &[MemoryRegion], he
             kprintln!("[kernel] running ecall round-trip microbenchmark (500000 calls)...");
             run_tasks(&[(bench_task as usize, 0, PERS_NATIVE)]);
             kprintln!("[kernel] benchmark done");
+        }
+        "ipc" => {
+            kprintln!("[kernel] IPC: a no-authority service + an agent that delegates PRINT to it");
+            // task 0 = service (no caps), task 1 = agent (holds PRINT)
+            run_tasks(&[
+                (service_task as usize, 0, PERS_NATIVE),
+                (agent_task as usize, TASK_PRINT, PERS_NATIVE),
+            ]);
+            kprintln!("[kernel] IPC demo done; back in the console");
         }
         "halt" => {
             kprintln!("halting.");
