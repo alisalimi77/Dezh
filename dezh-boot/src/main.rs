@@ -413,6 +413,7 @@ const SYS_NULL: usize = 4; // minimal syscall (returns immediately) — for benc
 const SYS_REPORT: usize = 5; // report a benchmark result (a0=ticks, a1=iterations)
 const SYS_SEND: usize = 6; // IPC: send payload + granted capability to a task
 const SYS_RECV: usize = 7; // IPC: block until a message, receive payload + caps
+const SYS_PRINTNUM: usize = 8; // print a decimal number (kernel-side formatting)
 const SYS_DENIED: usize = usize::MAX; // result sentinel for "capability not held"
 
 // --- Per-task capabilities (what the running U-mode task is allowed to do). --
@@ -722,6 +723,7 @@ struct Mailbox {
     from: usize,
     len: usize,
     grant: usize,
+    word: usize, // a register-passed scalar (used by the value-IPC / Cairn demo)
     buf: [u8; 64],
 }
 static mut MBOX: [Mailbox; MAX_TASKS] = [Mailbox {
@@ -729,6 +731,7 @@ static mut MBOX: [Mailbox; MAX_TASKS] = [Mailbox {
     from: 0,
     len: 0,
     grant: 0,
+    word: 0,
     buf: [0; 64],
 }; MAX_TASKS];
 
@@ -759,6 +762,7 @@ const LINUX_ENOSYS: usize = (-38i64) as usize;
 const F_A0: usize = 9;
 const F_A1: usize = 10;
 const F_A3: usize = 12;
+const F_A4: usize = 13;
 const F_A7: usize = 16;
 const F_SP: usize = 1;
 const F_SEPC: usize = 31;
@@ -896,6 +900,11 @@ extern "C" fn utrap_handler(frame_ptr: *mut usize) -> *const usize {
                     // Minimal syscall: the cheapest possible round trip.
                     return frame_ptr;
                 }
+                SYS_PRINTNUM => {
+                    kprintln!("{}", frame[F_A0]);
+                    frame[F_A0] = 0;
+                    return frame_ptr;
+                }
                 SYS_REPORT => {
                     let ticks = frame[F_A0];
                     let iters = frame[F_A1];
@@ -923,11 +932,14 @@ extern "C" fn utrap_handler(frame_ptr: *mut usize) -> *const usize {
                     // ATTENUATION: a sender can only delegate capabilities it
                     // itself holds — never widen. (caps = sender's TCAPS.)
                     let granted = requested & caps;
-                    let src = core::slice::from_raw_parts(frame[F_A1] as *const u8, len);
-                    MBOX[to].buf[..len].copy_from_slice(src);
+                    if len > 0 {
+                        let src = core::slice::from_raw_parts(frame[F_A1] as *const u8, len);
+                        MBOX[to].buf[..len].copy_from_slice(src);
+                    }
                     MBOX[to].len = len;
                     MBOX[to].from = cur;
                     MBOX[to].grant = granted;
+                    MBOX[to].word = frame[F_A4]; // register-passed scalar (value-IPC)
                     MBOX[to].full = true;
                     if TSTATE[to] == TaskState::Blocked {
                         TSTATE[to] = TaskState::Ready;
@@ -940,13 +952,19 @@ extern "C" fn utrap_handler(frame_ptr: *mut usize) -> *const usize {
                     // Blocks (restartably) until a message is present.
                     if MBOX[cur].full {
                         let n = MBOX[cur].len.min(frame[F_A1]);
-                        let dst = core::slice::from_raw_parts_mut(frame[F_A0] as *mut u8, n);
-                        dst.copy_from_slice(&MBOX[cur].buf[..n]);
+                        if n > 0 {
+                            let dst = core::slice::from_raw_parts_mut(frame[F_A0] as *mut u8, n);
+                            dst.copy_from_slice(&MBOX[cur].buf[..n]);
+                        }
                         // CAPABILITY TRANSFER: the receiver gains exactly the
                         // capabilities the sender delegated (already attenuated).
                         TCAPS[cur] |= MBOX[cur].grant;
+                        let from = MBOX[cur].from;
+                        let word = MBOX[cur].word;
                         MBOX[cur].full = false;
-                        frame[F_A0] = n;
+                        frame[F_A0] = n; // bytes received
+                        frame[F_A1] = from; // sender task id (for replies)
+                        frame[F_A2] = word; // register-passed scalar (value-IPC)
                         return frame_ptr;
                     } else {
                         // Re-run the ecall when we are scheduled again.
@@ -1035,6 +1053,109 @@ extern "C" fn worker_c() -> ! {
     sys_print(b"    [task C] step 2\n");
     sys_yield();
     sys_print(b"    [task C] finished\n");
+    sys_exit(0)
+}
+
+// --- Cairn-style store as a user-space service, reached over IPC. -------------
+// The agent never touches the store's memory; it sends requests and the service
+// replies, all via capability-mediated IPC. The store keeps a current value and
+// one previous value, so an action can be *rolled back* — the agent-OS
+// differentiator (rollbackable actions, D013/D004), now on the kernel. (v0:
+// 1-deep history, ≤63-byte values; full content-addressing/provenance is the
+// dezh-cairn crate.)
+const OP_SET: usize = 0;
+const OP_GET: usize = 1;
+const OP_ROLLBACK: usize = 2;
+const OP_STOP: usize = 3;
+
+// Value-IPC: pass a request as a single register word, encoded (op << 32 | value).
+// No buffers means no compiler-emitted memcpy/memset — which a U-mode task cannot
+// call (those live in kernel text). Everything here is scalar.
+#[inline(always)]
+fn enc(op: usize, val: usize) -> usize {
+    (op << 32) | (val & 0xFFFF_FFFF)
+}
+
+#[link_section = ".user.text"]
+#[inline(never)]
+fn vsend(to: usize, word: usize) {
+    unsafe {
+        asm!("ecall", inout("a0") to => _, in("a1") 0usize, in("a2") 0usize, in("a3") 0usize, in("a4") word, in("a7") SYS_SEND)
+    };
+}
+
+#[link_section = ".user.text"]
+#[inline(never)]
+fn vrecv() -> (usize, usize) {
+    let word: usize;
+    let from: usize;
+    unsafe {
+        asm!("ecall", inout("a0") 0usize => _, inout("a1") 0usize => from, out("a2") word, in("a7") SYS_RECV)
+    };
+    (word, from)
+}
+
+#[link_section = ".user.text"]
+#[inline(never)]
+fn sys_printnum(v: usize) {
+    unsafe { asm!("ecall", inout("a0") v => _, in("a7") SYS_PRINTNUM) };
+}
+
+#[link_section = ".user.text"]
+#[no_mangle]
+extern "C" fn cairn_service() -> ! {
+    let mut cur: usize = 0;
+    let mut prev: usize = 0;
+    loop {
+        let (word, from) = vrecv();
+        let op = word >> 32;
+        let val = word & 0xFFFF_FFFF;
+        if op == OP_SET {
+            prev = cur; // keep one step of history so the action is rollbackable
+            cur = val;
+            vsend(from, 0);
+        } else if op == OP_GET {
+            vsend(from, cur);
+        } else if op == OP_ROLLBACK {
+            cur = prev;
+            vsend(from, 0);
+        } else {
+            vsend(from, 0);
+            sys_exit(0);
+        }
+    }
+}
+
+#[link_section = ".user.text"]
+#[no_mangle]
+extern "C" fn agent_cairn() -> ! {
+    let svc = 0usize; // the Cairn store service is task 0
+
+    sys_print(b"    [agent] set value to 100\n");
+    vsend(svc, enc(OP_SET, 100));
+    vrecv();
+
+    sys_print(b"    [agent] set value to 999 (a bad edit)\n");
+    vsend(svc, enc(OP_SET, 999));
+    vrecv();
+
+    vsend(svc, enc(OP_GET, 0));
+    let (v, _) = vrecv();
+    sys_print(b"    [agent] get -> ");
+    sys_printnum(v);
+
+    sys_print(b"    [agent] rolling back the bad edit\n");
+    vsend(svc, enc(OP_ROLLBACK, 0));
+    vrecv();
+
+    vsend(svc, enc(OP_GET, 0));
+    let (v2, _) = vrecv();
+    sys_print(b"    [agent] get -> ");
+    sys_printnum(v2);
+    sys_print(b"    [agent] (value restored by rollback) done\n");
+
+    vsend(svc, enc(OP_STOP, 0));
+    vrecv();
     sys_exit(0)
 }
 
@@ -1232,6 +1353,7 @@ const COMMANDS: &[CommandSpec] = &[
     CommandSpec { name: "linux", cap: cap::SPAWN, cap_name: "SPAWN", help: "run a Linux-ABI app via the Pol personality" },
     CommandSpec { name: "bench", cap: cap::SPAWN, cap_name: "SPAWN", help: "measure ecall round-trip cost (U-mode task)" },
     CommandSpec { name: "ipc", cap: cap::SPAWN, cap_name: "SPAWN", help: "agent delegates a capability to a service via IPC" },
+    CommandSpec { name: "cairn", cap: cap::SPAWN, cap_name: "SPAWN", help: "agent does a rollbackable action via a Cairn store service" },
     CommandSpec { name: "secret", cap: cap::SECRET, cap_name: "SECRET", help: "(needs a cap the console lacks)" },
     CommandSpec { name: "halt", cap: cap::HALT, cap_name: "HALT", help: "power off the machine" },
 ];
@@ -1357,6 +1479,15 @@ fn dispatch(cmd: &str, arg: &str, plan: &KernelPlan, memory: &[MemoryRegion], he
                 (agent_task as usize, TASK_PRINT, PERS_NATIVE),
             ]);
             kprintln!("[kernel] IPC demo done; back in the console");
+        }
+        "cairn" => {
+            kprintln!("[kernel] Cairn store service + an agent doing a rollbackable action over IPC");
+            // task 0 = cairn store service, task 1 = agent (holds PRINT)
+            run_tasks(&[
+                (cairn_service as usize, 0, PERS_NATIVE),
+                (agent_cairn as usize, TASK_PRINT, PERS_NATIVE),
+            ]);
+            kprintln!("[kernel] Cairn demo done; back in the console");
         }
         "halt" => {
             kprintln!("halting.");
