@@ -752,6 +752,10 @@ fn frame_free(f: usize) {
     }
 }
 
+/// The separate user program, compiled to its own riscv ELF by build.rs and
+/// embedded here. The loader maps it into a fresh address space at runtime.
+const USERPROG_ELF: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/userprog.elf"));
+
 // --- Cooperative multitasking scheduler -------------------------------------
 // Several U-mode tasks share the CPU by yielding (round-robin). Each has a full
 // register frame (saved/restored by utrap), its own 64 KiB stack carved from the
@@ -1703,6 +1707,10 @@ pub extern "C" fn kmain() -> ! {
             (free * FRAME_SIZE) / (1024 * 1024)
         );
     }
+    kprintln!(
+        "[dezh-boot] embedded user program: {} bytes (riscv ELF)",
+        USERPROG_ELF.len()
+    );
 
     let held = cap::INSPECT | cap::TIME | cap::ECHO | cap::HALT | cap::SPAWN;
     console(&plan, &memory, held);

@@ -1,0 +1,20 @@
+# A real, separately-compiled Dezh user program. Built to its own riscv ELF and
+# embedded in the kernel, then loaded into its own address space at runtime. It
+# carries its own runtime (memcpy/memset/panic), which is what ends the
+# "user code calling kernel-resident helpers" fault that baked-in tasks hit.
+[package]
+name = "userprog"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[[bin]]
+name = "userprog"
+path = "src/main.rs"
+
+[profile.release]
+panic = "abort"
+opt-level = "s"
+lto = true
+
+[workspace]
