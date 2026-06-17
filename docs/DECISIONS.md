@@ -78,8 +78,18 @@ Built bottom-up, each "not like Linux/Windows" where it matters:
 - **Drivers:** a device is reachable only through a **device capability** (its
   MMIO mapped into a process). Drivers are user processes holding device
   capabilities, **not in-kernel code** (anti-monolithic; D008).
-- **Deferred (next epic):** virtio-blk user-space driver + persistent Cairn
-  (durable rollback); per-segment W^X for loaded programs.
+- **Multi-process:** the scheduler switches per-process address spaces (satp);
+  multiple separately-loaded programs run concurrently, preemptively, isolated.
+- **Persistence:** a virtio-blk driver gives real disk I/O; a durable Cairn
+  store (current + previous sector) provides rollback that survives reboot.
+- **W^X:** loaded programs honor per-segment permissions (code R+X, data R+W;
+  never W+X).
+- **Agent-runtime v0:** the kernel interprets a portable Dezh-IR bytecode with
+  capability-gated effects (the substrate seed for D003/D016).
+- **Deferred (next epics):** a full wasm interpreter (wasmi, no_std) on the
+  kernel for real agents + multi-ISA; relocating the virtio-blk driver into a
+  user-space process (device-MMIO + DMA capabilities) so drivers are fully out
+  of the kernel.
 
 ## Canonical authority model
 
