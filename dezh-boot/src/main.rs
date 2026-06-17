@@ -140,7 +140,6 @@ restore_kernel_ctx:
 
 extern "C" {
     fn trap_entry();
-    fn enter_user(entry: usize, ustack: usize);
     fn restore_kernel_ctx() -> !;
 }
 
@@ -809,7 +808,7 @@ unsafe fn translate(root: usize, va: usize) -> usize {
 /// Two passes so that segments sharing a page (common: a small RX segment and an
 /// R segment in the same 4 KiB page) are handled correctly: map every covered
 /// page once, then copy each segment's bytes to the right intra-page offset.
-fn build_address_space() -> (usize, usize) {
+fn build_address_space(img: &[u8]) -> (usize, usize) {
     let root = frame_alloc();
     unsafe {
         let r = root as *mut u64;
@@ -819,7 +818,6 @@ fn build_address_space() -> (usize, usize) {
         *r.add(2) = ((l1_pa >> 12) << 10) | PTE_V;
     }
 
-    let img = USERPROG_ELF;
     let entry = u64_at(img, 24) as usize;
     let phoff = u64_at(img, 32) as usize;
     let phentsize = u16_at(img, 54) as usize;
@@ -880,28 +878,14 @@ fn build_address_space() -> (usize, usize) {
     (root, entry)
 }
 
-/// Load and run the embedded program in its own address space, with exactly the
-/// capabilities granted (zero ambient authority — no fork, no inheritance).
-fn spawn_program(caps: usize) {
-    // Don't expose any baked-task stack region to the loaded process.
-    set_active_task_mem(usize::MAX);
-    let (root, entry) = build_address_space();
-    kprintln!("[kernel] loaded: entry={entry:#x}, addr-space root={root:#x}");
-    CURRENT_TASK_CAPS.store(caps, Ordering::SeqCst);
-    let proc_satp = (8u64 << 60) | ((root as u64) >> 12);
-    let kernel_satp = (8u64 << 60) | ((core::ptr::addr_of!(ROOT) as u64) >> 12);
-    unsafe {
-        asm!("csrw stvec, {}", in(reg) trap_entry as usize); // single-process trap path
-        asm!("csrc sie, {}", in(reg) STIE); // no preemption for this one-shot load
-        asm!("sfence.vma");
-        asm!("csrw satp, {}", in(reg) proc_satp);
-        asm!("sfence.vma");
-        enter_user(entry, USER_STACK_TOP); // returns via restore_kernel_ctx on sys_exit
-        asm!("csrw satp, {}", in(reg) kernel_satp);
-        asm!("sfence.vma");
-        asm!("csrs sie, {}", in(reg) STIE);
-        asm!("csrw stvec, {}", in(reg) trap_entry as usize);
-    }
+/// The kernel's own satp (the global identity address space the console runs in).
+fn kernel_satp() -> usize {
+    (8usize << 60) | ((core::ptr::addr_of!(ROOT) as usize) >> 12)
+}
+
+/// satp value for a process whose page table root is at `root`.
+fn proc_satp(root: usize) -> usize {
+    (8usize << 60) | (root >> 12)
 }
 
 // --- Cooperative multitasking scheduler -------------------------------------
@@ -945,6 +929,7 @@ static mut FRAMES: [[usize; 32]; MAX_TASKS] = [[0; 32]; MAX_TASKS];
 static mut TSTATE: [TaskState; MAX_TASKS] = [TaskState::Unused; MAX_TASKS];
 static mut TCAPS: [usize; MAX_TASKS] = [0; MAX_TASKS];
 static mut TPERS: [u8; MAX_TASKS] = [0; MAX_TASKS];
+static mut TSATP: [usize; MAX_TASKS] = [0; MAX_TASKS]; // each task's address space (satp)
 static mut CURRENT: usize = 0;
 
 // A task's syscall personality: which ABI its `ecall`s speak.
@@ -994,6 +979,10 @@ unsafe fn schedule_or_return() -> *const usize {
         Some(i) => {
             CURRENT = i;
             set_active_task_mem(i); // give the new task its private stack, hide others
+            // Switch to the task's address space (own satp for a loaded process,
+            // the shared kernel satp for a baked task).
+            asm!("csrw satp, {}", in(reg) TSATP[i]);
+            asm!("sfence.vma");
             frame_ptr(i) as *const usize
         }
         None => restore_kernel_ctx(),
@@ -1216,6 +1205,7 @@ fn run_tasks(specs: &[(usize, usize, u8)]) {
             f[F_SP] = task_stack_top(i); // each task owns a private 2 MiB stack region
             TCAPS[i] = caps;
             TPERS[i] = pers;
+            TSATP[i] = kernel_satp(); // baked tasks share the kernel address space
             TSTATE[i] = TaskState::Ready;
         }
         CURRENT = 0;
@@ -1227,6 +1217,46 @@ fn run_tasks(specs: &[(usize, usize, u8)]) {
         // Returned via restore_kernel_ctx once every task is Done.
         asm!("csrw stvec, {}", in(reg) trap_entry as usize);
         sbi_set_timer(rdtime() + TIMER_DELTA); // restore the console uptime cadence
+    }
+}
+
+/// Load and run several separate programs as real processes: each gets its own
+/// ELF, its own address space (satp), an id in a0, and a capability set. They
+/// run concurrently under the preemptive scheduler, isolated from one another,
+/// and return to the console once all have exited. Zero ambient authority — a
+/// process holds only the capabilities passed here (no fork).
+fn run_processes(specs: &[(&[u8], usize, usize)]) {
+    let n = specs.len().min(MAX_TASKS);
+    unsafe {
+        // A loaded process must not see any baked-task stack region.
+        set_active_task_mem(usize::MAX);
+        for i in 0..MAX_TASKS {
+            TSTATE[i] = TaskState::Unused;
+            MBOX[i].full = false;
+        }
+        for (i, &(elf, caps, arg)) in specs.iter().take(n).enumerate() {
+            let (root, entry) = build_address_space(elf);
+            let f = &mut FRAMES[i];
+            *f = [0; 32];
+            f[F_SEPC] = entry;
+            f[F_SP] = USER_STACK_TOP; // each process has its own stack in its own space
+            f[F_A0] = arg; // id passed to the program in a0
+            TCAPS[i] = caps;
+            TPERS[i] = PERS_NATIVE;
+            TSATP[i] = proc_satp(root);
+            TSTATE[i] = TaskState::Ready;
+        }
+        CURRENT = 0;
+        asm!("csrw stvec, {}", in(reg) utrap as usize);
+        sbi_set_timer(rdtime() + QUANTUM);
+        asm!("csrw satp, {}", in(reg) TSATP[0]); // enter the first process's address space
+        asm!("sfence.vma");
+        run_first(frame_ptr(0) as *const usize);
+        // Back in the kernel address space once every process has exited.
+        asm!("csrw satp, {}", in(reg) kernel_satp());
+        asm!("sfence.vma");
+        asm!("csrw stvec, {}", in(reg) trap_entry as usize);
+        sbi_set_timer(rdtime() + TIMER_DELTA);
     }
 }
 
@@ -1597,6 +1627,7 @@ const COMMANDS: &[CommandSpec] = &[
     CommandSpec { name: "echo", cap: cap::ECHO, cap_name: "ECHO", help: "echo <text>" },
     CommandSpec { name: "run", cap: cap::SPAWN, cap_name: "SPAWN", help: "run a capability-limited U-mode task" },
     CommandSpec { name: "load", cap: cap::SPAWN, cap_name: "SPAWN", help: "load a separate program into its own address space" },
+    CommandSpec { name: "procs", cap: cap::SPAWN, cap_name: "SPAWN", help: "run two separate programs concurrently (own address spaces)" },
     CommandSpec { name: "rogue", cap: cap::SPAWN, cap_name: "SPAWN", help: "run a task that tries forbidden memory (gets killed)" },
     CommandSpec { name: "multi", cap: cap::SPAWN, cap_name: "SPAWN", help: "run 3 cooperative U-mode tasks (round-robin)" },
     CommandSpec { name: "spy", cap: cap::SPAWN, cap_name: "SPAWN", help: "prove a task cannot read another task's memory" },
@@ -1704,9 +1735,17 @@ fn dispatch(cmd: &str, arg: &str, plan: &KernelPlan, memory: &[MemoryRegion], he
             kprintln!("[kernel] task returned; back in the S-mode console");
         }
         "load" => {
-            kprintln!("[kernel] loading a separate program into a fresh address space (cap: PRINT)");
-            spawn_program(TASK_PRINT);
+            kprintln!("[kernel] loading a separate program into its own address space (cap: PRINT)");
+            run_processes(&[(USERPROG_ELF, TASK_PRINT, 0)]);
             kprintln!("[kernel] program exited; back in the console");
+        }
+        "procs" => {
+            kprintln!("[kernel] loading TWO copies as separate processes (own address spaces)");
+            run_processes(&[
+                (USERPROG_ELF, TASK_PRINT, 1),
+                (USERPROG_ELF, TASK_PRINT, 2),
+            ]);
+            kprintln!("[kernel] all processes exited; back in the console");
         }
         "rogue" => {
             kprintln!("[kernel] spawning a rogue U-mode task (it will try to touch the UART directly)");
