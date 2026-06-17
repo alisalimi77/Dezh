@@ -616,29 +616,73 @@ const PTE_U: u64 = 1 << 4;
 const PTE_A: u64 = 1 << 6;
 const PTE_D: u64 = 1 << 7;
 
-fn leaf(pa: u64, user: bool) -> u64 {
-    let mut flags = PTE_V | PTE_R | PTE_W | PTE_X | PTE_A | PTE_D;
-    if user {
-        flags |= PTE_U;
-    }
-    ((pa >> 12) << 10) | flags
+const RAM_BASE: u64 = 0x8000_0000;
+const MEGA: u64 = 0x20_0000; // 2 MiB megapage
+
+fn pte(pa: u64, flags: u64) -> u64 {
+    ((pa >> 12) << 10) | PTE_V | PTE_A | PTE_D | flags
+}
+
+/// Base of the per-task stack regions: the 2 MiB megapage right after the shared
+/// code region. Task `i` owns the megapage `STACK_BASE + i*2MiB`.
+fn stack_base() -> u64 {
+    user_region().1 as u64
+}
+
+fn task_stack_top(i: usize) -> usize {
+    (stack_base() + (i as u64 + 1) * MEGA) as usize
+}
+
+fn stack_region_l1_index(i: usize) -> usize {
+    (((stack_base() - RAM_BASE) / MEGA) as usize) + i
 }
 
 fn build_page_tables() {
     let (us, ue) = user_region();
+    let code_lo = us as u64;
+    let code_hi = ue as u64;
+    let sbase = stack_base();
+    let stacks_hi = sbase + (MAX_TASKS as u64) * MEGA;
     unsafe {
         let root = &mut (*core::ptr::addr_of_mut!(ROOT)).0;
         let l1 = &mut (*core::ptr::addr_of_mut!(L1)).0;
         // 0x0..0x4000_0000 as one kernel-only gigapage (covers UART + finisher).
-        root[0] = leaf(0x0, false);
+        root[0] = pte(0x0, PTE_R | PTE_W | PTE_X); // U=0
         // 0x8000_0000..0xC000_0000 via an L1 table of 2 MiB megapages.
         let l1_pa = core::ptr::addr_of!(L1) as u64;
         root[2] = ((l1_pa >> 12) << 10) | PTE_V; // non-leaf pointer
         for i in 0..512usize {
-            let pa = 0x8000_0000u64 + (i as u64) * 0x20_0000;
-            let is_user = (pa as usize) >= us && (pa as usize) < ue;
-            l1[i] = leaf(pa, is_user);
+            let pa = RAM_BASE + (i as u64) * MEGA;
+            let flags = if pa >= code_lo && pa < code_hi {
+                // Shared task code: read+execute for U-mode, no write (W^X).
+                PTE_R | PTE_X | PTE_U
+            } else if pa >= sbase && pa < stacks_hi {
+                // Per-task stack: read+write, U bit toggled per running task.
+                PTE_R | PTE_W
+            } else {
+                // Kernel + MMIO: supervisor-only.
+                PTE_R | PTE_W | PTE_X
+            };
+            l1[i] = pte(pa, flags);
         }
+    }
+}
+
+/// Make only `active`'s stack region U-accessible; clear U on every other task's
+/// stack. This is what isolates tasks from each other: while task `i` runs, it
+/// can touch its own stack but a load/store into another task's region faults.
+fn set_active_task_mem(active: usize) {
+    unsafe {
+        let l1 = &mut (*core::ptr::addr_of_mut!(L1)).0;
+        for i in 0..MAX_TASKS {
+            let idx = stack_region_l1_index(i);
+            if i == active {
+                l1[idx] |= PTE_U;
+            } else {
+                l1[idx] &= !PTE_U;
+            }
+        }
+        asm!("sfence.vma");
     }
 }
 
@@ -739,6 +783,7 @@ unsafe fn schedule_or_return() -> *const usize {
     match pick_next() {
         Some(i) => {
             CURRENT = i;
+            set_active_task_mem(i); // give the new task its private stack, hide others
             frame_ptr(i) as *const usize
         }
         None => restore_kernel_ctx(),
@@ -925,7 +970,6 @@ extern "C" fn utrap_handler(frame_ptr: *mut usize) -> *const usize {
 /// Set up `specs` as Ready tasks and run them round-robin until all finish.
 /// Each spec is (entry, caps). Returns when every task is Done.
 fn run_tasks(specs: &[(usize, usize, u8)]) {
-    let (_us, ue) = user_region();
     let n = specs.len().min(MAX_TASKS);
     unsafe {
         for i in 0..MAX_TASKS {
@@ -936,12 +980,13 @@ fn run_tasks(specs: &[(usize, usize, u8)]) {
             let f = &mut FRAMES[i];
             *f = [0; 32];
             f[F_SEPC] = entry;
-            f[F_SP] = ue - i * 0x1_0000; // 64 KiB stack per task, top-down
+            f[F_SP] = task_stack_top(i); // each task owns a private 2 MiB stack region
             TCAPS[i] = caps;
             TPERS[i] = pers;
             TSTATE[i] = TaskState::Ready;
         }
         CURRENT = 0;
+        set_active_task_mem(0); // expose only task 0's stack region to start
         // Switch to the multitasking trap path; mask the timer (cooperative).
         asm!("csrw stvec, {}", in(reg) utrap as usize);
         asm!("csrc sie, {}", in(reg) STIE);
@@ -990,6 +1035,33 @@ extern "C" fn worker_c() -> ! {
     sys_print(b"    [task C] step 2\n");
     sys_yield();
     sys_print(b"    [task C] finished\n");
+    sys_exit(0)
+}
+
+// --- Isolation demo: one task cannot read another task's private memory. ------
+// task0 (victim) owns its stack region; task1 (spy) tries to read it directly.
+// While the spy runs, the victim's region is U=0, so the load page-faults and the
+// kernel kills only the spy — inter-task no-ambient-authority at the hardware
+// memory boundary, which is what makes the IPC layer the *only* way to share.
+#[link_section = ".user.text"]
+#[no_mangle]
+extern "C" fn victim_task() -> ! {
+    sys_print(b"    [task0] my stack is private; only I can touch my region\n");
+    sys_yield(); // let the spy try
+    sys_print(b"    [task0] still alive after the spy was killed\n");
+    sys_exit(0)
+}
+
+#[link_section = ".user.text"]
+#[no_mangle]
+extern "C" fn spy_task() -> ! {
+    // Read straight into task0's stack region (base = stack_base(); see the
+    // kernel log). It is U=0 while we run, so this load faults and we are killed.
+    let v: u64;
+    unsafe { asm!("ld {0}, 0({1})", out(reg) v, in(reg) 0x8060_0800usize) };
+    let _ = v;
+    let msg = b"    [spy] (BUG) I read another task's memory!\n";
+    sys_write(msg.as_ptr(), msg.len());
     sys_exit(0)
 }
 
@@ -1156,6 +1228,7 @@ const COMMANDS: &[CommandSpec] = &[
     CommandSpec { name: "run", cap: cap::SPAWN, cap_name: "SPAWN", help: "run a capability-limited U-mode task" },
     CommandSpec { name: "rogue", cap: cap::SPAWN, cap_name: "SPAWN", help: "run a task that tries forbidden memory (gets killed)" },
     CommandSpec { name: "multi", cap: cap::SPAWN, cap_name: "SPAWN", help: "run 3 cooperative U-mode tasks (round-robin)" },
+    CommandSpec { name: "spy", cap: cap::SPAWN, cap_name: "SPAWN", help: "prove a task cannot read another task's memory" },
     CommandSpec { name: "linux", cap: cap::SPAWN, cap_name: "SPAWN", help: "run a Linux-ABI app via the Pol personality" },
     CommandSpec { name: "bench", cap: cap::SPAWN, cap_name: "SPAWN", help: "measure ecall round-trip cost (U-mode task)" },
     CommandSpec { name: "ipc", cap: cap::SPAWN, cap_name: "SPAWN", help: "agent delegates a capability to a service via IPC" },
@@ -1266,6 +1339,15 @@ fn dispatch(cmd: &str, arg: &str, plan: &KernelPlan, memory: &[MemoryRegion], he
             kprintln!("[kernel] running ecall round-trip microbenchmark (500000 calls)...");
             run_tasks(&[(bench_task as usize, 0, PERS_NATIVE)]);
             kprintln!("[kernel] benchmark done");
+        }
+        "spy" => {
+            kprintln!("[kernel] isolation: task0 owns a private stack; task1 (spy) tries to read it");
+            kprintln!("[kernel] (task0 stack region base = {:#x})", stack_base());
+            run_tasks(&[
+                (victim_task as usize, TASK_PRINT, PERS_NATIVE),
+                (spy_task as usize, 0, PERS_NATIVE),
+            ]);
+            kprintln!("[kernel] isolation demo done");
         }
         "ipc" => {
             kprintln!("[kernel] IPC: a no-authority service + an agent that delegates PRINT to it");
