@@ -493,14 +493,16 @@ extern "C" fn trap_handler(frame: *mut TrapFrame) {
             asm!("csrr {}, stval", out(reg) stval);
             asm!("csrr {}, sstatus", out(reg) sstatus);
         }
+        let sepc: usize;
+        unsafe { asm!("csrr {}, sepc", out(reg) sepc) };
         // SPP == 0 means the trap came from U-mode.
         if (sstatus >> 8) & 1 == 0 {
             kprintln!(
-                "  [kernel] DENIED: task faulted (scause {code}) on {stval:#x} (outside its memory grant) — killing task"
+                "  [kernel] DENIED: task faulted (scause {code}) at pc={sepc:#x} on {stval:#x} — killing task"
             );
             unsafe { restore_kernel_ctx() }
         }
-        kprintln!("\n[dezh-boot] kernel page fault on {stval:#x} (scause {code}) — halting");
+        kprintln!("\n[dezh-boot] kernel page fault at pc={sepc:#x} on {stval:#x} (scause {code}) — halting");
         shutdown(FINISH_FAIL);
     }
 
@@ -584,20 +586,6 @@ extern "C" fn rogue_task() -> ! {
     // Unreachable: the store above faults and the kernel never resumes us here.
     sys_print(b"  [task] (BUG) ambient UART write was NOT blocked\n");
     sys_exit(0)
-}
-
-/// Spawn a task at `entry` in U-mode with `task_caps`, then return when it exits
-/// or is killed.
-fn spawn_task(entry: usize, task_caps: usize) {
-    CURRENT_TASK_CAPS.store(task_caps, Ordering::SeqCst);
-    // Mask the timer for the task window so the only trap is the synchronous
-    // ecall / fault (no nested interrupt on the user stack).
-    unsafe { asm!("csrc sie, {}", in(reg) STIE) };
-    let (_start, end) = user_region();
-    let ustack = end; // user stack grows down from the top of the U=1 region
-    unsafe { enter_user(entry, ustack) };
-    // Back in S-mode via restore_kernel_ctx; re-arm the timer.
-    unsafe { asm!("csrs sie, {}", in(reg) STIE) };
 }
 
 // --- Sv39 paging: confine U-mode tasks to their own region. -----------------
@@ -755,6 +743,160 @@ fn frame_free(f: usize) {
 /// The separate user program, compiled to its own riscv ELF by build.rs and
 /// embedded here. The loader maps it into a fresh address space at runtime.
 const USERPROG_ELF: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/userprog.elf"));
+
+// --- Program loader + per-process address space ------------------------------
+// A loaded program gets its OWN page table (satp) built from frames: the kernel
+// is mapped (U=0) so traps work, and the program's segments + a stack are mapped
+// U=1. This is the proper foundation for running real, separately-built programs
+// (and ends the "user calls kernel-resident helpers" fault for good).
+
+fn u16_at(b: &[u8], o: usize) -> u16 {
+    u16::from_le_bytes([b[o], b[o + 1]])
+}
+fn u32_at(b: &[u8], o: usize) -> u32 {
+    u32::from_le_bytes([b[o], b[o + 1], b[o + 2], b[o + 3]])
+}
+fn u64_at(b: &[u8], o: usize) -> u64 {
+    let mut a = [0u8; 8];
+    let mut i = 0;
+    while i < 8 {
+        a[i] = b[o + i];
+        i += 1;
+    }
+    u64::from_le_bytes(a)
+}
+
+/// Walk one level of an Sv39 table, allocating the next-level table if absent.
+unsafe fn walk_alloc(table: *mut u64, idx: usize) -> *mut u64 {
+    let e = *table.add(idx);
+    if e & PTE_V != 0 {
+        (((e >> 10) << 12) as usize) as *mut u64 // existing next table
+    } else {
+        let frame = frame_alloc();
+        *table.add(idx) = ((frame as u64 >> 12) << 10) | PTE_V; // non-leaf
+        frame as *mut u64
+    }
+}
+
+/// Map one 4 KiB page va->pa with `flags` in the page table rooted at `root`.
+fn map_page(root: usize, va: usize, pa: usize, flags: u64) {
+    let vpn2 = (va >> 30) & 0x1ff;
+    let vpn1 = (va >> 21) & 0x1ff;
+    let vpn0 = (va >> 12) & 0x1ff;
+    unsafe {
+        let l1 = walk_alloc(root as *mut u64, vpn2);
+        let l0 = walk_alloc(l1, vpn1);
+        *l0.add(vpn0) = pte(pa as u64, flags);
+    }
+}
+
+const USER_STACK_TOP: usize = 0x4070_0000;
+const USER_STACK_BOTTOM: usize = 0x4060_0000;
+
+/// Walk a page table to the frame backing `va` (page must already be mapped).
+unsafe fn translate(root: usize, va: usize) -> usize {
+    let vpn2 = (va >> 30) & 0x1ff;
+    let vpn1 = (va >> 21) & 0x1ff;
+    let vpn0 = (va >> 12) & 0x1ff;
+    let l1 = (((*(root as *const u64).add(vpn2)) >> 10) << 12) as usize;
+    let l0 = (((*(l1 as *const u64).add(vpn1)) >> 10) << 12) as usize;
+    let leaf = *(l0 as *const u64).add(vpn0);
+    ((leaf >> 10) << 12) as usize
+}
+
+/// Build a fresh address space for the embedded program. Returns (satp root, entry).
+///
+/// Two passes so that segments sharing a page (common: a small RX segment and an
+/// R segment in the same 4 KiB page) are handled correctly: map every covered
+/// page once, then copy each segment's bytes to the right intra-page offset.
+fn build_address_space() -> (usize, usize) {
+    let root = frame_alloc();
+    unsafe {
+        let r = root as *mut u64;
+        // Kernel mappings so traps resolve while this satp is active (U=0):
+        *r.add(0) = pte(0x0, PTE_R | PTE_W | PTE_X); // 0..1 GiB gigapage (UART etc)
+        let l1_pa = core::ptr::addr_of!(L1) as u64; // share the kernel's 0x8000_0000 L1
+        *r.add(2) = ((l1_pa >> 12) << 10) | PTE_V;
+    }
+
+    let img = USERPROG_ELF;
+    let entry = u64_at(img, 24) as usize;
+    let phoff = u64_at(img, 32) as usize;
+    let phentsize = u16_at(img, 54) as usize;
+    let phnum = u16_at(img, 56) as usize;
+
+    // Pass 1: find the page-aligned VA span of all PT_LOAD segments and map it.
+    let mut lo = usize::MAX;
+    let mut hi = 0usize;
+    for i in 0..phnum {
+        let ph = phoff + i * phentsize;
+        if u32_at(img, ph) != 1 {
+            continue;
+        }
+        let pv = u64_at(img, ph + 16) as usize;
+        let pm = u64_at(img, ph + 40) as usize;
+        lo = lo.min(pv & !0xfff);
+        hi = hi.max((pv + pm + 0xfff) & !0xfff);
+    }
+    let mut va = lo;
+    while va < hi {
+        let frame = frame_alloc();
+        map_page(root, va, frame, PTE_U | PTE_R | PTE_W | PTE_X);
+        va += FRAME_SIZE;
+    }
+
+    // Pass 2: copy each segment's file bytes to the correct virtual addresses.
+    for i in 0..phnum {
+        let ph = phoff + i * phentsize;
+        if u32_at(img, ph) != 1 {
+            continue;
+        }
+        let poff = u64_at(img, ph + 8) as usize;
+        let pvaddr = u64_at(img, ph + 16) as usize;
+        let pfilesz = u64_at(img, ph + 32) as usize;
+        let mut k = 0usize;
+        while k < pfilesz {
+            let dva = pvaddr + k;
+            let frame = unsafe { translate(root, dva & !0xfff) };
+            unsafe { *((frame + (dva & 0xfff)) as *mut u8) = img[poff + k] };
+            k += 1;
+        }
+    }
+
+    // Map the user stack (U=1 RW).
+    let mut s = USER_STACK_BOTTOM;
+    while s < USER_STACK_TOP {
+        let frame = frame_alloc();
+        map_page(root, s, frame, PTE_U | PTE_R | PTE_W);
+        s += FRAME_SIZE;
+    }
+
+    (root, entry)
+}
+
+/// Load and run the embedded program in its own address space, with exactly the
+/// capabilities granted (zero ambient authority — no fork, no inheritance).
+fn spawn_program(caps: usize) {
+    // Don't expose any baked-task stack region to the loaded process.
+    set_active_task_mem(usize::MAX);
+    let (root, entry) = build_address_space();
+    kprintln!("[kernel] loaded: entry={entry:#x}, addr-space root={root:#x}");
+    CURRENT_TASK_CAPS.store(caps, Ordering::SeqCst);
+    let proc_satp = (8u64 << 60) | ((root as u64) >> 12);
+    let kernel_satp = (8u64 << 60) | ((core::ptr::addr_of!(ROOT) as u64) >> 12);
+    unsafe {
+        asm!("csrw stvec, {}", in(reg) trap_entry as usize); // single-process trap path
+        asm!("csrc sie, {}", in(reg) STIE); // no preemption for this one-shot load
+        asm!("sfence.vma");
+        asm!("csrw satp, {}", in(reg) proc_satp);
+        asm!("sfence.vma");
+        enter_user(entry, USER_STACK_TOP); // returns via restore_kernel_ctx on sys_exit
+        asm!("csrw satp, {}", in(reg) kernel_satp);
+        asm!("sfence.vma");
+        asm!("csrs sie, {}", in(reg) STIE);
+        asm!("csrw stvec, {}", in(reg) trap_entry as usize);
+    }
+}
 
 // --- Cooperative multitasking scheduler -------------------------------------
 // Several U-mode tasks share the CPU by yielding (round-robin). Each has a full
@@ -1448,6 +1590,7 @@ const COMMANDS: &[CommandSpec] = &[
     CommandSpec { name: "uptime", cap: cap::TIME, cap_name: "TIME", help: "show timer uptime" },
     CommandSpec { name: "echo", cap: cap::ECHO, cap_name: "ECHO", help: "echo <text>" },
     CommandSpec { name: "run", cap: cap::SPAWN, cap_name: "SPAWN", help: "run a capability-limited U-mode task" },
+    CommandSpec { name: "load", cap: cap::SPAWN, cap_name: "SPAWN", help: "load a separate program into its own address space" },
     CommandSpec { name: "rogue", cap: cap::SPAWN, cap_name: "SPAWN", help: "run a task that tries forbidden memory (gets killed)" },
     CommandSpec { name: "multi", cap: cap::SPAWN, cap_name: "SPAWN", help: "run 3 cooperative U-mode tasks (round-robin)" },
     CommandSpec { name: "spy", cap: cap::SPAWN, cap_name: "SPAWN", help: "prove a task cannot read another task's memory" },
@@ -1551,12 +1694,17 @@ fn dispatch(cmd: &str, arg: &str, plan: &KernelPlan, memory: &[MemoryRegion], he
         "echo" => kprintln!("{arg}"),
         "run" => {
             kprintln!("[kernel] spawning U-mode task; granted capability: PRINT (not TIME)");
-            spawn_task(user_task as usize, TASK_PRINT);
+            run_tasks(&[(user_task as usize, TASK_PRINT, PERS_NATIVE)]);
             kprintln!("[kernel] task returned; back in the S-mode console");
+        }
+        "load" => {
+            kprintln!("[kernel] loading a separate program into a fresh address space (cap: PRINT)");
+            spawn_program(TASK_PRINT);
+            kprintln!("[kernel] program exited; back in the console");
         }
         "rogue" => {
             kprintln!("[kernel] spawning a rogue U-mode task (it will try to touch the UART directly)");
-            spawn_task(rogue_task as usize, TASK_PRINT);
+            run_tasks(&[(rogue_task as usize, TASK_PRINT, PERS_NATIVE)]);
             kprintln!("[kernel] rogue task handled; console survived");
         }
         "multi" => {
