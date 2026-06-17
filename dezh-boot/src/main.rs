@@ -997,7 +997,28 @@ fn build_address_space(img: &[u8]) -> (usize, usize) {
     let mut va = lo;
     while va < hi {
         let frame = frame_alloc();
-        map_page(root, va, frame, PTE_U | PTE_R | PTE_W | PTE_X);
+        // W^X: derive permissions from the ELF segment flags covering this page —
+        // executable code is mapped R+X (never writable), data R+W (never
+        // executable). (Linux historically allowed W+X; we don't.)
+        let mut fl = PTE_U | PTE_R;
+        for i in 0..phnum {
+            let ph = phoff + i * phentsize;
+            if u32_at(img, ph) != 1 {
+                continue;
+            }
+            let pv = u64_at(img, ph + 16) as usize;
+            let pm = u64_at(img, ph + 40) as usize;
+            if va >= (pv & !0xfff) && va < ((pv + pm + 0xfff) & !0xfff) {
+                let pf = u32_at(img, ph + 4); // PF_X=1, PF_W=2, PF_R=4
+                if pf & 1 != 0 {
+                    fl |= PTE_X;
+                }
+                if pf & 2 != 0 {
+                    fl |= PTE_W;
+                }
+            }
+        }
+        map_page(root, va, frame, fl);
         va += FRAME_SIZE;
     }
 
