@@ -389,6 +389,7 @@ fn shutdown(code: u32) -> ! {
 // --- Timer (silent background uptime tick). --------------------------------
 const TIMER_DELTA: u64 = 1_000_000;
 const TIMER_HZ: u64 = 10;
+const QUANTUM: u64 = 50_000; // ~5 ms scheduler time slice for preemption
 const STIE: usize = 1 << 5; // supervisor timer interrupt enable (in `sie`)
 static TICKS: AtomicU64 = AtomicU64::new(0);
 
@@ -805,6 +806,15 @@ extern "C" fn utrap_handler(frame_ptr: *mut usize) -> *const usize {
     unsafe {
         let cur = CURRENT; // snapshot before any reschedule (avoids &static_mut)
         if interrupt {
+            // Supervisor timer = preemption: the running task's full frame is
+            // already saved, so round-robin to the next ready task. A task that
+            // never yields can no longer monopolize the CPU.
+            if code == 5 {
+                TICKS.fetch_add(1, Ordering::Relaxed);
+                sbi_set_timer(rdtime() + QUANTUM);
+                let _ = cur;
+                return schedule_or_return();
+            }
             kprintln!("\n[dezh-boot] unexpected interrupt in task (scause={scause:#x}) — halting");
             shutdown(FINISH_FAIL);
         }
@@ -1005,13 +1015,13 @@ fn run_tasks(specs: &[(usize, usize, u8)]) {
         }
         CURRENT = 0;
         set_active_task_mem(0); // expose only task 0's stack region to start
-        // Switch to the multitasking trap path; mask the timer (cooperative).
+        // Switch to the multitasking trap path and arm the preemption timer.
         asm!("csrw stvec, {}", in(reg) utrap as usize);
-        asm!("csrc sie, {}", in(reg) STIE);
+        sbi_set_timer(rdtime() + QUANTUM);
         run_first(frame_ptr(0) as *const usize);
         // Returned via restore_kernel_ctx once every task is Done.
         asm!("csrw stvec, {}", in(reg) trap_entry as usize);
-        asm!("csrs sie, {}", in(reg) STIE);
+        sbi_set_timer(rdtime() + TIMER_DELTA); // restore the console uptime cadence
     }
 }
 
@@ -1156,6 +1166,39 @@ extern "C" fn agent_cairn() -> ! {
 
     vsend(svc, enc(OP_STOP, 0));
     vrecv();
+    sys_exit(0)
+}
+
+// --- Preemption demo: CPU-bound tasks that never yield still interleave. ------
+// With cooperative scheduling, "A start, A end, B start, B end" (A hogs the CPU).
+// With timer preemption, "B start" appears before "A end" — the timer forces a
+// switch mid-loop, so one task can no longer monopolize the CPU (the safety
+// property needed before running untrusted agents).
+#[link_section = ".user.text"]
+#[inline(never)]
+fn busy(n: usize) {
+    let mut i = 0usize;
+    while i < n {
+        unsafe { asm!("nop") };
+        i += 1;
+    }
+}
+
+#[link_section = ".user.text"]
+#[no_mangle]
+extern "C" fn preempt_a() -> ! {
+    sys_print(b"    [A] start (busy loop, never yields)\n");
+    busy(8_000_000);
+    sys_print(b"    [A] end\n");
+    sys_exit(0)
+}
+
+#[link_section = ".user.text"]
+#[no_mangle]
+extern "C" fn preempt_b() -> ! {
+    sys_print(b"    [B] start (busy loop, never yields)\n");
+    busy(8_000_000);
+    sys_print(b"    [B] end\n");
     sys_exit(0)
 }
 
@@ -1350,6 +1393,7 @@ const COMMANDS: &[CommandSpec] = &[
     CommandSpec { name: "rogue", cap: cap::SPAWN, cap_name: "SPAWN", help: "run a task that tries forbidden memory (gets killed)" },
     CommandSpec { name: "multi", cap: cap::SPAWN, cap_name: "SPAWN", help: "run 3 cooperative U-mode tasks (round-robin)" },
     CommandSpec { name: "spy", cap: cap::SPAWN, cap_name: "SPAWN", help: "prove a task cannot read another task's memory" },
+    CommandSpec { name: "preempt", cap: cap::SPAWN, cap_name: "SPAWN", help: "two non-yielding tasks interleave via timer preemption" },
     CommandSpec { name: "linux", cap: cap::SPAWN, cap_name: "SPAWN", help: "run a Linux-ABI app via the Pol personality" },
     CommandSpec { name: "bench", cap: cap::SPAWN, cap_name: "SPAWN", help: "measure ecall round-trip cost (U-mode task)" },
     CommandSpec { name: "ipc", cap: cap::SPAWN, cap_name: "SPAWN", help: "agent delegates a capability to a service via IPC" },
@@ -1461,6 +1505,14 @@ fn dispatch(cmd: &str, arg: &str, plan: &KernelPlan, memory: &[MemoryRegion], he
             kprintln!("[kernel] running ecall round-trip microbenchmark (500000 calls)...");
             run_tasks(&[(bench_task as usize, 0, PERS_NATIVE)]);
             kprintln!("[kernel] benchmark done");
+        }
+        "preempt" => {
+            kprintln!("[kernel] two CPU-bound tasks that never yield (watch them interleave)");
+            run_tasks(&[
+                (preempt_a as usize, TASK_PRINT, PERS_NATIVE),
+                (preempt_b as usize, TASK_PRINT, PERS_NATIVE),
+            ]);
+            kprintln!("[kernel] preemption demo done");
         }
         "spy" => {
             kprintln!("[kernel] isolation: task0 owns a private stack; task1 (spy) tries to read it");

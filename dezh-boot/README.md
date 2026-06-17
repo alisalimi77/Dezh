@@ -34,8 +34,20 @@ boundary every earlier spike ran around.
 - **Multitasking + scheduler** (`multi`): several U-mode tasks share the CPU
   round-robin, each with its own stack and capability set. A full register
   context switch (`utrap`) saves/restores every task; tasks cooperate via a
-  `yield` syscall and their output interleaves. (Cooperative for now; timer
-  preemption is a planned refinement.)
+  `yield` syscall and their output interleaves.
+- **Per-task memory isolation** (`spy`): each task gets a private stack region
+  (U bit set only while it runs) plus a shared read-execute code region. A task
+  reading another task's memory page-faults and is killed — tasks are isolated
+  from *each other*, not just from the kernel, so capability-mediated IPC is the
+  only way to share.
+- **Timer preemption** (`preempt`): the scheduler is preemptive — a task that
+  never yields is forced off the CPU at the end of its time slice, so it cannot
+  monopolize the machine (the safety property needed before running untrusted
+  agents). Two busy-loop tasks interleave to prove it.
+- **Cairn store service** (`cairn`): an agent performs a *rollbackable* action
+  (set / bad-edit / rollback / read) by talking to a Cairn store service over
+  IPC — the store is a user-space service task, so the kernel stays minimal. The
+  agent-first OS differentiator (D004/D013) on bare metal.
 - **Capability-passing IPC** (`ipc`): the microkernel keystone. One task sends
   another a message carrying a *delegated* capability; the kernel enforces that
   a sender can only delegate authority it holds (attenuation, never widening).
