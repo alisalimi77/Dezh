@@ -19,7 +19,30 @@
 extern crate alloc;
 
 mod blk;
-mod ir;
+
+// The RISC-V implementation of the shared Dezh-core Host: capability check +
+// the side effect (kernel console). The Dezh-IR engine lives in dezh-core and
+// is identical across ISAs.
+struct KHost {
+    caps: u32,
+}
+impl dezh_core::ir::Host for KHost {
+    fn can(&self, cap: u32) -> bool {
+        self.caps & cap != 0
+    }
+    fn print_num(&mut self, v: i64) {
+        kprintln!("  [ir] print -> {v}");
+    }
+    fn print_str(&mut self, s: &[u8]) {
+        kprintln!("  [ir] {}", core::str::from_utf8(s).unwrap_or("<non-utf8>"));
+    }
+    fn cairn_put(&mut self, data: &[u8]) -> bool {
+        blk::store_set_bytes(data).is_some()
+    }
+    fn cairn_get(&mut self, buf: &mut [u8]) -> Option<usize> {
+        blk::store_get_into(buf)
+    }
+}
 
 use core::alloc::{GlobalAlloc, Layout};
 use core::arch::{asm, global_asm};
@@ -1759,17 +1782,31 @@ fn dispatch(cmd: &str, arg: &str, plan: &KernelPlan, memory: &[MemoryRegion], he
             Some(s) => kprintln!("  cairn: rolled back; current = \"{s}\" (persisted)"),
         },
         "agent" => {
-            kprintln!("[kernel] Dezh-IR: sandboxed, verified, capability-gated agent programs");
-            kprintln!("  prog 1 (loop: sum 1..=5, then print) WITH the PRINT capability:");
-            if let Err(t) = ir::run(&ir::demo_sum(), ir::CAP_PRINT) {
-                kprintln!("  [ir] TRAP: {}", t.msg());
+            use dezh_core::ir;
+            kprintln!("[kernel] Dezh-IR (shared dezh-core engine): verified, capability-gated");
+            let mut buf = [0u8; 512];
+            let sum = ir::demo_sum(&mut buf);
+            if let Err(t) = ir::verify(sum) {
+                kprintln!("  verify failed: {}", t.msg());
+            } else {
+                kprintln!("  prog 1 (loop: sum 1..=5, then print) WITH the PRINT capability:");
+                let mut h = KHost { caps: ir::CAP_PRINT };
+                if let Err(t) = ir::run(sum, &mut h) {
+                    kprintln!("  [ir] TRAP: {}", t.msg());
+                }
+                kprintln!("  prog 1 again WITHOUT the PRINT capability:");
+                let mut h = KHost { caps: 0 };
+                if let Err(t) = ir::run(sum, &mut h) {
+                    kprintln!("  [ir] TRAP: {}", t.msg());
+                }
             }
-            kprintln!("  prog 1 again WITHOUT the PRINT capability:");
-            if let Err(t) = ir::run(&ir::demo_sum(), 0) {
-                kprintln!("  [ir] TRAP: {}", t.msg());
-            }
+            let mut buf2 = [0u8; 512];
+            let cairn = ir::demo_cairn(&mut buf2);
             kprintln!("  prog 2 (write to Cairn, then read it back) with WRITE+READ+PRINT:");
-            if let Err(t) = ir::run(&ir::demo_cairn(), ir::CAP_WRITE | ir::CAP_READ | ir::CAP_PRINT) {
+            let mut h = KHost {
+                caps: ir::CAP_WRITE | ir::CAP_READ | ir::CAP_PRINT,
+            };
+            if let Err(t) = ir::run(cairn, &mut h) {
                 kprintln!("  [ir] TRAP: {}", t.msg());
             }
         }

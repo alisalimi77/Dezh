@@ -1,24 +1,22 @@
-//! Dezh-IR: a small, verifiable, capability-gated stack machine (agent runtime).
+//! Dezh-IR — a small, verifiable, capability-gated stack machine (agent runtime).
 //!
-//! This is Dezh's own agent execution substrate (D003/D016): a portable bytecode
-//! the KERNEL interprets, instead of running native code or embedding a large
-//! external engine in the trusted core. Three properties matter:
-//!   * **sandboxed** — the program only sees its own operand stack and a small
-//!     linear memory; every memory access is bounds-checked.
-//!   * **verifiable** — `verify` rejects a malformed program (unknown opcode,
+//! Dezh's own agent execution substrate (D003/D016): a portable bytecode the
+//! kernel interprets, instead of running native code or embedding a large engine
+//! in the trusted core. It is **architecture-independent** — it lives in
+//! `dezh-core` and runs identically on every ISA Dezh is ported to (RISC-V, x86,
+//! …). Four properties matter:
+//!   * **portable** — the same bytecode runs on any kernel.
+//!   * **sandboxed** — only its own operand stack + a small linear memory; every
+//!     access is bounds-checked.
+//!   * **verifiable** — [`verify`] rejects malformed programs (unknown opcode,
 //!     truncated immediate, a branch/call target that isn't an instruction
-//!     boundary) BEFORE it runs, so traps during execution are about data, not
-//!     a broken program.
-//!   * **no ambient authority** — the only way to affect the outside world is a
-//!     host call, and every host call is gated by an explicit capability bit.
+//!     boundary) before they run.
+//!   * **no ambient authority** — the only way to touch the outside world is a
+//!     host call, and every host call is gated by a capability the [`Host`]
+//!     holds. The kernel supplies the `Host`; `dezh-core` never touches hardware.
 //!
-//! A real wasm frontend can later compile to this IR; keeping the in-kernel
-//! interpreter tiny keeps the trusted core small and reviewable.
-
-use crate::{blk, kprintln};
-use alloc::vec;
-use alloc::vec::Vec;
-use core::fmt::Write;
+//! `alloc`-free on purpose, so kernels without a heap (e.g. the early x86 port)
+//! can run it too.
 
 // Opcodes ---------------------------------------------------------------------
 const HALT: u8 = 0x00;
@@ -58,21 +56,24 @@ pub const CAP_READ: u32 = 4;
 const MEM_SIZE: usize = 256;
 const STACK_SIZE: usize = 64;
 const CALL_SIZE: usize = 16;
+const MAX_PROG: usize = 4096;
 
-/// Size in bytes of the instruction starting with `op` (immediate included),
-/// or `None` if the opcode is unknown.
-fn op_size(op: u8) -> Option<usize> {
-    Some(match op {
-        PUSH => 9,
-        JMP | JZ | JNZ | CALL => 3,
-        HOSTCALL => 2,
-        HALT | POP | DUP | SWAP | ADD | SUB | MUL | DIV | MOD | LT | GT | EQ | LOAD8 | STORE8
-        | LOAD64 | STORE64 | RET => 1,
-        _ => return None,
-    })
+/// The kernel-provided boundary: capability checks + the actual side effects.
+/// `dezh-core` calls through this and never touches hardware itself.
+pub trait Host {
+    /// Does the current principal hold the capability bit(s) in `cap`?
+    fn can(&self, cap: u32) -> bool;
+    /// Emit a value (engine has already checked `CAP_PRINT`).
+    fn print_num(&mut self, v: i64);
+    /// Emit bytes (engine has already checked `CAP_PRINT`).
+    fn print_str(&mut self, s: &[u8]);
+    /// Persist bytes to the durable store; `false` if unavailable (no disk).
+    fn cairn_put(&mut self, data: &[u8]) -> bool;
+    /// Read the durable store into `buf`; returns byte count, or `None`.
+    fn cairn_get(&mut self, buf: &mut [u8]) -> Option<usize>;
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Trap {
     StackOverflow,
     StackUnderflow,
@@ -83,6 +84,7 @@ pub enum Trap {
     DivZero,
     BadTarget,
     Truncated,
+    TooLong,
     MissingCapability,
     NoDisk,
 }
@@ -99,16 +101,32 @@ impl Trap {
             Trap::DivZero => "division by zero",
             Trap::BadTarget => "branch/call target is not an instruction boundary",
             Trap::Truncated => "truncated instruction",
+            Trap::TooLong => "program too long",
             Trap::MissingCapability => "missing required capability for this host call",
             Trap::NoDisk => "no disk for the Cairn host call",
         }
     }
 }
 
+/// Size in bytes of the instruction starting with `op` (immediate included).
+fn op_size(op: u8) -> Option<usize> {
+    Some(match op {
+        PUSH => 9,
+        JMP | JZ | JNZ | CALL => 3,
+        HOSTCALL => 2,
+        HALT | POP | DUP | SWAP | ADD | SUB | MUL | DIV | MOD | LT | GT | EQ | LOAD8 | STORE8
+        | LOAD64 | STORE64 | RET => 1,
+        _ => return None,
+    })
+}
+
 /// Static verifier: reject malformed programs before they ever run.
-fn verify(code: &[u8]) -> Result<(), Trap> {
+pub fn verify(code: &[u8]) -> Result<(), Trap> {
+    if code.len() > MAX_PROG {
+        return Err(Trap::TooLong);
+    }
     // Pass 1: walk instructions, recording valid start offsets.
-    let mut starts = vec![false; code.len() + 1];
+    let mut starts = [false; MAX_PROG + 1];
     let mut pc = 0usize;
     while pc < code.len() {
         starts[pc] = true;
@@ -118,7 +136,7 @@ fn verify(code: &[u8]) -> Result<(), Trap> {
         }
         pc += size;
     }
-    starts[code.len()] = true; // falling off the end is a valid target boundary
+    starts[code.len()] = true; // falling off the end is a valid boundary
 
     // Pass 2: every branch/call target must land on an instruction boundary.
     let mut pc = 0usize;
@@ -168,9 +186,10 @@ impl Vm {
     }
 }
 
-/// Verify then interpret a Dezh-IR program with the given capability set.
-pub fn run(code: &[u8], caps: u32) -> Result<(), Trap> {
-    verify(code)?;
+/// Interpret a Dezh-IR program against `host`. The engine is internally guarded
+/// (bounds-checked) regardless of verification, but callers should [`verify`]
+/// first so a fault means bad data, not a malformed program.
+pub fn run(code: &[u8], host: &mut dyn Host) -> Result<(), Trap> {
     let mut vm = Vm {
         stack: [0; STACK_SIZE],
         sp: 0,
@@ -179,12 +198,15 @@ pub fn run(code: &[u8], caps: u32) -> Result<(), Trap> {
         mem: [0; MEM_SIZE],
     };
     let mut pc = 0usize;
-    loop {
+    while pc < code.len() {
         let op = code[pc];
         pc += 1;
         match op {
             HALT => return Ok(()),
             PUSH => {
+                if pc + 8 > code.len() {
+                    return Err(Trap::Truncated);
+                }
                 let mut b = [0u8; 8];
                 b.copy_from_slice(&code[pc..pc + 8]);
                 vm.push(i64::from_le_bytes(b))?;
@@ -260,23 +282,23 @@ pub fn run(code: &[u8], caps: u32) -> Result<(), Trap> {
                 let (a, e) = vm.range(addr, 8)?;
                 vm.mem[a..e].copy_from_slice(&val.to_le_bytes());
             }
-            JMP => pc = u16::from_le_bytes([code[pc], code[pc + 1]]) as usize,
+            JMP => pc = target(code, pc)?,
             JZ => {
-                let t = u16::from_le_bytes([code[pc], code[pc + 1]]) as usize;
+                let t = target(code, pc)?;
                 pc += 2;
                 if vm.pop()? == 0 {
                     pc = t;
                 }
             }
             JNZ => {
-                let t = u16::from_le_bytes([code[pc], code[pc + 1]]) as usize;
+                let t = target(code, pc)?;
                 pc += 2;
                 if vm.pop()? != 0 {
                     pc = t;
                 }
             }
             CALL => {
-                let t = u16::from_le_bytes([code[pc], code[pc + 1]]) as usize;
+                let t = target(code, pc)?;
                 pc += 2;
                 if vm.csp >= CALL_SIZE {
                     return Err(Trap::CallOverflow);
@@ -293,52 +315,63 @@ pub fn run(code: &[u8], caps: u32) -> Result<(), Trap> {
                 pc = vm.calls[vm.csp];
             }
             HOSTCALL => {
+                if pc >= code.len() {
+                    return Err(Trap::Truncated);
+                }
                 let f = code[pc];
                 pc += 1;
-                hostcall(&mut vm, f, caps)?;
+                hostcall(&mut vm, f, host)?;
             }
             _ => return Err(Trap::BadOpcode),
         }
     }
+    Ok(())
 }
 
-fn need(caps: u32, c: u32) -> Result<(), Trap> {
-    if caps & c == 0 {
-        Err(Trap::MissingCapability)
-    } else {
-        Ok(())
+fn target(code: &[u8], pc: usize) -> Result<usize, Trap> {
+    if pc + 2 > code.len() {
+        return Err(Trap::Truncated);
     }
+    Ok(u16::from_le_bytes([code[pc], code[pc + 1]]) as usize)
 }
 
-fn hostcall(vm: &mut Vm, f: u8, caps: u32) -> Result<(), Trap> {
+fn hostcall(vm: &mut Vm, f: u8, host: &mut dyn Host) -> Result<(), Trap> {
     match f {
         HC_PRINT_NUM => {
-            need(caps, CAP_PRINT)?;
+            if !host.can(CAP_PRINT) {
+                return Err(Trap::MissingCapability);
+            }
             let v = vm.pop()?;
-            kprintln!("  [ir] print -> {v}");
+            host.print_num(v);
         }
         HC_PRINT_STR => {
-            need(caps, CAP_PRINT)?;
+            if !host.can(CAP_PRINT) {
+                return Err(Trap::MissingCapability);
+            }
             let len = vm.pop()? as usize;
             let addr = vm.pop()?;
             let (a, e) = vm.range(addr, len)?;
-            let s = core::str::from_utf8(&vm.mem[a..e]).unwrap_or("<non-utf8>");
-            kprintln!("  [ir] {s}");
+            host.print_str(&vm.mem[a..e]);
         }
         HC_CAIRN_PUT => {
-            need(caps, CAP_WRITE)?;
+            if !host.can(CAP_WRITE) {
+                return Err(Trap::MissingCapability);
+            }
             let len = vm.pop()? as usize;
             let addr = vm.pop()?;
             let (a, e) = vm.range(addr, len)?;
-            blk::store_set_bytes(&vm.mem[a..e]).ok_or(Trap::NoDisk)?;
-            kprintln!("  [ir] cairn_put ok ({len} bytes, persisted)");
+            if !host.cairn_put(&vm.mem[a..e]) {
+                return Err(Trap::NoDisk);
+            }
         }
         HC_CAIRN_GET => {
-            need(caps, CAP_READ)?;
+            if !host.can(CAP_READ) {
+                return Err(Trap::MissingCapability);
+            }
             let max = vm.pop()? as usize;
             let addr = vm.pop()?;
             let (a, e) = vm.range(addr, max)?;
-            let n = blk::store_get_into(&mut vm.mem[a..e]).ok_or(Trap::NoDisk)?;
+            let n = host.cairn_get(&mut vm.mem[a..e]).ok_or(Trap::NoDisk)?;
             vm.push(n as i64)?;
         }
         _ => return Err(Trap::BadOpcode),
@@ -346,115 +379,212 @@ fn hostcall(vm: &mut Vm, f: u8, caps: u32) -> Result<(), Trap> {
     Ok(())
 }
 
-// --- A tiny assembler + sample programs --------------------------------------
+// --- A tiny assembler (writes into a caller buffer; alloc-free) ---------------
 
-struct Asm {
-    code: Vec<u8>,
+pub struct Asm<'a> {
+    buf: &'a mut [u8],
+    len: usize,
 }
 
-impl Asm {
-    fn new() -> Self {
-        Asm { code: Vec::new() }
+impl<'a> Asm<'a> {
+    pub fn new(buf: &'a mut [u8]) -> Self {
+        Asm { buf, len: 0 }
     }
-    fn here(&self) -> u16 {
-        self.code.len() as u16
+    pub fn here(&self) -> u16 {
+        self.len as u16
     }
-    fn push(&mut self, v: i64) {
-        self.code.push(PUSH);
-        self.code.extend_from_slice(&v.to_le_bytes());
+    fn put(&mut self, b: u8) {
+        self.buf[self.len] = b;
+        self.len += 1;
     }
-    fn op(&mut self, o: u8) {
-        self.code.push(o);
+    pub fn push(&mut self, v: i64) {
+        self.put(PUSH);
+        for b in v.to_le_bytes() {
+            self.put(b);
+        }
     }
-    fn hostcall(&mut self, f: u8) {
-        self.code.push(HOSTCALL);
-        self.code.push(f);
+    pub fn op(&mut self, o: u8) {
+        self.put(o);
     }
-    fn jmp(&mut self, target: u16) {
-        self.code.push(JMP);
-        self.code.extend_from_slice(&target.to_le_bytes());
+    pub fn hostcall(&mut self, f: u8) {
+        self.put(HOSTCALL);
+        self.put(f);
+    }
+    pub fn jmp(&mut self, target: u16) {
+        self.put(JMP);
+        let b = target.to_le_bytes();
+        self.put(b[0]);
+        self.put(b[1]);
     }
     /// Emit a JZ with a placeholder target; returns the patch offset.
-    fn jz_fwd(&mut self) -> usize {
-        self.code.push(JZ);
-        let at = self.code.len();
-        self.code.extend_from_slice(&0u16.to_le_bytes());
+    pub fn jz_fwd(&mut self) -> usize {
+        self.put(JZ);
+        let at = self.len;
+        self.put(0);
+        self.put(0);
         at
     }
-    fn patch(&mut self, at: usize, target: u16) {
+    pub fn patch(&mut self, at: usize, target: u16) {
         let b = target.to_le_bytes();
-        self.code[at] = b[0];
-        self.code[at + 1] = b[1];
+        self.buf[at] = b[0];
+        self.buf[at + 1] = b[1];
+    }
+    pub fn finish(self) -> &'a [u8] {
+        &self.buf[..self.len]
     }
 }
 
 /// Sum 1..=5 with a real loop (memory variables + branch), then print it (15).
-/// Exercises arithmetic, linear memory, comparison and control flow.
-pub fn demo_sum() -> Vec<u8> {
-    let mut a = Asm::new();
-    // acc@0 = 0
+pub fn demo_sum(buf: &mut [u8]) -> &[u8] {
+    let mut a = Asm::new(buf);
     a.push(0);
     a.push(0);
-    a.op(STORE64);
-    // i@8 = 1
+    a.op(STORE64); // acc@0 = 0
     a.push(8);
     a.push(1);
-    a.op(STORE64);
+    a.op(STORE64); // i@8 = 1
     let loop_start = a.here();
-    // condition: i < 6
     a.push(8);
     a.op(LOAD64);
     a.push(6);
-    a.op(LT);
+    a.op(LT); // i < 6 ?
     let jz = a.jz_fwd();
-    // acc = acc + i
-    a.push(0); // addr of acc (for STORE64)
+    a.push(0);
     a.push(0);
     a.op(LOAD64);
     a.push(8);
     a.op(LOAD64);
     a.op(ADD);
-    a.op(STORE64);
-    // i = i + 1
-    a.push(8); // addr of i
+    a.op(STORE64); // acc += i
+    a.push(8);
     a.push(8);
     a.op(LOAD64);
     a.push(1);
     a.op(ADD);
-    a.op(STORE64);
+    a.op(STORE64); // i += 1
     a.jmp(loop_start);
     let end = a.here();
     a.patch(jz, end);
-    // print acc
     a.push(0);
     a.op(LOAD64);
-    a.hostcall(HC_PRINT_NUM);
+    a.hostcall(HC_PRINT_NUM); // print acc => 15
     a.op(HALT);
-    a.code
+    a.finish()
 }
 
 /// Write a string into Cairn and read it back, both via capability-gated host
 /// calls — a sandboxed agent doing a durable, persisted action.
-pub fn demo_cairn() -> Vec<u8> {
-    let mut a = Asm::new();
+pub fn demo_cairn(buf: &mut [u8]) -> &[u8] {
+    let mut a = Asm::new(buf);
     let s = b"ir-wrote-this-durably";
     for (i, &byte) in s.iter().enumerate() {
         a.push(i as i64);
         a.push(byte as i64);
         a.op(STORE8);
     }
-    // cairn_put(addr=0, len=s.len())
     a.push(0);
     a.push(s.len() as i64);
-    a.hostcall(HC_CAIRN_PUT);
-    // cairn_get(addr=64, max=64) -> pushes the byte count
+    a.hostcall(HC_CAIRN_PUT); // cairn_put(addr=0, len)
     a.push(64);
     a.push(64);
-    a.hostcall(HC_CAIRN_GET);
-    // print_str(addr=64, len): we have len on top, push addr then SWAP
+    a.hostcall(HC_CAIRN_GET); // cairn_get(addr=64, max=64) -> count on stack
     a.push(64);
     a.op(SWAP);
-    a.hostcall(HC_PRINT_STR);
+    a.hostcall(HC_PRINT_STR); // print_str(addr=64, len)
     a.op(HALT);
-    a.code
+    a.finish()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct T {
+        caps: u32,
+        last_num: i64,
+        store: [u8; 64],
+        store_len: usize,
+        last_str: [u8; 64],
+        last_str_len: usize,
+    }
+    impl Default for T {
+        fn default() -> Self {
+            T {
+                caps: 0,
+                last_num: 0,
+                store: [0; 64],
+                store_len: 0,
+                last_str: [0; 64],
+                last_str_len: 0,
+            }
+        }
+    }
+    impl Host for T {
+        fn can(&self, cap: u32) -> bool {
+            self.caps & cap != 0
+        }
+        fn print_num(&mut self, v: i64) {
+            self.last_num = v;
+        }
+        fn print_str(&mut self, s: &[u8]) {
+            let n = s.len().min(64);
+            self.last_str[..n].copy_from_slice(&s[..n]);
+            self.last_str_len = n;
+        }
+        fn cairn_put(&mut self, data: &[u8]) -> bool {
+            let n = data.len().min(64);
+            self.store[..n].copy_from_slice(&data[..n]);
+            self.store_len = n;
+            true
+        }
+        fn cairn_get(&mut self, buf: &mut [u8]) -> Option<usize> {
+            let n = self.store_len.min(buf.len());
+            buf[..n].copy_from_slice(&self.store[..n]);
+            Some(n)
+        }
+    }
+
+    #[test]
+    fn demo_sum_is_15() {
+        let mut buf = [0u8; 256];
+        let prog = demo_sum(&mut buf);
+        verify(prog).unwrap();
+        let mut h = T {
+            caps: CAP_PRINT,
+            ..Default::default()
+        };
+        run(prog, &mut h).unwrap();
+        assert_eq!(h.last_num, 15);
+    }
+
+    #[test]
+    fn print_needs_capability() {
+        let mut buf = [0u8; 256];
+        let prog = demo_sum(&mut buf);
+        let mut h = T::default(); // no caps
+        assert_eq!(run(prog, &mut h), Err(Trap::MissingCapability));
+    }
+
+    #[test]
+    fn cairn_roundtrip() {
+        let mut buf = [0u8; 512];
+        let prog = demo_cairn(&mut buf);
+        verify(prog).unwrap();
+        let mut h = T {
+            caps: CAP_PRINT | CAP_WRITE | CAP_READ,
+            ..Default::default()
+        };
+        run(prog, &mut h).unwrap();
+        assert_eq!(&h.last_str[..h.last_str_len], b"ir-wrote-this-durably");
+    }
+
+    #[test]
+    fn verify_rejects_bad_jump() {
+        assert_eq!(verify(&[JMP, 1, 0]), Err(Trap::BadTarget));
+    }
+
+    #[test]
+    fn verify_rejects_bad_opcode() {
+        assert_eq!(verify(&[0xFE]), Err(Trap::BadOpcode));
+    }
 }

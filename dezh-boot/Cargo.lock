@@ -6,8 +6,13 @@ version = 4
 name = "dezh-boot"
 version = "0.1.0"
 dependencies = [
+ "dezh-core",
  "dezh-kernel",
 ]
+
+[[package]]
+name = "dezh-core"
+version = "0.1.0"
 
 [[package]]
 name = "dezh-kernel"

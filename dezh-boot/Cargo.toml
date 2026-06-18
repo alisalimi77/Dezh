@@ -11,6 +11,7 @@ publish = false
 
 [dependencies]
 dezh-kernel = { path = "../dezh-kernel" }
+dezh-core = { path = "../dezh-core" }
 
 [[bin]]
 name = "dezh-boot"

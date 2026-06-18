@@ -1,0 +1,18 @@
+[package]
+name = "dezh-core"
+version = "0.1.0"
+edition = "2021"
+
+# Architecture-independent Dezh logic, shared by every ISA kernel (RISC-V, x86,
+# ...). Pure `no_std`, depends only on `core` — no hardware, no I/O. Effects go
+# through the `Host` trait each kernel implements. This is what makes Dezh
+# multi-ISA real instead of a slogan: one core, many thin hardware layers.
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+
+# Standalone: shared by the per-ISA kernels (dezh-boot, dezh-boot-x86) via path,
+# each of which is its own workspace; keep dezh-core out of the host workspace.
+[workspace]

@@ -158,13 +158,82 @@ fn print(s: &str) {
     }
 }
 
+fn print_i64(mut v: i64) {
+    if v < 0 {
+        putb(b'-');
+        v = -v;
+    }
+    let mut buf = [0u8; 20];
+    let mut i = buf.len();
+    loop {
+        i -= 1;
+        buf[i] = b'0' + (v % 10) as u8;
+        v /= 10;
+        if v == 0 {
+            break;
+        }
+    }
+    for &b in &buf[i..] {
+        putb(b);
+    }
+}
+
+// The x86 implementation of the shared Dezh-core Host: capability checks + the
+// actual side effect (serial output). The Dezh-IR engine itself is shared.
+struct SerialHost {
+    cap: bool,
+}
+impl dezh_core::ir::Host for SerialHost {
+    fn can(&self, cap: u32) -> bool {
+        self.cap && cap == dezh_core::ir::CAP_PRINT
+    }
+    fn print_num(&mut self, v: i64) {
+        print("  [ir] => ");
+        print_i64(v);
+        print("\n");
+    }
+    fn print_str(&mut self, s: &[u8]) {
+        print("  [ir] ");
+        for &b in s {
+            putb(b);
+        }
+        putb(b'\n');
+    }
+    // No block device on x86 yet (M2/M3); Cairn host calls are unavailable.
+    fn cairn_put(&mut self, _data: &[u8]) -> bool {
+        false
+    }
+    fn cairn_get(&mut self, _buf: &mut [u8]) -> Option<usize> {
+        None
+    }
+}
+
 #[no_mangle]
 pub extern "C" fn kmain() -> ! {
+    use dezh_core::ir;
     serial_init();
     print("\n");
-    print("Dezh x86_64 — long mode reached.\n");
-    print("  serial COM1 OK, identity paging on, 64-bit kernel running.\n");
-    print("  (x86 hardware layer, milestone 1)\n");
+    print("Dezh x86_64 — long mode reached. 64-bit kernel running.\n");
+
+    // Run the SAME Dezh-IR agent program the RISC-V kernel runs — proof that the
+    // shared core makes agents portable across ISAs (D003/D016).
+    print("Dezh-IR agent (sum 1..=5 with a loop) on x86_64:\n");
+    let mut buf = [0u8; 256];
+    let prog = ir::demo_sum(&mut buf);
+    match ir::verify(prog) {
+        Err(_) => print("  verify failed\n"),
+        Ok(()) => {
+            print("  verified. with PRINT capability:\n");
+            let mut h = SerialHost { cap: true };
+            let _ = ir::run(prog, &mut h);
+            print("  without PRINT capability:\n");
+            let mut h = SerialHost { cap: false };
+            if ir::run(prog, &mut h) == Err(ir::Trap::MissingCapability) {
+                print("  [ir] DENIED: agent holds no PRINT capability\n");
+            }
+        }
+    }
+
     loop {
         unsafe { asm!("hlt") };
     }

@@ -3,12 +3,5 @@
 version = 4
 
 [[package]]
-name = "dezh-boot-x86"
-version = "0.1.0"
-dependencies = [
- "dezh-core",
-]
-
-[[package]]
 name = "dezh-core"
 version = "0.1.0"

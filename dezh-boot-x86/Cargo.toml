@@ -7,6 +7,9 @@ edition = "2021"
 name = "dezh-boot-x86"
 path = "src/main.rs"
 
+[dependencies]
+dezh-core = { path = "../dezh-core" }
+
 [profile.dev]
 panic = "abort"
 
