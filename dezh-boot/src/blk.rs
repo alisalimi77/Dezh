@@ -88,7 +88,8 @@ fn data_ptr() -> *mut u8 {
 /// The data buffer as text, up to the first NUL (capped for display).
 fn data_str() -> &'static str {
     unsafe {
-        let d = &(*core::ptr::addr_of!(BLKREQ.data))[..];
+        let d =
+            core::slice::from_raw_parts(core::ptr::addr_of!(BLKREQ.data) as *const u8, SECTOR_SIZE);
         let n = d.iter().position(|&b| b == 0).unwrap_or(64).min(64);
         core::str::from_utf8(&d[..n]).unwrap_or("<non-utf8>")
     }
@@ -178,7 +179,11 @@ pub fn list_devices() {
         let ver = mmio_r32(base + 0x004);
         let dev = mmio_r32(base + 0x008);
         if dev != 0 {
-            let kind = if dev == VIRTIO_ID_BLOCK { " (block)" } else { "" };
+            let kind = if dev == VIRTIO_ID_BLOCK {
+                " (block)"
+            } else {
+                ""
+            };
             kprintln!("  virtio-mmio[{i}] @ {base:#x}: version={ver} device-id={dev}{kind}");
             found = true;
         }
