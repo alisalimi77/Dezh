@@ -13,6 +13,7 @@ fn main() {
     let manifest = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
     build_user_elf(&manifest, "userprog", "userprog");
     build_user_elf(&manifest, "virtio-blk", "virtio-blk");
+    build_user_elf(&manifest, "bench-app", "dezh-bench");
 }
 
 fn build_user_elf(manifest: &PathBuf, dir: &str, bin: &str) {
@@ -20,6 +21,7 @@ fn build_user_elf(manifest: &PathBuf, dir: &str, bin: &str) {
     println!("cargo:rerun-if-changed={}", prog.join("src/main.rs").display());
     println!("cargo:rerun-if-changed={}", prog.join("linker.ld").display());
     println!("cargo:rerun-if-changed={}", prog.join("Cargo.toml").display());
+    println!("cargo:rerun-if-changed={}", prog.join(".cargo/config.toml").display());
 
     let cargo = env::var("CARGO").unwrap_or_else(|_| "cargo".into());
     let status = Command::new(&cargo)

@@ -127,6 +127,16 @@ def run_riscv64(qemu: str, kernel: Path) -> None:
             ("prollback", "rollback restored current = \"ci-value"),
             ("deny", "Pol denial demo skipped here to keep running services alive"),
             (
+                "bench-all",
+                [
+                    "[bench-os] syscall boundary complete",
+                    "[bench-ipc-service] received messages=32",
+                    "[bench-storage] complete via user-space virtio-block daemon",
+                    "[bench-caps] TIME denied as expected",
+                    "[bench-all] PASS: syscall, IPC, storage, caps, and service liveness checked",
+                ],
+            ),
+            (
                 "vblkd",
                 [
                     "vblkd uses registered daemon task=",

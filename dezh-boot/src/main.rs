@@ -469,7 +469,7 @@ extern "C" fn trap_handler(frame: *mut TrapFrame) {
             sbi_set_timer(rdtime() + TIMER_DELTA);
             return;
         }
-        kprintln!("\n[dezh-boot] unexpected interrupt scause={scause:#x} — halting");
+        kprintln!("\n[dezh-boot] unexpected interrupt scause={scause:#x} -- halting");
         shutdown(FINISH_FAIL);
     }
 
@@ -531,15 +531,15 @@ extern "C" fn trap_handler(frame: *mut TrapFrame) {
         // SPP == 0 means the trap came from U-mode.
         if (sstatus >> 8) & 1 == 0 {
             kprintln!(
-                "  [kernel] DENIED: task faulted (scause {code}) at pc={sepc:#x} on {stval:#x} — killing task"
+                "  [kernel] DENIED: task faulted (scause {code}) at pc={sepc:#x} on {stval:#x} -- killing task"
             );
             unsafe { restore_kernel_ctx() }
         }
-        kprintln!("\n[dezh-boot] kernel page fault at pc={sepc:#x} on {stval:#x} (scause {code}) — halting");
+        kprintln!("\n[dezh-boot] kernel page fault at pc={sepc:#x} on {stval:#x} (scause {code}) -- halting");
         shutdown(FINISH_FAIL);
     }
 
-    kprintln!("\n[dezh-boot] unexpected trap scause={scause:#x} — halting");
+    kprintln!("\n[dezh-boot] unexpected trap scause={scause:#x} -- halting");
     shutdown(FINISH_FAIL);
 }
 
@@ -777,6 +777,7 @@ fn frame_free(f: usize) {
 /// embedded here. The loader maps it into a fresh address space at runtime.
 const USERPROG_ELF: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/userprog.elf"));
 const VIRTIO_BLK_ELF: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/virtio-blk.elf"));
+const BENCH_ELF: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/dezh-bench.elf"));
 
 const DEV_UART_VA: usize = 0x5000_0000;
 const DEV_VIRTIO_BLK_VA: usize = 0x5000_0000;
@@ -892,7 +893,7 @@ fn map_page(root: usize, va: usize, pa: usize, flags: u64) {
 }
 
 const USER_STACK_TOP: usize = 0x4070_0000;
-const USER_STACK_BOTTOM: usize = 0x4060_0000;
+const USER_STACK_BOTTOM: usize = 0x406F_0000;
 
 /// Walk a page table to the frame backing `va` (page must already be mapped).
 unsafe fn translate(root: usize, va: usize) -> usize {
@@ -1220,7 +1221,7 @@ extern "C" fn utrap_handler(frame_ptr: *mut usize) -> *const usize {
                 let _ = cur;
                 return schedule_or_return();
             }
-            kprintln!("\n[dezh-boot] unexpected interrupt in task (scause={scause:#x}) — halting");
+            kprintln!("\n[dezh-boot] unexpected interrupt in task (scause={scause:#x}) -- halting");
             shutdown(FINISH_FAIL);
         }
 
@@ -1230,7 +1231,7 @@ extern "C" fn utrap_handler(frame_ptr: *mut usize) -> *const usize {
             let stval: usize;
             asm!("csrr {}, stval", out(reg) stval);
             kprintln!(
-                "  [kernel] task {} DENIED: faulted on {stval:#x} (outside its grant) — killing",
+                "  [kernel] task {} DENIED: faulted on {stval:#x} (outside its grant) -- killing",
                 cur
             );
             TSTATE[cur] = TaskState::Done;
@@ -1422,7 +1423,7 @@ extern "C" fn utrap_handler(frame_ptr: *mut usize) -> *const usize {
             }
         }
 
-        kprintln!("\n[dezh-boot] unexpected trap in task (scause={scause:#x}) — halting");
+        kprintln!("\n[dezh-boot] unexpected trap in task (scause={scause:#x}) -- halting");
         shutdown(FINISH_FAIL);
     }
 }
@@ -1742,6 +1743,12 @@ const BLK_REQ_INSTALL_INIT: usize = 9;
 const BLK_REQ_ROOT_STATUS: usize = 10;
 const VIRTIO_SERVICE_TASK: usize = 0;
 const FIRST_FOREGROUND_TASK: usize = 1;
+const BENCH_ROLE_SYSCALL: usize = 1;
+const BENCH_ROLE_IPC_SERVICE: usize = 2;
+const BENCH_ROLE_IPC_CLIENT: usize = 3;
+const BENCH_ROLE_CAPS: usize = 4;
+const BENCH_SYSCALL_ITERS: usize = 200_000;
+const BENCH_IPC_ITERS: usize = 32;
 
 fn virtio_dma_pa() -> usize {
     core::ptr::addr_of!(VIRTIO_DMA) as usize
@@ -1797,6 +1804,66 @@ fn run_virtio_blk_daemon_demo(plan: &KernelPlan) {
             .virtio_dma(),
     ]);
     refresh_virtio_service_state();
+}
+
+fn run_bench_os() {
+    kprintln!(
+        "[bench-os] launching separate U-mode benchmark ELF ({} null syscalls)",
+        BENCH_SYSCALL_ITERS
+    );
+    run_foreground_processes(&[
+        ProcessSpec::new(BENCH_ELF, TASK_PRINT, BENCH_ROLE_SYSCALL).args(BENCH_SYSCALL_ITERS, 0, 0),
+    ]);
+    kprintln!("[bench-os] complete; console returned");
+}
+
+fn run_bench_ipc() {
+    kprintln!(
+        "[bench-ipc] launching U-mode service/client pair ({} messages)",
+        BENCH_IPC_ITERS
+    );
+    run_foreground_processes(&[
+        ProcessSpec::new(BENCH_ELF, TASK_PRINT | TASK_IPC, BENCH_ROLE_IPC_SERVICE).args(
+            BENCH_IPC_ITERS,
+            0,
+            0,
+        ),
+        ProcessSpec::new(BENCH_ELF, TASK_PRINT | TASK_IPC, BENCH_ROLE_IPC_CLIENT).args(
+            FIRST_FOREGROUND_TASK,
+            BENCH_IPC_ITERS,
+            0,
+        ),
+    ]);
+    kprintln!("[bench-ipc] complete; foreground tasks exited");
+}
+
+fn run_bench_storage(plan: &KernelPlan) {
+    kprintln!("[bench-storage] validating registered virtio-block storage path");
+    run_registered_virtio_client(plan, BLK_REQ_INSTALL_CHECK, "");
+    run_registered_virtio_client(plan, BLK_REQ_INSTALL_INIT, "");
+    run_registered_virtio_client(plan, BLK_REQ_PSET, "bench-storage-value");
+    run_registered_virtio_client(plan, BLK_REQ_PGET, "");
+    run_registered_virtio_client(plan, BLK_REQ_PSET, "bench-storage-bad-edit");
+    run_registered_virtio_client(plan, BLK_REQ_PROLLBACK, "");
+    kprintln!("[bench-storage] complete via user-space virtio-block daemon");
+}
+
+fn run_bench_caps() {
+    kprintln!("[bench-caps] launching app with PRINT only");
+    run_foreground_processes(&[ProcessSpec::new(BENCH_ELF, TASK_PRINT, BENCH_ROLE_CAPS)]);
+    kprintln!("[bench-caps] running no-grant MMIO proof");
+    run_virtio_no_grant_probe();
+    kprintln!("[bench-caps] complete; denied paths returned cleanly");
+}
+
+fn run_bench_all(plan: &KernelPlan) {
+    kprintln!("[bench-all] Dezh validation suite v0 starting");
+    run_bench_os();
+    run_bench_ipc();
+    run_bench_storage(plan);
+    run_bench_caps();
+    refresh_virtio_service_state();
+    kprintln!("[bench-all] PASS: syscall, IPC, storage, caps, and service liveness checked");
 }
 
 // Worker tasks (run in U-mode, so they live in the user region). Each prints a
@@ -2441,6 +2508,41 @@ const COMMANDS: &[CommandSpec] = &[
         help: "measure ecall round-trip cost (U-mode task)",
     },
     CommandSpec {
+        name: "bench-os",
+        cap: cap::SPAWN,
+        cap_name: "SPAWN",
+        group: "Demos",
+        help: "benchmark syscall/trap boundary using a separate U-mode ELF",
+    },
+    CommandSpec {
+        name: "bench-ipc",
+        cap: cap::SPAWN,
+        cap_name: "SPAWN",
+        group: "Demos",
+        help: "benchmark U-mode IPC service/client message flow",
+    },
+    CommandSpec {
+        name: "bench-storage",
+        cap: cap::SPAWN,
+        cap_name: "SPAWN",
+        group: "Demos",
+        help: "validate storage through the registered virtio-block daemon",
+    },
+    CommandSpec {
+        name: "bench-caps",
+        cap: cap::SPAWN,
+        cap_name: "SPAWN",
+        group: "Safety",
+        help: "validate denied capability/device paths",
+    },
+    CommandSpec {
+        name: "bench-all",
+        cap: cap::SPAWN,
+        cap_name: "SPAWN",
+        group: "Demos",
+        help: "run the Dezh benchmark/validation suite v0",
+    },
+    CommandSpec {
         name: "ipc",
         cap: cap::SPAWN,
         cap_name: "SPAWN",
@@ -2822,6 +2924,11 @@ fn dispatch(cmd: &str, arg: &str, plan: &KernelPlan, memory: &[MemoryRegion], he
             run_tasks(&[(bench_task as usize, 0, PERS_NATIVE)]);
             kprintln!("[kernel] benchmark done");
         }
+        "bench-os" => run_bench_os(),
+        "bench-ipc" => run_bench_ipc(),
+        "bench-storage" => run_bench_storage(plan),
+        "bench-caps" => run_bench_caps(),
+        "bench-all" => run_bench_all(plan),
         "preempt" => {
             kprintln!("[kernel] two CPU-bound tasks that never yield (watch them interleave)");
             run_tasks(&[
@@ -3019,9 +3126,10 @@ pub extern "C" fn kmain() -> ! {
         );
     }
     kprintln!(
-        "[dezh-boot] embedded user ELFs: userprog={} bytes, virtio-blk={} bytes",
+        "[dezh-boot] embedded user ELFs: userprog={} bytes, virtio-blk={} bytes, dezh-bench={} bytes",
         USERPROG_ELF.len(),
-        VIRTIO_BLK_ELF.len()
+        VIRTIO_BLK_ELF.len(),
+        BENCH_ELF.len()
     );
     kprintln!(
         "[dezh-boot] install manifest v0: root={} block={} marker_sector={}",

@@ -70,6 +70,10 @@ boundary every earlier spike ran around.
   Foreground clients use IPC and hold no MMIO grant. A no-grant probe still
   page-faults on MMIO and the console survives. The install commands write/read
   a v0 Dezh root marker and metadata through the same user-space driver path.
+- **Benchmark/validation app** (`bench-os`, `bench-ipc`, `bench-storage`,
+  `bench-caps`, `bench-all`): a separately-linked U-mode ELF exercises syscall
+  trap cost, IPC message flow, denied capabilities, no-grant MMIO, service
+  liveness, and storage through the registered user-space block daemon.
 - Exits QEMU cleanly via the SiFive test finisher when you run `halt`.
 
 ## Layout
@@ -84,6 +88,8 @@ boundary every earlier spike ran around.
 - `virtio-blk/` — separately-linked user-space block driver process; supports
   the boot-managed daemon, foreground IPC clients, and install/root metadata
   requests.
+- `bench-app/` — separately-linked benchmark/validation process used by the
+  `bench-*` commands.
 
 This crate is a **standalone workspace**, excluded from the root workspace,
 because it cross-compiles to bare metal (no host linker, no MSVC needed).
@@ -146,7 +152,9 @@ mailbox path: two clients enqueue while a service is busy, and neither message
 is overwritten. `disk`, `bwrite`, `bread`, storage aliases, and install/root
 commands all use the boot-managed `virtio-block` daemon over IPC. `vblkd` is a
 regression/demo client for that registered daemon; only the daemon gets the
-device/MMIO capability.
+device/MMIO capability. `bench-os`, `bench-ipc`, `bench-storage`, `bench-caps`,
+and `bench-all` run a small U-mode benchmark suite that validates the current
+kernel, IPC, storage, capability, and service-liveness paths.
 
 ## Not yet
 
