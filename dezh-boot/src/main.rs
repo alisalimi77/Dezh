@@ -1693,6 +1693,16 @@ fn ensure_virtio_block_service(_plan: &KernelPlan) -> Option<usize> {
     }
 }
 
+fn virtio_service_is_running() -> bool {
+    refresh_virtio_service_state();
+    if let Some(i) = service_index("virtio-block") {
+        unsafe {
+            return SERVICES[i].state == ServiceState::Running;
+        }
+    }
+    false
+}
+
 fn print_services() {
     refresh_virtio_service_state();
     unsafe {
@@ -2186,6 +2196,7 @@ struct CommandSpec {
     name: &'static str,
     cap: u32,
     cap_name: &'static str,
+    group: &'static str,
     help: &'static str,
 }
 
@@ -2194,192 +2205,287 @@ const COMMANDS: &[CommandSpec] = &[
         name: "help",
         cap: 0,
         cap_name: "-",
+        group: "Inspect",
         help: "list commands",
     },
     CommandSpec {
         name: "caps",
         cap: cap::INSPECT,
         cap_name: "INSPECT",
+        group: "Inspect",
         help: "show the console's capabilities",
     },
     CommandSpec {
         name: "mem",
         cap: cap::INSPECT,
         cap_name: "INSPECT",
+        group: "Inspect",
         help: "show the memory map",
     },
     CommandSpec {
         name: "frames",
         cap: cap::INSPECT,
         cap_name: "INSPECT",
+        group: "Inspect",
         help: "frame allocator self-test (alloc/zero/free)",
+    },
+    CommandSpec {
+        name: "status",
+        cap: cap::INSPECT,
+        cap_name: "INSPECT",
+        group: "Inspect",
+        help: "show boot/runtime/storage summary",
+    },
+    CommandSpec {
+        name: "tasks",
+        cap: cap::INSPECT,
+        cap_name: "INSPECT",
+        group: "Inspect",
+        help: "show task slots and service bindings",
     },
     CommandSpec {
         name: "disk",
         cap: cap::INSPECT,
         cap_name: "INSPECT",
+        group: "Services",
         help: "probe virtio-mmio slots for a block device",
     },
     CommandSpec {
         name: "agent",
         cap: cap::SPAWN,
         cap_name: "SPAWN",
+        group: "Demos",
         help: "run a Dezh-IR agent program (capability-gated interpreter)",
     },
     CommandSpec {
         name: "bwrite",
         cap: cap::SPAWN,
         cap_name: "SPAWN",
+        group: "Storage",
         help: "write a marker to disk sector 0 (virtio-blk)",
     },
     CommandSpec {
         name: "bread",
         cap: cap::INSPECT,
         cap_name: "INSPECT",
+        group: "Storage",
         help: "read disk sector 0 (proves persistence)",
     },
     CommandSpec {
         name: "pset",
         cap: cap::SPAWN,
         cap_name: "SPAWN",
+        group: "Storage",
         help: "durable Cairn: set current value (persisted) <text>",
     },
     CommandSpec {
         name: "pget",
         cap: cap::INSPECT,
         cap_name: "INSPECT",
+        group: "Storage",
         help: "durable Cairn: read current value",
     },
     CommandSpec {
         name: "prollback",
         cap: cap::SPAWN,
         cap_name: "SPAWN",
+        group: "Storage",
         help: "durable Cairn: roll back to previous value",
+    },
+    CommandSpec {
+        name: "write",
+        cap: cap::SPAWN,
+        cap_name: "SPAWN",
+        group: "Storage",
+        help: "alias: write <text> to durable Cairn current value",
+    },
+    CommandSpec {
+        name: "read",
+        cap: cap::INSPECT,
+        cap_name: "INSPECT",
+        group: "Storage",
+        help: "alias: read durable Cairn current value",
+    },
+    CommandSpec {
+        name: "rollback",
+        cap: cap::SPAWN,
+        cap_name: "SPAWN",
+        group: "Storage",
+        help: "alias: roll back durable Cairn current value",
+    },
+    CommandSpec {
+        name: "history",
+        cap: cap::INSPECT,
+        cap_name: "INSPECT",
+        group: "Storage",
+        help: "show v0 current/previous Cairn sector status",
+    },
+    CommandSpec {
+        name: "root",
+        cap: cap::INSPECT,
+        cap_name: "INSPECT",
+        group: "Storage",
+        help: "show installed root marker and metadata",
     },
     CommandSpec {
         name: "vblkd",
         cap: cap::SPAWN,
         cap_name: "SPAWN",
+        group: "Services",
         help: "run long-lived user-space virtio-blk daemon + IPC client",
     },
     CommandSpec {
         name: "services",
         cap: cap::INSPECT,
         cap_name: "INSPECT",
+        group: "Services",
         help: "list runtime services",
     },
     CommandSpec {
         name: "install-check",
         cap: cap::INSPECT,
         cap_name: "INSPECT",
+        group: "Services",
         help: "validate install manifest and disk root marker",
     },
     CommandSpec {
         name: "install-init",
         cap: cap::SPAWN,
         cap_name: "SPAWN",
+        group: "Services",
         help: "initialize Dezh root marker/metadata on disk",
     },
     CommandSpec {
         name: "root-status",
         cap: cap::INSPECT,
         cap_name: "INSPECT",
+        group: "Services",
         help: "read Dezh root metadata from disk",
     },
     CommandSpec {
         name: "uptime",
         cap: cap::TIME,
         cap_name: "TIME",
+        group: "Inspect",
         help: "show timer uptime",
     },
     CommandSpec {
         name: "echo",
         cap: cap::ECHO,
         cap_name: "ECHO",
+        group: "Demos",
         help: "echo <text>",
     },
     CommandSpec {
         name: "run",
         cap: cap::SPAWN,
         cap_name: "SPAWN",
+        group: "Demos",
         help: "run a capability-limited U-mode task",
     },
     CommandSpec {
         name: "load",
         cap: cap::SPAWN,
         cap_name: "SPAWN",
+        group: "Demos",
         help: "load a separate program into its own address space",
     },
     CommandSpec {
         name: "procs",
         cap: cap::SPAWN,
         cap_name: "SPAWN",
+        group: "Demos",
         help: "run two separate programs concurrently (own address spaces)",
     },
     CommandSpec {
         name: "rogue",
         cap: cap::SPAWN,
         cap_name: "SPAWN",
+        group: "Safety",
         help: "run a task that tries forbidden memory (gets killed)",
     },
     CommandSpec {
         name: "multi",
         cap: cap::SPAWN,
         cap_name: "SPAWN",
+        group: "Demos",
         help: "run 3 cooperative U-mode tasks (round-robin)",
     },
     CommandSpec {
         name: "spy",
         cap: cap::SPAWN,
         cap_name: "SPAWN",
+        group: "Safety",
         help: "prove a task cannot read another task's memory",
     },
     CommandSpec {
         name: "preempt",
         cap: cap::SPAWN,
         cap_name: "SPAWN",
+        group: "Demos",
         help: "two non-yielding tasks interleave via timer preemption",
     },
     CommandSpec {
         name: "linux",
         cap: cap::SPAWN,
         cap_name: "SPAWN",
+        group: "Demos",
         help: "run a Linux-ABI app via the Pol personality",
     },
     CommandSpec {
         name: "bench",
         cap: cap::SPAWN,
         cap_name: "SPAWN",
+        group: "Demos",
         help: "measure ecall round-trip cost (U-mode task)",
     },
     CommandSpec {
         name: "ipc",
         cap: cap::SPAWN,
         cap_name: "SPAWN",
+        group: "Demos",
         help: "agent delegates a capability to a service via IPC",
     },
     CommandSpec {
         name: "ipcq",
         cap: cap::SPAWN,
         cap_name: "SPAWN",
+        group: "Demos",
         help: "two clients enqueue IPC messages without overwriting",
+    },
+    CommandSpec {
+        name: "queues",
+        cap: cap::SPAWN,
+        cap_name: "SPAWN",
+        group: "Demos",
+        help: "alias: run IPC FIFO queue demo",
     },
     CommandSpec {
         name: "cairn",
         cap: cap::SPAWN,
         cap_name: "SPAWN",
+        group: "Demos",
         help: "agent does a rollbackable action via a Cairn store service",
+    },
+    CommandSpec {
+        name: "deny",
+        cap: cap::SPAWN,
+        cap_name: "SPAWN",
+        group: "Safety",
+        help: "run a compact denial tour",
     },
     CommandSpec {
         name: "secret",
         cap: cap::SECRET,
         cap_name: "SECRET",
+        group: "Safety",
         help: "(needs a cap the console lacks)",
     },
     CommandSpec {
         name: "halt",
         cap: cap::HALT,
         cap_name: "HALT",
+        group: "Power",
         help: "power off the machine",
     },
 ];
@@ -2390,6 +2496,112 @@ fn cap_names(set: u32) -> &'static str {
             "INSPECT TIME ECHO HALT SPAWN"
         }
         _ => "(custom set)",
+    }
+}
+
+fn print_help(held: u32) {
+    const GROUPS: &[&str] = &["Inspect", "Storage", "Services", "Safety", "Demos", "Power"];
+    kprintln!("commands (cap required -> held?):");
+    for group in GROUPS {
+        kprintln!("  [{}]", group);
+        for c in COMMANDS {
+            if c.group != *group {
+                continue;
+            }
+            let ok = if c.cap == 0 || held & c.cap == c.cap {
+                "yes"
+            } else {
+                "DENIED"
+            };
+            kprintln!("    {:<13} {:<8} [{}]  {}", c.name, c.cap_name, ok, c.help);
+        }
+    }
+}
+
+fn print_status(plan: &KernelPlan, memory: &[MemoryRegion], held: u32) {
+    refresh_virtio_service_state();
+    let ticks = TICKS.load(Ordering::Relaxed);
+    let usable_regions = memory
+        .iter()
+        .filter(|r| r.kind == MemoryKind::Usable)
+        .count();
+    let running_services = unsafe {
+        let mut n = 0usize;
+        let mut i = 0usize;
+        while i < SERVICE_COUNT {
+            if SERVICES[i].state == ServiceState::Running {
+                n += 1;
+            }
+            i += 1;
+        }
+        n
+    };
+    kprintln!("status:");
+    kprintln!("  target: {:?}", plan.target);
+    kprintln!(
+        "  uptime: {} ticks (~{}.{} s)",
+        ticks,
+        ticks / TIMER_HZ,
+        ticks % TIMER_HZ
+    );
+    kprintln!(
+        "  memory: {} bytes usable across {} usable region(s)",
+        plan.usable_bytes,
+        usable_regions
+    );
+    kprintln!(
+        "  services: {} declared, {} running",
+        plan.services.len(),
+        running_services
+    );
+    kprintln!(
+        "  install: root={} block={} marker_sector={} root_metadata_sector={}",
+        plan.install_manifest.root_service,
+        plan.install_manifest.block_service,
+        plan.install_manifest.layout.marker_sector,
+        plan.install_manifest.layout.root_metadata_sector
+    );
+    kprintln!("  console caps: {}", cap_names(held));
+}
+
+fn task_state_name(state: TaskState) -> &'static str {
+    match state {
+        TaskState::Unused => "Unused",
+        TaskState::Ready => "Ready",
+        TaskState::Blocked => "Blocked",
+        TaskState::Done => "Done",
+    }
+}
+
+fn service_for_task(task: usize) -> &'static str {
+    unsafe {
+        let mut i = 0usize;
+        while i < SERVICE_COUNT {
+            if SERVICES[i].task == task {
+                return SERVICES[i].name;
+            }
+            i += 1;
+        }
+    }
+    "-"
+}
+
+fn print_tasks() {
+    refresh_virtio_service_state();
+    unsafe {
+        kprintln!("tasks:");
+        let mut i = 0usize;
+        while i < MAX_TASKS {
+            kprintln!(
+                "  task{} state={:<7} caps={:#x} exit={} service={}",
+                i,
+                task_state_name(TSTATE[i]),
+                TCAPS[i],
+                TEXIT[i],
+                service_for_task(i)
+            );
+            i += 1;
+        }
     }
 }
 
@@ -2434,15 +2646,7 @@ fn dispatch(cmd: &str, arg: &str, plan: &KernelPlan, memory: &[MemoryRegion], he
 
     match cmd {
         "help" => {
-            kprintln!("commands (cap required → held?):");
-            for c in COMMANDS {
-                let ok = if c.cap == 0 || held & c.cap == c.cap {
-                    "yes"
-                } else {
-                    "DENIED"
-                };
-                kprintln!("  {:<9} {:<8} [{}]  {}", c.name, c.cap_name, ok, c.help);
-            }
+            print_help(held);
         }
         "caps" => kprintln!("console capabilities: {}", cap_names(held)),
         "mem" => {
@@ -2452,6 +2656,8 @@ fn dispatch(cmd: &str, arg: &str, plan: &KernelPlan, memory: &[MemoryRegion], he
                 kprintln!("  {:#012x}..{:#012x}  {:?}", r.start, end, r.kind);
             }
         }
+        "status" => print_status(plan, memory, held),
+        "tasks" => print_tasks(),
         "disk" => {
             kprintln!("[kernel] user-space virtio-blk: first prove no device cap means no MMIO");
             run_virtio_no_grant_probe();
@@ -2463,6 +2669,15 @@ fn dispatch(cmd: &str, arg: &str, plan: &KernelPlan, memory: &[MemoryRegion], he
         "pset" => run_registered_virtio_client(plan, BLK_REQ_PSET, arg),
         "pget" => run_registered_virtio_client(plan, BLK_REQ_PGET, ""),
         "prollback" => run_registered_virtio_client(plan, BLK_REQ_PROLLBACK, ""),
+        "write" => run_registered_virtio_client(plan, BLK_REQ_PSET, arg),
+        "read" => run_registered_virtio_client(plan, BLK_REQ_PGET, ""),
+        "rollback" => run_registered_virtio_client(plan, BLK_REQ_PROLLBACK, ""),
+        "history" => {
+            kprintln!("[storage] Cairn v0 keeps current sector 2 and previous sector 3");
+            kprintln!("[storage] current value:");
+            run_registered_virtio_client(plan, BLK_REQ_PGET, "");
+            kprintln!("[storage] previous value is used by rollback; full commit history is future Cairn work");
+        }
         "vblkd" => {
             kprintln!("[kernel] exercising registered virtio-blk daemon with IPC client");
             kprintln!("[kernel] daemon gets DEVICE+DMA+IPC; client gets IPC+DMA only (no MMIO)");
@@ -2521,6 +2736,18 @@ fn dispatch(cmd: &str, arg: &str, plan: &KernelPlan, memory: &[MemoryRegion], he
         "services" => {
             let _ = ensure_virtio_block_service(plan);
             print_services();
+        }
+        "root" => {
+            kprintln!("[install] root summary:");
+            kprintln!(
+                "  manifest root={} block={} marker_sector={} metadata_sector={}",
+                plan.install_manifest.root_service,
+                plan.install_manifest.block_service,
+                plan.install_manifest.layout.marker_sector,
+                plan.install_manifest.layout.root_metadata_sector
+            );
+            run_registered_virtio_client(plan, BLK_REQ_INSTALL_CHECK, "");
+            run_registered_virtio_client(plan, BLK_REQ_ROOT_STATUS, "");
         }
         "install-check" => {
             kprintln!("[install] validating boot/install manifest v0");
@@ -2623,6 +2850,12 @@ fn dispatch(cmd: &str, arg: &str, plan: &KernelPlan, memory: &[MemoryRegion], he
             kprintln!("[kernel] IPC demo done; back in the console");
         }
         "ipcq" => {
+            if virtio_service_is_running() {
+                kprintln!(
+                    "[kernel] IPC queue demo skipped to keep running services alive; use it before starting services"
+                );
+                return;
+            }
             kprintln!("[kernel] IPC queue: two clients enqueue while the service is busy");
             run_tasks(&[
                 (
@@ -2635,6 +2868,25 @@ fn dispatch(cmd: &str, arg: &str, plan: &KernelPlan, memory: &[MemoryRegion], he
             ]);
             kprintln!("[kernel] IPC queue demo done; back in the console");
         }
+        "queues" => {
+            if virtio_service_is_running() {
+                kprintln!(
+                    "[kernel] queues demo skipped to keep running services alive; use it before starting services"
+                );
+                return;
+            }
+            kprintln!("[kernel] queues: bounded FIFO IPC mailbox demo");
+            run_tasks(&[
+                (
+                    queue_service_task as usize,
+                    TASK_PRINT | TASK_IPC,
+                    PERS_NATIVE,
+                ),
+                (queue_agent_a as usize, TASK_PRINT | TASK_IPC, PERS_NATIVE),
+                (queue_agent_b as usize, TASK_PRINT | TASK_IPC, PERS_NATIVE),
+            ]);
+            kprintln!("[kernel] queue demo done; back in the console");
+        }
         "cairn" => {
             kprintln!(
                 "[kernel] Cairn store service + an agent doing a rollbackable action over IPC"
@@ -2645,6 +2897,20 @@ fn dispatch(cmd: &str, arg: &str, plan: &KernelPlan, memory: &[MemoryRegion], he
                 (agent_cairn as usize, TASK_PRINT | TASK_IPC, PERS_NATIVE),
             ]);
             kprintln!("[kernel] Cairn demo done; back in the console");
+        }
+        "deny" => {
+            kprintln!("[safety] denial tour: no ambient authority across caps, MMIO, and Pol");
+            kprintln!("denied: 'secret' requires capability SECRET (not held)");
+            run_virtio_no_grant_probe();
+            kprintln!("[safety] no-grant MMIO fault returned; console survived");
+            if virtio_service_is_running() {
+                kprintln!(
+                    "[safety] Pol denial demo skipped here to keep running services alive; use `linux` before starting services"
+                );
+            } else {
+                run_tasks(&[(linux_app as usize, TASK_PRINT, PERS_LINUX)]);
+                kprintln!("[safety] unsupported Linux syscall returned ENOSYS; console survived");
+            }
         }
         "halt" => {
             kprintln!("halting.");

@@ -135,21 +135,16 @@ QEMU exits with code 0 after `halt`.
 
 ## Commands
 
-`help`, `caps`, `mem`, `services`, `install-check`, `install-init`,
-`root-status`, `uptime`, `echo <text>`, `run`, `halt` — each gated by a
-capability the console holds. `secret` requires a capability the console is never
-granted, so it is always denied (the no-ambient-authority demo). `run` spawns a
-U-mode task granted only `PRINT` (not `TIME`); watch `sys_uptime` get denied at
-the kernel boundary, then control return to the console. `rogue` spawns a task
-that writes the UART directly; watch it take a page fault and get killed while
-the console survives. `linux` runs a Linux-ABI app through the Pol layer (watch
-`close()` come back as `ENOSYS`). `ipc` runs an agent that delegates its `PRINT`
-capability to a no-authority service over a message. `ipcq` proves the bounded
-FIFO mailbox path: two clients enqueue while a service is busy, and neither
-message is overwritten. `disk` first proves that a process without a device
-capability faults when touching virtio MMIO, then resolves the registered
-`virtio-block` service. `bwrite`, `bread`, `pset`, `pget`, `prollback`, and the
-install/root commands all use the boot-managed daemon over IPC. `vblkd` is now a
+`help` groups commands by purpose. `status`, `tasks`, `caps`, `mem`, and
+`services` inspect the live boot/runtime state. `install-check`, `install-init`,
+`root`, and `root-status` inspect the v0 install/root contract. `write <text>`,
+`read`, `history`, and `rollback` are friendly aliases over the durable Cairn
+sector path (`pset`, `pget`, `prollback`). `secret` requires a capability the
+console is never granted, so it is always denied. `deny` runs a compact denial
+tour across caps, no-grant MMIO, and Pol. `ipcq`/`queues` prove the bounded FIFO
+mailbox path: two clients enqueue while a service is busy, and neither message
+is overwritten. `disk`, `bwrite`, `bread`, storage aliases, and install/root
+commands all use the boot-managed `virtio-block` daemon over IPC. `vblkd` is a
 regression/demo client for that registered daemon; only the daemon gets the
 device/MMIO capability.
 
