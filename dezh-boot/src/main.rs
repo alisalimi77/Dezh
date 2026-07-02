@@ -51,7 +51,10 @@ use core::ptr::{read_volatile, write_volatile};
 use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 use alloc::vec;
-use dezh_kernel::{boot_banner, plan_boot, BootInfo, KernelPlan, MemoryKind, MemoryRegion};
+use dezh_kernel::{
+    boot_banner, plan_boot, BootInfo, KernelCapability, KernelPlan, MemoryKind, MemoryRegion,
+    ServiceKind,
+};
 
 // --- Assembly: boot entry, trap entry, U-mode enter, and kernel-context restore.
 global_asm!(
@@ -667,7 +670,7 @@ fn build_page_tables() {
         let l1 = &mut (*core::ptr::addr_of_mut!(L1)).0;
         // 0x0..0x4000_0000 as one kernel-only gigapage (covers UART + finisher).
         root[0] = pte(0x0, PTE_R | PTE_W | PTE_X); // U=0
-        // 0x8000_0000..0xC000_0000 via an L1 table of 2 MiB megapages.
+                                                   // 0x8000_0000..0xC000_0000 via an L1 table of 2 MiB megapages.
         let l1_pa = core::ptr::addr_of!(L1) as u64;
         root[2] = ((l1_pa >> 12) << 10) | PTE_V; // non-leaf pointer
         for i in 0..512usize {
@@ -1011,7 +1014,12 @@ fn build_address_space(spec: &ProcessSpec) -> (usize, usize) {
         let dma_pa = core::ptr::addr_of!(VIRTIO_DMA) as usize;
         let mut off = 0usize;
         while off < VIRTIO_DMA_SIZE {
-            map_page(root, VIRTIO_DMA_VA + off, dma_pa + off, PTE_U | PTE_R | PTE_W);
+            map_page(
+                root,
+                VIRTIO_DMA_VA + off,
+                dma_pa + off,
+                PTE_U | PTE_R | PTE_W,
+            );
             off += FRAME_SIZE;
         }
     }
@@ -1034,7 +1042,7 @@ fn proc_satp(root: usize) -> usize {
 // register frame (saved/restored by utrap), its own 64 KiB stack carved from the
 // top of the user region, and its own capability set. Timer preemption is a
 // future refinement; for now switches happen on yield/exit (cooperative).
-const MAX_TASKS: usize = 4;
+const MAX_TASKS: usize = 8;
 
 #[derive(Clone, Copy, PartialEq)]
 enum TaskState {
@@ -1043,6 +1051,42 @@ enum TaskState {
     Blocked, // waiting on msg_recv until a message arrives
     Done,
 }
+
+#[derive(Clone, Copy, PartialEq)]
+enum ServiceState {
+    Unused,
+    Declared,
+    Starting,
+    Running,
+    Faulted,
+    Stopped,
+}
+
+#[derive(Clone, Copy)]
+struct ServiceEntry {
+    name: &'static str,
+    kind: ServiceKind,
+    state: ServiceState,
+    task: usize,
+    caps: usize,
+    grants: usize,
+    fault: &'static str,
+}
+
+const EMPTY_SERVICE: ServiceEntry = ServiceEntry {
+    name: "",
+    kind: ServiceKind::Init,
+    state: ServiceState::Unused,
+    task: usize::MAX,
+    caps: 0,
+    grants: 0,
+    fault: "",
+};
+
+const MAX_SERVICES: usize = 8;
+static mut SERVICES: [ServiceEntry; MAX_SERVICES] = [EMPTY_SERVICE; MAX_SERVICES];
+static mut SERVICE_COUNT: usize = 0;
+static mut TEXIT: [usize; MAX_TASKS] = [0; MAX_TASKS];
 
 // One-slot mailbox per task for capability-passing IPC. A message carries a
 // small payload plus a *granted* capability set (attenuated to what the sender
@@ -1120,8 +1164,8 @@ unsafe fn schedule_or_return() -> *const usize {
         Some(i) => {
             CURRENT = i;
             set_active_task_mem(i); // give the new task its private stack, hide others
-            // Switch to the task's address space (own satp for a loaded process,
-            // the shared kernel satp for a baked task).
+                                    // Switch to the task's address space (own satp for a loaded process,
+                                    // the shared kernel satp for a baked task).
             asm!("csrw satp, {}", in(reg) TSATP[i]);
             asm!("sfence.vma");
             frame_ptr(i) as *const usize
@@ -1164,6 +1208,7 @@ extern "C" fn utrap_handler(frame_ptr: *mut usize) -> *const usize {
                 cur
             );
             TSTATE[cur] = TaskState::Done;
+            TEXIT[cur] = SYS_DENIED;
             return schedule_or_return();
         }
 
@@ -1200,6 +1245,7 @@ extern "C" fn utrap_handler(frame_ptr: *mut usize) -> *const usize {
                     LINUX_EXIT | LINUX_EXIT_GROUP => {
                         kprintln!("  [pol/linux] app exit (code {})", frame[F_A0]);
                         TSTATE[cur] = TaskState::Done;
+                        TEXIT[cur] = frame[F_A0];
                         return schedule_or_return();
                     }
                     other => {
@@ -1218,6 +1264,7 @@ extern "C" fn utrap_handler(frame_ptr: *mut usize) -> *const usize {
                 SYS_EXIT => {
                     kprintln!("  [kernel] task {} exited (code {})", cur, frame[F_A0]);
                     TSTATE[cur] = TaskState::Done;
+                    TEXIT[cur] = frame[F_A0];
                     return schedule_or_return();
                 }
                 SYS_PRINT => {
@@ -1275,7 +1322,10 @@ extern "C" fn utrap_handler(frame_ptr: *mut usize) -> *const usize {
                     let to = frame[F_A0];
                     let len = frame[F_A2].min(64);
                     let requested = frame[F_A3];
-                    if to >= MAX_TASKS || TSTATE[to] == TaskState::Unused {
+                    if to >= MAX_TASKS
+                        || TSTATE[to] == TaskState::Unused
+                        || TSTATE[to] == TaskState::Done
+                    {
                         frame[F_A0] = SYS_DENIED;
                         return frame_ptr;
                     }
@@ -1361,7 +1411,7 @@ fn run_tasks(specs: &[(usize, usize, u8)]) {
         }
         CURRENT = 0;
         set_active_task_mem(0); // expose only task 0's stack region to start
-        // Switch to the multitasking trap path and arm the preemption timer.
+                                // Switch to the multitasking trap path and arm the preemption timer.
         asm!("csrw stvec, {}", in(reg) utrap as usize);
         sbi_set_timer(rdtime() + QUANTUM);
         run_first(frame_ptr(0) as *const usize);
@@ -1414,15 +1464,237 @@ fn run_processes(specs: &[ProcessSpec]) {
     }
 }
 
-const BLK_OP_DISK: usize = 1;
-const BLK_OP_BWRITE: usize = 2;
-const BLK_OP_BREAD: usize = 3;
-const BLK_OP_PSET: usize = 4;
-const BLK_OP_PGET: usize = 5;
-const BLK_OP_PROLLBACK: usize = 6;
+fn run_scheduler_from(first: usize) {
+    unsafe {
+        CURRENT = first;
+        asm!("csrw stvec, {}", in(reg) utrap as usize);
+        sbi_set_timer(rdtime() + QUANTUM);
+        asm!("csrw satp, {}", in(reg) TSATP[first]);
+        asm!("sfence.vma");
+        run_first(frame_ptr(first) as *const usize);
+        asm!("csrw satp, {}", in(reg) kernel_satp());
+        asm!("sfence.vma");
+        asm!("csrw stvec, {}", in(reg) trap_entry as usize);
+        sbi_set_timer(rdtime() + TIMER_DELTA);
+    }
+}
+
+fn spawn_process_at(slot: usize, spec: &ProcessSpec) {
+    unsafe {
+        let (root, entry) = build_address_space(spec);
+        let f = &mut FRAMES[slot];
+        *f = [0; 32];
+        f[F_SEPC] = entry;
+        f[F_SP] = USER_STACK_TOP;
+        f[F_A0] = spec.arg0;
+        f[F_A1] = spec.arg1;
+        f[F_A2] = spec.arg2;
+        f[F_A3] = spec.arg3;
+        TCAPS[slot] = spec.caps;
+        TPERS[slot] = spec.personality;
+        TSATP[slot] = proc_satp(root);
+        TEXIT[slot] = 0;
+        MBOX[slot].full = false;
+        TSTATE[slot] = TaskState::Ready;
+    }
+}
+
+fn clear_foreground_tasks() {
+    unsafe {
+        let mut i = FIRST_FOREGROUND_TASK;
+        while i < MAX_TASKS {
+            TSTATE[i] = TaskState::Unused;
+            MBOX[i].full = false;
+            TCAPS[i] = 0;
+            TEXIT[i] = 0;
+            i += 1;
+        }
+    }
+}
+
+fn run_foreground_processes(specs: &[ProcessSpec]) {
+    let n = specs.len().min(MAX_TASKS - FIRST_FOREGROUND_TASK);
+    set_active_task_mem(usize::MAX);
+    clear_foreground_tasks();
+    for (i, spec) in specs.iter().take(n).enumerate() {
+        spawn_process_at(FIRST_FOREGROUND_TASK + i, spec);
+    }
+    run_scheduler_from(FIRST_FOREGROUND_TASK);
+}
+
+fn service_state_name(state: ServiceState) -> &'static str {
+    match state {
+        ServiceState::Unused => "Unused",
+        ServiceState::Declared => "Declared",
+        ServiceState::Starting => "Starting",
+        ServiceState::Running => "Running",
+        ServiceState::Faulted => "Faulted",
+        ServiceState::Stopped => "Stopped",
+    }
+}
+
+fn task_caps_for(service: &str, plan: &KernelPlan) -> usize {
+    let mut caps = TASK_PRINT;
+    for seed in &plan.capability_seeds {
+        if seed.service != service {
+            continue;
+        }
+        match seed.capability {
+            KernelCapability::SendIpc => caps |= TASK_IPC,
+            KernelCapability::OpenVirtioDevice => {
+                caps |= TASK_DEVICE_VIRTIO_BLK | TASK_BLOCK_READ | TASK_BLOCK_WRITE
+            }
+            KernelCapability::OpenCairnRoot => caps |= TASK_BLOCK_READ | TASK_BLOCK_WRITE,
+            KernelCapability::StartService
+            | KernelCapability::AllocateFrames
+            | KernelCapability::MapAddressSpace
+            | KernelCapability::OpenWasmRuntime => {}
+        }
+    }
+    caps
+}
+
+fn service_index(name: &str) -> Option<usize> {
+    unsafe {
+        let mut i = 0usize;
+        while i < SERVICE_COUNT {
+            if SERVICES[i].name == name {
+                return Some(i);
+            }
+            i += 1;
+        }
+    }
+    None
+}
+
+fn build_service_registry(plan: &KernelPlan) {
+    unsafe {
+        SERVICE_COUNT = 0;
+        for service in &plan.services {
+            if SERVICE_COUNT >= MAX_SERVICES {
+                break;
+            }
+            let caps = task_caps_for(service.name, plan);
+            let grants = match service.kind {
+                ServiceKind::VirtioBlock => 0b11,
+                ServiceKind::Cairn => 0b01,
+                _ => 0,
+            };
+            SERVICES[SERVICE_COUNT] = ServiceEntry {
+                name: service.name,
+                kind: service.kind,
+                state: ServiceState::Declared,
+                task: usize::MAX,
+                caps,
+                grants,
+                fault: "",
+            };
+            SERVICE_COUNT += 1;
+        }
+    }
+    kprintln!(
+        "[dezh-boot] service registry built from boot plan ({} services)",
+        unsafe { SERVICE_COUNT }
+    );
+}
+
+fn refresh_virtio_service_state() {
+    if let Some(i) = service_index("virtio-block") {
+        unsafe {
+            let task = SERVICES[i].task;
+            if task < MAX_TASKS {
+                if TSTATE[task] == TaskState::Blocked || TSTATE[task] == TaskState::Ready {
+                    SERVICES[i].state = ServiceState::Running;
+                    SERVICES[i].fault = "";
+                } else if TSTATE[task] == TaskState::Done && TEXIT[task] == 0 {
+                    SERVICES[i].state = ServiceState::Stopped;
+                    SERVICES[i].fault = "driver stopped";
+                } else if TSTATE[task] == TaskState::Done {
+                    SERVICES[i].state = ServiceState::Faulted;
+                    SERVICES[i].fault = "driver exited or faulted";
+                }
+            }
+        }
+    }
+}
+
+fn ensure_virtio_block_service(_plan: &KernelPlan) -> Option<usize> {
+    let idx = service_index("virtio-block")?;
+    unsafe {
+        let task = SERVICES[idx].task;
+        if SERVICES[idx].state == ServiceState::Running
+            && task < MAX_TASKS
+            && (TSTATE[task] == TaskState::Blocked || TSTATE[task] == TaskState::Ready)
+        {
+            return Some(task);
+        }
+        SERVICES[idx].state = ServiceState::Starting;
+        SERVICES[idx].task = VIRTIO_SERVICE_TASK;
+        SERVICES[idx].fault = "";
+        let caps = SERVICES[idx].caps;
+        kprintln!(
+            "[services] starting virtio-block from boot registry as task {VIRTIO_SERVICE_TASK}"
+        );
+        let spec = ProcessSpec::new(VIRTIO_BLK_ELF, caps, BLK_OP_DAEMON)
+            .args(virtio_dma_pa(), 0, 0)
+            .virtio_blk()
+            .virtio_dma();
+        spawn_process_at(VIRTIO_SERVICE_TASK, &spec);
+    }
+    run_scheduler_from(VIRTIO_SERVICE_TASK);
+    refresh_virtio_service_state();
+    unsafe {
+        if SERVICES[idx].state == ServiceState::Running {
+            kprintln!(
+                "[services] virtio-block Running (task {})",
+                SERVICES[idx].task
+            );
+            Some(SERVICES[idx].task)
+        } else {
+            kprintln!("[services] virtio-block Faulted: {}", SERVICES[idx].fault);
+            None
+        }
+    }
+}
+
+fn print_services() {
+    refresh_virtio_service_state();
+    unsafe {
+        let count = SERVICE_COUNT;
+        kprintln!("runtime services ({} total):", count);
+        let mut i = 0usize;
+        while i < count {
+            let s = SERVICES[i];
+            kprintln!(
+                "  - {:<13} {:?} state={} task={} caps={:#x} grants={:#x} {}",
+                s.name,
+                s.kind,
+                service_state_name(s.state),
+                s.task,
+                s.caps,
+                s.grants,
+                s.fault
+            );
+            i += 1;
+        }
+    }
+}
+
 const BLK_OP_NO_GRANT_PROBE: usize = 7;
 const BLK_OP_DAEMON: usize = 8;
 const BLK_OP_CLIENT_DEMO: usize = 9;
+const BLK_OP_CLIENT_REQ: usize = 10;
+const BLK_REQ_PROBE: usize = 1;
+const BLK_REQ_BWRITE: usize = 2;
+const BLK_REQ_BREAD: usize = 3;
+const BLK_REQ_PSET: usize = 4;
+const BLK_REQ_PGET: usize = 5;
+const BLK_REQ_PROLLBACK: usize = 6;
+const BLK_REQ_INSTALL_CHECK: usize = 8;
+const BLK_REQ_INSTALL_INIT: usize = 9;
+const BLK_REQ_ROOT_STATUS: usize = 10;
+const VIRTIO_SERVICE_TASK: usize = 0;
+const FIRST_FOREGROUND_TASK: usize = 1;
 
 fn virtio_dma_pa() -> usize {
     core::ptr::addr_of!(VIRTIO_DMA) as usize
@@ -1439,37 +1711,45 @@ fn prepare_virtio_input(text: &str) -> usize {
     n
 }
 
-fn run_virtio_blk_transaction(op: usize, input: &str) {
-    let input_len = prepare_virtio_input(input);
-    let caps = TASK_PRINT | TASK_DEVICE_VIRTIO_BLK | TASK_BLOCK_READ | TASK_BLOCK_WRITE;
-    run_processes(&[ProcessSpec::new(VIRTIO_BLK_ELF, caps, op)
-        .args(virtio_dma_pa(), input_len, 0)
-        .virtio_blk()
-        .virtio_dma()]);
-}
-
 fn run_virtio_no_grant_probe() {
-    run_processes(&[ProcessSpec::new(
+    run_foreground_processes(&[ProcessSpec::new(
         VIRTIO_BLK_ELF,
         TASK_PRINT,
         BLK_OP_NO_GRANT_PROBE,
     )]);
 }
 
-fn run_virtio_blk_daemon_demo() {
-    let driver_caps = TASK_PRINT
-        | TASK_IPC
-        | TASK_DEVICE_VIRTIO_BLK
-        | TASK_BLOCK_READ
-        | TASK_BLOCK_WRITE;
+fn run_registered_virtio_client(plan: &KernelPlan, req: usize, input: &str) {
+    let Some(daemon) = ensure_virtio_block_service(plan) else {
+        kprintln!("[services] virtio-block unavailable; command failed cleanly");
+        return;
+    };
+    let input_len = prepare_virtio_input(input);
     let client_caps = TASK_PRINT | TASK_IPC | TASK_BLOCK_READ | TASK_BLOCK_WRITE;
-    run_processes(&[
-        ProcessSpec::new(VIRTIO_BLK_ELF, driver_caps, BLK_OP_DAEMON)
-            .args(virtio_dma_pa(), 0, 0)
-            .virtio_blk()
+    kprintln!(
+        "[services] resolved service virtio-block task={daemon}; launching foreground client"
+    );
+    run_foreground_processes(&[
+        ProcessSpec::new(VIRTIO_BLK_ELF, client_caps, BLK_OP_CLIENT_REQ)
+            .args(daemon, input_len, req)
             .virtio_dma(),
-        ProcessSpec::new(VIRTIO_BLK_ELF, client_caps, BLK_OP_CLIENT_DEMO).virtio_dma(),
     ]);
+    refresh_virtio_service_state();
+}
+
+fn run_virtio_blk_daemon_demo(plan: &KernelPlan) {
+    let Some(daemon) = ensure_virtio_block_service(plan) else {
+        kprintln!("[services] virtio-block unavailable; daemon demo failed cleanly");
+        return;
+    };
+    let client_caps = TASK_PRINT | TASK_IPC | TASK_BLOCK_READ | TASK_BLOCK_WRITE;
+    kprintln!("[services] vblkd uses registered daemon task={daemon}; client has IPC+DMA only");
+    run_foreground_processes(&[
+        ProcessSpec::new(VIRTIO_BLK_ELF, client_caps, BLK_OP_CLIENT_DEMO)
+            .args(daemon, 0, 0)
+            .virtio_dma(),
+    ]);
+    refresh_virtio_service_state();
 }
 
 // Worker tasks (run in U-mode, so they live in the user region). Each prints a
@@ -1725,7 +2005,11 @@ extern "C" fn service_task() -> ! {
 #[no_mangle]
 extern "C" fn agent_task() -> ! {
     sys_print(b"    [agent] delegating my PRINT capability to the service over IPC\n");
-    sys_send(0, b"    [service] <payload delivered with a delegated PRINT cap>\n", TASK_PRINT);
+    sys_send(
+        0,
+        b"    [service] <payload delivered with a delegated PRINT cap>\n",
+        TASK_PRINT,
+    );
     sys_exit(0)
 }
 
@@ -1801,7 +2085,10 @@ extern "C" fn bench_task() -> ! {
 #[link_section = ".user.text"]
 #[no_mangle]
 extern "C" fn linux_app() -> ! {
-    linux_write(1, b"    [linux] hello from a Linux-ABI app, serviced by Pol\n");
+    linux_write(
+        1,
+        b"    [linux] hello from a Linux-ABI app, serviced by Pol\n",
+    );
     let r = linux_close(3);
     if r == -38 {
         linux_write(
@@ -1830,34 +2117,192 @@ struct CommandSpec {
 }
 
 const COMMANDS: &[CommandSpec] = &[
-    CommandSpec { name: "help", cap: 0, cap_name: "-", help: "list commands" },
-    CommandSpec { name: "caps", cap: cap::INSPECT, cap_name: "INSPECT", help: "show the console's capabilities" },
-    CommandSpec { name: "mem", cap: cap::INSPECT, cap_name: "INSPECT", help: "show the memory map" },
-    CommandSpec { name: "frames", cap: cap::INSPECT, cap_name: "INSPECT", help: "frame allocator self-test (alloc/zero/free)" },
-    CommandSpec { name: "disk", cap: cap::INSPECT, cap_name: "INSPECT", help: "probe virtio-mmio slots for a block device" },
-    CommandSpec { name: "agent", cap: cap::SPAWN, cap_name: "SPAWN", help: "run a Dezh-IR agent program (capability-gated interpreter)" },
-    CommandSpec { name: "bwrite", cap: cap::SPAWN, cap_name: "SPAWN", help: "write a marker to disk sector 0 (virtio-blk)" },
-    CommandSpec { name: "bread", cap: cap::INSPECT, cap_name: "INSPECT", help: "read disk sector 0 (proves persistence)" },
-    CommandSpec { name: "pset", cap: cap::SPAWN, cap_name: "SPAWN", help: "durable Cairn: set current value (persisted) <text>" },
-    CommandSpec { name: "pget", cap: cap::INSPECT, cap_name: "INSPECT", help: "durable Cairn: read current value" },
-    CommandSpec { name: "prollback", cap: cap::SPAWN, cap_name: "SPAWN", help: "durable Cairn: roll back to previous value" },
-    CommandSpec { name: "vblkd", cap: cap::SPAWN, cap_name: "SPAWN", help: "run long-lived user-space virtio-blk daemon + IPC client" },
-    CommandSpec { name: "services", cap: cap::INSPECT, cap_name: "INSPECT", help: "list init services" },
-    CommandSpec { name: "uptime", cap: cap::TIME, cap_name: "TIME", help: "show timer uptime" },
-    CommandSpec { name: "echo", cap: cap::ECHO, cap_name: "ECHO", help: "echo <text>" },
-    CommandSpec { name: "run", cap: cap::SPAWN, cap_name: "SPAWN", help: "run a capability-limited U-mode task" },
-    CommandSpec { name: "load", cap: cap::SPAWN, cap_name: "SPAWN", help: "load a separate program into its own address space" },
-    CommandSpec { name: "procs", cap: cap::SPAWN, cap_name: "SPAWN", help: "run two separate programs concurrently (own address spaces)" },
-    CommandSpec { name: "rogue", cap: cap::SPAWN, cap_name: "SPAWN", help: "run a task that tries forbidden memory (gets killed)" },
-    CommandSpec { name: "multi", cap: cap::SPAWN, cap_name: "SPAWN", help: "run 3 cooperative U-mode tasks (round-robin)" },
-    CommandSpec { name: "spy", cap: cap::SPAWN, cap_name: "SPAWN", help: "prove a task cannot read another task's memory" },
-    CommandSpec { name: "preempt", cap: cap::SPAWN, cap_name: "SPAWN", help: "two non-yielding tasks interleave via timer preemption" },
-    CommandSpec { name: "linux", cap: cap::SPAWN, cap_name: "SPAWN", help: "run a Linux-ABI app via the Pol personality" },
-    CommandSpec { name: "bench", cap: cap::SPAWN, cap_name: "SPAWN", help: "measure ecall round-trip cost (U-mode task)" },
-    CommandSpec { name: "ipc", cap: cap::SPAWN, cap_name: "SPAWN", help: "agent delegates a capability to a service via IPC" },
-    CommandSpec { name: "cairn", cap: cap::SPAWN, cap_name: "SPAWN", help: "agent does a rollbackable action via a Cairn store service" },
-    CommandSpec { name: "secret", cap: cap::SECRET, cap_name: "SECRET", help: "(needs a cap the console lacks)" },
-    CommandSpec { name: "halt", cap: cap::HALT, cap_name: "HALT", help: "power off the machine" },
+    CommandSpec {
+        name: "help",
+        cap: 0,
+        cap_name: "-",
+        help: "list commands",
+    },
+    CommandSpec {
+        name: "caps",
+        cap: cap::INSPECT,
+        cap_name: "INSPECT",
+        help: "show the console's capabilities",
+    },
+    CommandSpec {
+        name: "mem",
+        cap: cap::INSPECT,
+        cap_name: "INSPECT",
+        help: "show the memory map",
+    },
+    CommandSpec {
+        name: "frames",
+        cap: cap::INSPECT,
+        cap_name: "INSPECT",
+        help: "frame allocator self-test (alloc/zero/free)",
+    },
+    CommandSpec {
+        name: "disk",
+        cap: cap::INSPECT,
+        cap_name: "INSPECT",
+        help: "probe virtio-mmio slots for a block device",
+    },
+    CommandSpec {
+        name: "agent",
+        cap: cap::SPAWN,
+        cap_name: "SPAWN",
+        help: "run a Dezh-IR agent program (capability-gated interpreter)",
+    },
+    CommandSpec {
+        name: "bwrite",
+        cap: cap::SPAWN,
+        cap_name: "SPAWN",
+        help: "write a marker to disk sector 0 (virtio-blk)",
+    },
+    CommandSpec {
+        name: "bread",
+        cap: cap::INSPECT,
+        cap_name: "INSPECT",
+        help: "read disk sector 0 (proves persistence)",
+    },
+    CommandSpec {
+        name: "pset",
+        cap: cap::SPAWN,
+        cap_name: "SPAWN",
+        help: "durable Cairn: set current value (persisted) <text>",
+    },
+    CommandSpec {
+        name: "pget",
+        cap: cap::INSPECT,
+        cap_name: "INSPECT",
+        help: "durable Cairn: read current value",
+    },
+    CommandSpec {
+        name: "prollback",
+        cap: cap::SPAWN,
+        cap_name: "SPAWN",
+        help: "durable Cairn: roll back to previous value",
+    },
+    CommandSpec {
+        name: "vblkd",
+        cap: cap::SPAWN,
+        cap_name: "SPAWN",
+        help: "run long-lived user-space virtio-blk daemon + IPC client",
+    },
+    CommandSpec {
+        name: "services",
+        cap: cap::INSPECT,
+        cap_name: "INSPECT",
+        help: "list runtime services",
+    },
+    CommandSpec {
+        name: "install-check",
+        cap: cap::INSPECT,
+        cap_name: "INSPECT",
+        help: "validate install manifest and disk root marker",
+    },
+    CommandSpec {
+        name: "install-init",
+        cap: cap::SPAWN,
+        cap_name: "SPAWN",
+        help: "initialize Dezh root marker/metadata on disk",
+    },
+    CommandSpec {
+        name: "root-status",
+        cap: cap::INSPECT,
+        cap_name: "INSPECT",
+        help: "read Dezh root metadata from disk",
+    },
+    CommandSpec {
+        name: "uptime",
+        cap: cap::TIME,
+        cap_name: "TIME",
+        help: "show timer uptime",
+    },
+    CommandSpec {
+        name: "echo",
+        cap: cap::ECHO,
+        cap_name: "ECHO",
+        help: "echo <text>",
+    },
+    CommandSpec {
+        name: "run",
+        cap: cap::SPAWN,
+        cap_name: "SPAWN",
+        help: "run a capability-limited U-mode task",
+    },
+    CommandSpec {
+        name: "load",
+        cap: cap::SPAWN,
+        cap_name: "SPAWN",
+        help: "load a separate program into its own address space",
+    },
+    CommandSpec {
+        name: "procs",
+        cap: cap::SPAWN,
+        cap_name: "SPAWN",
+        help: "run two separate programs concurrently (own address spaces)",
+    },
+    CommandSpec {
+        name: "rogue",
+        cap: cap::SPAWN,
+        cap_name: "SPAWN",
+        help: "run a task that tries forbidden memory (gets killed)",
+    },
+    CommandSpec {
+        name: "multi",
+        cap: cap::SPAWN,
+        cap_name: "SPAWN",
+        help: "run 3 cooperative U-mode tasks (round-robin)",
+    },
+    CommandSpec {
+        name: "spy",
+        cap: cap::SPAWN,
+        cap_name: "SPAWN",
+        help: "prove a task cannot read another task's memory",
+    },
+    CommandSpec {
+        name: "preempt",
+        cap: cap::SPAWN,
+        cap_name: "SPAWN",
+        help: "two non-yielding tasks interleave via timer preemption",
+    },
+    CommandSpec {
+        name: "linux",
+        cap: cap::SPAWN,
+        cap_name: "SPAWN",
+        help: "run a Linux-ABI app via the Pol personality",
+    },
+    CommandSpec {
+        name: "bench",
+        cap: cap::SPAWN,
+        cap_name: "SPAWN",
+        help: "measure ecall round-trip cost (U-mode task)",
+    },
+    CommandSpec {
+        name: "ipc",
+        cap: cap::SPAWN,
+        cap_name: "SPAWN",
+        help: "agent delegates a capability to a service via IPC",
+    },
+    CommandSpec {
+        name: "cairn",
+        cap: cap::SPAWN,
+        cap_name: "SPAWN",
+        help: "agent does a rollbackable action via a Cairn store service",
+    },
+    CommandSpec {
+        name: "secret",
+        cap: cap::SECRET,
+        cap_name: "SECRET",
+        help: "(needs a cap the console lacks)",
+    },
+    CommandSpec {
+        name: "halt",
+        cap: cap::HALT,
+        cap_name: "HALT",
+        help: "power off the machine",
+    },
 ];
 
 fn cap_names(set: u32) -> &'static str {
@@ -1900,7 +2345,11 @@ fn dispatch(cmd: &str, arg: &str, plan: &KernelPlan, memory: &[MemoryRegion], he
     };
 
     if spec.cap != 0 && held & spec.cap != spec.cap {
-        kprintln!("denied: '{}' requires capability {} (not held)", cmd, spec.cap_name);
+        kprintln!(
+            "denied: '{}' requires capability {} (not held)",
+            cmd,
+            spec.cap_name
+        );
         return;
     }
 
@@ -1928,17 +2377,17 @@ fn dispatch(cmd: &str, arg: &str, plan: &KernelPlan, memory: &[MemoryRegion], he
             kprintln!("[kernel] user-space virtio-blk: first prove no device cap means no MMIO");
             run_virtio_no_grant_probe();
             kprintln!("[kernel] no-grant probe returned; console survived");
-            run_virtio_blk_transaction(BLK_OP_DISK, "");
+            run_registered_virtio_client(plan, BLK_REQ_PROBE, "");
         }
-        "bwrite" => run_virtio_blk_transaction(BLK_OP_BWRITE, ""),
-        "bread" => run_virtio_blk_transaction(BLK_OP_BREAD, ""),
-        "pset" => run_virtio_blk_transaction(BLK_OP_PSET, arg),
-        "pget" => run_virtio_blk_transaction(BLK_OP_PGET, ""),
-        "prollback" => run_virtio_blk_transaction(BLK_OP_PROLLBACK, ""),
+        "bwrite" => run_registered_virtio_client(plan, BLK_REQ_BWRITE, ""),
+        "bread" => run_registered_virtio_client(plan, BLK_REQ_BREAD, ""),
+        "pset" => run_registered_virtio_client(plan, BLK_REQ_PSET, arg),
+        "pget" => run_registered_virtio_client(plan, BLK_REQ_PGET, ""),
+        "prollback" => run_registered_virtio_client(plan, BLK_REQ_PROLLBACK, ""),
         "vblkd" => {
-            kprintln!("[kernel] launching virtio-blk as a long-lived U-mode driver daemon");
-            kprintln!("[kernel] task0 gets DEVICE+DMA+IPC; task1 gets IPC+DMA only (no MMIO)");
-            run_virtio_blk_daemon_demo();
+            kprintln!("[kernel] exercising registered virtio-blk daemon with IPC client");
+            kprintln!("[kernel] daemon gets DEVICE+DMA+IPC; client gets IPC+DMA only (no MMIO)");
+            run_virtio_blk_daemon_demo(plan);
             kprintln!("[kernel] virtio-blk daemon demo done; back in the console");
         }
         "agent" => {
@@ -1950,7 +2399,9 @@ fn dispatch(cmd: &str, arg: &str, plan: &KernelPlan, memory: &[MemoryRegion], he
                 kprintln!("  verify failed: {}", t.msg());
             } else {
                 kprintln!("  prog 1 (loop: sum 1..=5, then print) WITH the PRINT capability:");
-                let mut h = KHost { caps: ir::CAP_PRINT };
+                let mut h = KHost {
+                    caps: ir::CAP_PRINT,
+                };
                 if let Err(t) = ir::run(sum, &mut h) {
                     kprintln!("  [ir] TRAP: {}", t.msg());
                 }
@@ -1982,13 +2433,36 @@ fn dispatch(cmd: &str, arg: &str, plan: &KernelPlan, memory: &[MemoryRegion], he
             frame_free(a);
             frame_free(b);
             frame_free(c);
-            kprintln!("  after free: {} (back to {})", unsafe { FRAME_FREE }, free0);
+            kprintln!(
+                "  after free: {} (back to {})",
+                unsafe { FRAME_FREE },
+                free0
+            );
         }
         "services" => {
-            kprintln!("init services ({} total):", plan.services.len());
-            for s in &plan.services {
-                kprintln!("  - {:<13} {:?}", s.name, s.kind);
-            }
+            let _ = ensure_virtio_block_service(plan);
+            print_services();
+        }
+        "install-check" => {
+            kprintln!("[install] validating boot/install manifest v0");
+            kprintln!(
+                "[install] target={:?} root={} block={} marker_sector={}",
+                plan.install_manifest.target,
+                plan.install_manifest.root_service,
+                plan.install_manifest.block_service,
+                plan.install_manifest.layout.marker_sector
+            );
+            run_registered_virtio_client(plan, BLK_REQ_INSTALL_CHECK, "");
+        }
+        "install-init" => {
+            kprintln!(
+                "[install] initializing Dezh root marker and metadata via user-space block service"
+            );
+            run_registered_virtio_client(plan, BLK_REQ_INSTALL_INIT, "");
+        }
+        "root-status" => {
+            kprintln!("[install] reading Dezh root metadata via registered block service");
+            run_registered_virtio_client(plan, BLK_REQ_ROOT_STATUS, "");
         }
         "uptime" => {
             let t = TICKS.load(Ordering::Relaxed);
@@ -2001,7 +2475,9 @@ fn dispatch(cmd: &str, arg: &str, plan: &KernelPlan, memory: &[MemoryRegion], he
             kprintln!("[kernel] task returned; back in the S-mode console");
         }
         "load" => {
-            kprintln!("[kernel] loading a separate program into its own address space (cap: PRINT)");
+            kprintln!(
+                "[kernel] loading a separate program into its own address space (cap: PRINT)"
+            );
             run_processes(&[ProcessSpec::new(USERPROG_ELF, TASK_PRINT, 0).uart()]);
             kprintln!("[kernel] program exited; back in the console");
         }
@@ -2014,7 +2490,9 @@ fn dispatch(cmd: &str, arg: &str, plan: &KernelPlan, memory: &[MemoryRegion], he
             kprintln!("[kernel] all processes exited; back in the console");
         }
         "rogue" => {
-            kprintln!("[kernel] spawning a rogue U-mode task (it will try to touch the UART directly)");
+            kprintln!(
+                "[kernel] spawning a rogue U-mode task (it will try to touch the UART directly)"
+            );
             run_tasks(&[(rogue_task as usize, TASK_PRINT, PERS_NATIVE)]);
             kprintln!("[kernel] rogue task handled; console survived");
         }
@@ -2046,7 +2524,9 @@ fn dispatch(cmd: &str, arg: &str, plan: &KernelPlan, memory: &[MemoryRegion], he
             kprintln!("[kernel] preemption demo done");
         }
         "spy" => {
-            kprintln!("[kernel] isolation: task0 owns a private stack; task1 (spy) tries to read it");
+            kprintln!(
+                "[kernel] isolation: task0 owns a private stack; task1 (spy) tries to read it"
+            );
             kprintln!("[kernel] (task0 stack region base = {:#x})", stack_base());
             run_tasks(&[
                 (victim_task as usize, TASK_PRINT, PERS_NATIVE),
@@ -2064,7 +2544,9 @@ fn dispatch(cmd: &str, arg: &str, plan: &KernelPlan, memory: &[MemoryRegion], he
             kprintln!("[kernel] IPC demo done; back in the console");
         }
         "cairn" => {
-            kprintln!("[kernel] Cairn store service + an agent doing a rollbackable action over IPC");
+            kprintln!(
+                "[kernel] Cairn store service + an agent doing a rollbackable action over IPC"
+            );
             // task 0 = cairn store service, task 1 = agent (holds PRINT)
             run_tasks(&[
                 (cairn_service as usize, TASK_IPC, PERS_NATIVE),
@@ -2171,6 +2653,14 @@ pub extern "C" fn kmain() -> ! {
         USERPROG_ELF.len(),
         VIRTIO_BLK_ELF.len()
     );
+    kprintln!(
+        "[dezh-boot] install manifest v0: root={} block={} marker_sector={}",
+        plan.install_manifest.root_service,
+        plan.install_manifest.block_service,
+        plan.install_manifest.layout.marker_sector
+    );
+    build_service_registry(&plan);
+    let _ = ensure_virtio_block_service(&plan);
 
     let held = cap::INSPECT | cap::TIME | cap::ECHO | cap::HALT | cap::SPAWN;
     console(&plan, &memory, held);

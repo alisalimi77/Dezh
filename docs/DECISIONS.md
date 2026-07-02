@@ -78,12 +78,15 @@ Built bottom-up, each "not like Linux/Windows" where it matters:
 - **Drivers:** a device is reachable only through a **device capability** (its
   MMIO mapped into a process). The virtio-blk path now runs through a separate
   U-mode ELF with explicit MMIO + DMA grants; without the grant, MMIO access
-  page-faults and only that task is killed. The `vblkd` demo runs that ELF as a
-  long-lived driver daemon reached by an IPC client that has no MMIO grant.
+  page-faults and only that task is killed. The boot plan is materialized as a
+  service registry, and `virtio-block` starts as a long-lived U-mode daemon
+  reached by IPC clients that have no MMIO grant.
 - **Multi-process:** the scheduler switches per-process address spaces (satp);
   multiple separately-loaded programs run concurrently, preemptively, isolated.
-- **Persistence:** user-space virtio-blk gives real disk I/O; a durable Cairn
-  store (current + previous sector) provides rollback that survives reboot.
+- **Persistence/install contract:** user-space virtio-blk gives real disk I/O; a
+  v0 install manifest defines the Dezh root marker and metadata sectors, and the
+  durable Cairn-style current/previous sectors provide rollback that survives
+  reboot.
 - **W^X:** loaded programs honor per-segment permissions (code R+X, data R+W;
   never W+X).
 - **Agent runtime (Dezh-IR):** the kernel runs agents as a small, **verifiable**
@@ -97,9 +100,9 @@ Built bottom-up, each "not like Linux/Windows" where it matters:
   via WRITE/READ host calls. A real wasm frontend can later compile to this IR
   (D003/D016) — kept outside the trusted core by design.
 - **Deferred (next epics):** a wasm→Dezh-IR frontend (outside the kernel) for
-  real agents + multi-ISA; moving the `vblkd` daemon from console demo into
-  init-managed service startup with a service registry, queued clients, and
-  eventually IOMMU-backed DMA isolation.
+  real agents + multi-ISA; turning the v0 install/root marker into a full
+  installer + boot media flow; queued service clients; and eventually
+  IOMMU-backed DMA isolation.
 
 ## Canonical authority model
 

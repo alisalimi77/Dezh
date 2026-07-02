@@ -62,14 +62,14 @@ boundary every earlier spike ran around.
   an unsupported syscall returns `ENOSYS`. The app has zero ambient authority;
   it only reaches the console because it holds the `PRINT` capability. A first
   taste of legacy compatibility *on the kernel* (D014).
-- **User-space virtio-blk driver** (`disk`, `bwrite`, `bread`, `pset`, `pget`,
-  `prollback`, `vblkd`): block I/O now runs through a separate U-mode ELF. The
-  kernel maps the virtio-mmio slots and a DMA/bounce window only when the process
-  is launched with explicit device/block capabilities. A no-grant probe
-  page-faults on MMIO and the console survives; with the grant, reads/writes and
-  rollbackable persistence go through the user-space driver. `vblkd` runs the
-  same ELF as a long-lived driver daemon and a separate IPC client with no MMIO
-  grant.
+- **Boot-managed service registry + user-space virtio-blk** (`services`,
+  `disk`, `bwrite`, `bread`, `pset`, `pget`, `prollback`, `install-check`,
+  `install-init`, `root-status`, `vblkd`): the boot plan is materialized as a
+  runtime registry, and `virtio-block` starts as a long-lived U-mode daemon. The
+  kernel maps virtio MMIO and the DMA/bounce window only into that service.
+  Foreground clients use IPC and hold no MMIO grant. A no-grant probe still
+  page-faults on MMIO and the console survives. The install commands write/read
+  a v0 Dezh root marker and metadata through the same user-space driver path.
 - Exits QEMU cleanly via the SiFive test finisher when you run `halt`.
 
 ## Layout
@@ -82,7 +82,8 @@ boundary every earlier spike ran around.
 - `build.rs` — applies the linker script and stages the separate user ELFs.
 - `userprog/` — separately-linked demo process loaded into its own address space.
 - `virtio-blk/` — separately-linked user-space block driver process; supports
-  both single transaction mode and daemon + IPC-client mode.
+  the boot-managed daemon, foreground IPC clients, and install/root metadata
+  requests.
 
 This crate is a **standalone workspace**, excluded from the root workspace,
 because it cross-compiles to bare metal (no host linker, no MSVC needed).
@@ -134,28 +135,27 @@ QEMU exits with code 0 after `halt`.
 
 ## Commands
 
-`help`, `caps`, `mem`, `services`, `uptime`, `echo <text>`, `run`, `halt` — each
-gated by a capability the console holds. `secret` requires a capability the
-console is never granted, so it is always denied (the no-ambient-authority demo).
-`run` spawns a U-mode task granted only `PRINT` (not `TIME`); watch `sys_uptime`
-get denied at the kernel boundary, then control return to the console. `rogue`
-spawns a task that writes the UART directly; watch it take a page fault and get
-killed while the console survives. `multi` runs three cooperative tasks that
-interleave via `yield`. `linux` runs a Linux-ABI app through the Pol layer
-(watch `close()` come back as `ENOSYS`). `ipc` runs an agent that delegates its
-`PRINT` capability to a no-authority service over a message (watch the service be
-denied, then succeed once the capability is delegated). `bench` measures the
-ecall round-trip cost (see [BENCH.md](BENCH.md) for the real-hardware comparison
-vs Linux). `disk` first proves that a process without a device capability faults
-when touching virtio MMIO, then starts the user-space virtio-blk driver with the
-explicit MMIO + DMA grants. `bwrite`, `bread`, `pset`, `pget`, and `prollback`
-all use that user-space driver path. `vblkd` starts a long-lived virtio-blk
-driver daemon as task 0 and an IPC client as task 1; only the daemon gets the
-device/MMIO capability.
+`help`, `caps`, `mem`, `services`, `install-check`, `install-init`,
+`root-status`, `uptime`, `echo <text>`, `run`, `halt` — each gated by a
+capability the console holds. `secret` requires a capability the console is never
+granted, so it is always denied (the no-ambient-authority demo). `run` spawns a
+U-mode task granted only `PRINT` (not `TIME`); watch `sys_uptime` get denied at
+the kernel boundary, then control return to the console. `rogue` spawns a task
+that writes the UART directly; watch it take a page fault and get killed while
+the console survives. `linux` runs a Linux-ABI app through the Pol layer (watch
+`close()` come back as `ENOSYS`). `ipc` runs an agent that delegates its `PRINT`
+capability to a no-authority service over a message. `disk` first proves that a
+process without a device capability faults when touching virtio MMIO, then
+resolves the registered `virtio-block` service. `bwrite`, `bread`, `pset`,
+`pget`, `prollback`, and the install/root commands all use the boot-managed
+daemon over IPC. `vblkd` is now a regression/demo client for that registered
+daemon; only the daemon gets the device/MMIO capability.
 
 ## Not yet
 
-The `vblkd` path proves a long-lived driver daemon, but service startup is still
-demo-driven from the console rather than init-managed. DMA isolation is modeled
-with explicit page-table mappings; IOMMU enforcement is future work. Virtio is
-still the legacy QEMU MMIO transport, polled rather than interrupt-driven.
+The service registry is real for `virtio-block`, but `init`, Cairn, and the
+runtime are still represented as boot metadata rather than separate production
+ELFs. The install/root marker is a v0 contract, not a full installer,
+partitioner, or bootloader. DMA isolation is modeled with explicit page-table
+mappings; IOMMU enforcement is future work. Virtio is still the legacy QEMU MMIO
+transport, polled rather than interrupt-driven.

@@ -94,6 +94,8 @@ def run_riscv64(qemu: str, kernel: Path) -> None:
     )
     try:
         session.wait_for("boot contract VALIDATED")
+        session.wait_for("service registry built from boot plan")
+        session.wait_for("virtio-block Running")
         session.wait_for("Dezh console. Every command requires an explicit capability.")
 
         commands = [
@@ -103,19 +105,23 @@ def run_riscv64(qemu: str, kernel: Path) -> None:
             ("rogue", "rogue task handled; console survived"),
             ("ipc", "[service] <payload delivered with a delegated PRINT cap>"),
             ("linux", "unsupported syscall, denied cleanly"),
-            ("disk", "device capability accepted: virtio-blk @ MMIO"),
+            ("services", "virtio-block state=Running"),
+            ("install-check", "install-check: no Dezh root marker yet"),
+            ("install-init", "install-init status=0"),
+            ("root-status", "root metadata = \"DEZHROOT v0"),
+            ("disk", "disk probe via registered daemon status=0"),
             ("disk", "no-grant probe returned; console survived"),
-            ("bwrite", "bwrite via user-space driver status=0"),
-            ("bread", "sector0 = \"DEZH-PERSISTENT-DISK-OK"),
-            ("pset ci-value", "cairn set via user-space driver status=0"),
+            ("bwrite", "bwrite via registered daemon status=0"),
+            ("bread", "test sector = \"DEZH-DAEMON-BLOCK-OK"),
+            ("pset ci-value", "cairn set via registered daemon status=0"),
             ("pget", "cairn current = \"ci-value"),
-            ("pset bad-edit", "cairn set via user-space driver status=0"),
+            ("pset bad-edit", "cairn set via registered daemon status=0"),
             ("prollback", "rollback restored current = \"ci-value"),
             (
                 "vblkd",
                 [
-                    "virtio-blk-daemon] started as a long-lived U-mode driver service",
-                    "vblk-client] sector0 via daemon = \"DEZH-DAEMON-BLOCK-OK",
+                    "vblkd uses registered daemon task=",
+                    "vblk-client] test sector via daemon = \"DEZH-DAEMON-BLOCK-OK",
                     "vblk-client] rollback via daemon restored = \"daemon-ci-value",
                     "virtio-blk daemon demo done; back in the console",
                 ],

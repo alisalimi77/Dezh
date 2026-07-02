@@ -24,6 +24,7 @@ const OP_PROLLBACK: usize = 6;
 const OP_NO_GRANT_PROBE: usize = 7;
 const OP_DAEMON: usize = 8;
 const OP_CLIENT_DEMO: usize = 9;
+const OP_CLIENT_REQ: usize = 10;
 
 const REQ_PROBE: usize = 1;
 const REQ_BWRITE: usize = 2;
@@ -32,6 +33,9 @@ const REQ_PSET: usize = 4;
 const REQ_PGET: usize = 5;
 const REQ_PROLLBACK: usize = 6;
 const REQ_STOP: usize = 7;
+const REQ_INSTALL_CHECK: usize = 8;
+const REQ_INSTALL_INIT: usize = 9;
+const REQ_ROOT_STATUS: usize = 10;
 
 static mut MMIO_BASE: usize = 0x5000_0000;
 const MMIO_WINDOW: usize = 0x5000_0000;
@@ -68,6 +72,11 @@ const USED_OFF: usize = 4096;
 const REQ_OFF: usize = 8192;
 const INPUT_OFF: usize = 12288;
 const SECTOR_SIZE: usize = 512;
+const TEST_SECTOR: u64 = 8;
+const CAIRN_CURRENT_SECTOR: u64 = 2;
+const CAIRN_PREVIOUS_SECTOR: u64 = 3;
+const INSTALL_MARKER_SECTOR: u64 = 0;
+const ROOT_METADATA_SECTOR: u64 = 4;
 const VIRTQ_DESC_F_NEXT: u16 = 1;
 const VIRTQ_DESC_F_WRITE: u16 = 2;
 
@@ -105,16 +114,18 @@ fn sys_exit(code: usize) -> ! {
     unsafe { asm!("ecall", in("a0") code, in("a7") SYS_EXIT, options(noreturn)) }
 }
 
-fn sys_send(to: usize, word: usize) {
+fn sys_send(to: usize, word: usize) -> usize {
+    let rc: usize;
     unsafe {
         asm!("ecall",
-            inout("a0") to => _,
+            inout("a0") to => rc,
             in("a1") 0usize,
             in("a2") 0usize,
             in("a3") 0usize,
             in("a4") word,
             in("a7") SYS_SEND)
     };
+    rc
 }
 
 fn sys_recv() -> (usize, usize) {
@@ -244,6 +255,19 @@ fn set_data(s: &[u8]) {
     }
 }
 
+fn data_starts_with(s: &[u8]) -> bool {
+    let p = data_ptr();
+    let mut i = 0usize;
+    while i < s.len() {
+        let b = unsafe { core::ptr::read_volatile(p.add(i)) };
+        if b != s[i] {
+            return false;
+        }
+        i += 1;
+    }
+    true
+}
+
 fn copy_input(len: usize) {
     unsafe {
         core::ptr::write_bytes(data_ptr(), 0, SECTOR_SIZE);
@@ -294,44 +318,67 @@ fn daemon(dma_base: usize) -> ! {
         let sector = request_sector(word);
         if op == REQ_PROBE {
             sys_print(b"  [virtio-blk-daemon] PROBE over IPC\n");
-            sys_send(from, 0);
+            let _ = sys_send(from, 0);
         } else if op == REQ_BWRITE {
             set_data(b"DEZH-DAEMON-BLOCK-OK");
             let st = rw(dma_base, sector, true);
             sys_print(b"  [virtio-blk-daemon] WRITE sector via IPC status=");
             sys_printnum(st as usize);
-            sys_send(from, st as usize);
+            let _ = sys_send(from, st as usize);
         } else if op == REQ_BREAD {
             set_data(b"");
             let st = rw(dma_base, sector, false);
             sys_print(b"  [virtio-blk-daemon] READ sector via IPC status=");
             sys_printnum(st as usize);
-            sys_send(from, st as usize);
+            let _ = sys_send(from, st as usize);
         } else if op == REQ_PSET {
-            let _ = rw(dma_base, 0, false);
-            let _ = rw(dma_base, 1, true);
+            let _ = rw(dma_base, CAIRN_CURRENT_SECTOR, false);
+            let _ = rw(dma_base, CAIRN_PREVIOUS_SECTOR, true);
             copy_input(sector as usize);
-            let st = rw(dma_base, 0, true);
+            let st = rw(dma_base, CAIRN_CURRENT_SECTOR, true);
             sys_print(b"  [virtio-blk-daemon] CAIRN SET via IPC status=");
             sys_printnum(st as usize);
-            sys_send(from, st as usize);
+            let _ = sys_send(from, st as usize);
         } else if op == REQ_PGET {
-            let st = rw(dma_base, 0, false);
+            let st = rw(dma_base, CAIRN_CURRENT_SECTOR, false);
             sys_print(b"  [virtio-blk-daemon] CAIRN GET via IPC status=");
             sys_printnum(st as usize);
-            sys_send(from, st as usize);
+            let _ = sys_send(from, st as usize);
         } else if op == REQ_PROLLBACK {
-            let _ = rw(dma_base, 1, false);
-            let st = rw(dma_base, 0, true);
+            let _ = rw(dma_base, CAIRN_PREVIOUS_SECTOR, false);
+            let st = rw(dma_base, CAIRN_CURRENT_SECTOR, true);
             sys_print(b"  [virtio-blk-daemon] CAIRN ROLLBACK via IPC status=");
             sys_printnum(st as usize);
-            sys_send(from, st as usize);
+            let _ = sys_send(from, st as usize);
         } else if op == REQ_STOP {
             sys_print(b"  [virtio-blk-daemon] STOP received; exiting cleanly\n");
-            sys_send(from, 0);
+            let _ = sys_send(from, 0);
             sys_exit(0);
+        } else if op == REQ_INSTALL_CHECK {
+            let st = rw(dma_base, INSTALL_MARKER_SECTOR, false);
+            if st == 0 && data_starts_with(b"DEZHINST") {
+                sys_print(b"  [virtio-blk-daemon] install-check: installed root marker found\n");
+                let _ = sys_send(from, 0);
+            } else {
+                sys_print(b"  [virtio-blk-daemon] install-check: no Dezh root marker yet\n");
+                let _ = sys_send(from, 3);
+            }
+        } else if op == REQ_INSTALL_INIT {
+            set_data(b"DEZHINST v0 target=riscv64 root=cairn block=virtio-block");
+            let st0 = rw(dma_base, INSTALL_MARKER_SECTOR, true);
+            set_data(b"DEZHROOT v0 cairn_current=2 cairn_previous=3 metadata_sector=4");
+            let st1 = rw(dma_base, ROOT_METADATA_SECTOR, true);
+            let st = if st0 == 0 { st1 } else { st0 };
+            sys_print(b"  [virtio-blk-daemon] install-init: wrote marker/root metadata status=");
+            sys_printnum(st as usize);
+            let _ = sys_send(from, st as usize);
+        } else if op == REQ_ROOT_STATUS {
+            let st = rw(dma_base, ROOT_METADATA_SECTOR, false);
+            sys_print(b"  [virtio-blk-daemon] root-status: metadata read status=");
+            sys_printnum(st as usize);
+            let _ = sys_send(from, st as usize);
         } else {
-            sys_send(from, 2);
+            let _ = sys_send(from, 2);
         }
     }
 }
@@ -358,39 +405,87 @@ fn client_set_input(s: &[u8]) -> usize {
     n
 }
 
-fn client_send(op: usize, sector_or_len: usize) -> usize {
-    sys_send(0, request_word(op, sector_or_len));
+fn client_send(to: usize, op: usize, sector_or_len: usize) -> usize {
+    let rc = sys_send(to, request_word(op, sector_or_len));
+    if rc != 0 {
+        sys_print(b"  [vblk-client] service unavailable or IPC denied\n");
+        return rc;
+    }
     let (reply, _) = sys_recv();
     reply
 }
 
-fn client_demo() -> ! {
+fn client_demo(daemon: usize) -> ! {
     sys_print(b"  [vblk-client] talking to long-lived virtio-blk daemon over IPC\n");
-    let _ = client_send(REQ_PROBE, 0);
-    let _ = client_send(REQ_BWRITE, 0);
-    let st = client_send(REQ_BREAD, 0);
+    let _ = client_send(daemon, REQ_PROBE, 0);
+    let _ = client_send(daemon, REQ_BWRITE, TEST_SECTOR as usize);
+    let st = client_send(daemon, REQ_BREAD, TEST_SECTOR as usize);
     sys_print(b"  [vblk-client] read reply status=");
     sys_printnum(st);
-    print_data(b"  [vblk-client] sector0 via daemon = \"");
+    print_data(b"  [vblk-client] test sector via daemon = \"");
 
     let n = client_set_input(b"daemon-ci-value");
-    let _ = client_send(REQ_PSET, n);
-    let _ = client_send(REQ_PGET, 0);
+    let _ = client_send(daemon, REQ_PSET, n);
+    let _ = client_send(daemon, REQ_PGET, 0);
     print_data(b"  [vblk-client] cairn current via daemon = \"");
 
     let n = client_set_input(b"daemon-bad-edit");
-    let _ = client_send(REQ_PSET, n);
-    let _ = client_send(REQ_PROLLBACK, 0);
-    let _ = client_send(REQ_PGET, 0);
+    let _ = client_send(daemon, REQ_PSET, n);
+    let _ = client_send(daemon, REQ_PROLLBACK, 0);
+    let _ = client_send(daemon, REQ_PGET, 0);
     print_data(b"  [vblk-client] rollback via daemon restored = \"");
 
     let _ = shared_text_len();
-    let _ = client_send(REQ_STOP, 0);
     sys_print(b"  [vblk-client] daemon workflow complete\n");
     sys_exit(0)
 }
 
-extern "C" fn main(op: usize, dma_base: usize, input_len: usize) -> ! {
+fn client_request(daemon: usize, input_len: usize, req: usize) -> ! {
+    let sector_or_len = if req == REQ_BWRITE || req == REQ_BREAD {
+        TEST_SECTOR as usize
+    } else if req == REQ_PSET {
+        input_len
+    } else {
+        0
+    };
+    let st = client_send(daemon, req, sector_or_len);
+    if req == REQ_PROBE {
+        sys_print(b"  [vblk-client] disk probe via registered daemon status=");
+        sys_printnum(st);
+    } else if req == REQ_BWRITE {
+        sys_print(b"  [vblk-client] bwrite via registered daemon status=");
+        sys_printnum(st);
+    } else if req == REQ_BREAD {
+        sys_print(b"  [vblk-client] bread via registered daemon status=");
+        sys_printnum(st);
+        print_data(b"  [vblk-client] test sector = \"");
+    } else if req == REQ_PSET {
+        sys_print(b"  [vblk-client] cairn set via registered daemon status=");
+        sys_printnum(st);
+    } else if req == REQ_PGET {
+        sys_print(b"  [vblk-client] cairn get via registered daemon status=");
+        sys_printnum(st);
+        print_data(b"  [vblk-client] cairn current = \"");
+    } else if req == REQ_PROLLBACK {
+        sys_print(b"  [vblk-client] rollback via registered daemon status=");
+        sys_printnum(st);
+        let _ = client_send(daemon, REQ_PGET, 0);
+        print_data(b"  [vblk-client] rollback restored current = \"");
+    } else if req == REQ_INSTALL_CHECK {
+        sys_print(b"  [vblk-client] install-check status=");
+        sys_printnum(st);
+    } else if req == REQ_INSTALL_INIT {
+        sys_print(b"  [vblk-client] install-init status=");
+        sys_printnum(st);
+    } else if req == REQ_ROOT_STATUS {
+        sys_print(b"  [vblk-client] root-status status=");
+        sys_printnum(st);
+        print_data(b"  [vblk-client] root metadata = \"");
+    }
+    sys_exit(st)
+}
+
+extern "C" fn main(op: usize, dma_base: usize, input_len: usize, req: usize) -> ! {
     if op == OP_NO_GRANT_PROBE {
         sys_print(b"  [virtio-blk] no-grant probe: touching MMIO without a device capability\n");
         let _ = r32(VR_MAGIC);
@@ -402,7 +497,10 @@ extern "C" fn main(op: usize, dma_base: usize, input_len: usize) -> ! {
         daemon(dma_base);
     }
     if op == OP_CLIENT_DEMO {
-        client_demo();
+        client_demo(dma_base);
+    }
+    if op == OP_CLIENT_REQ {
+        client_request(dma_base, input_len, req);
     }
 
     clear_dma();
@@ -423,34 +521,34 @@ extern "C" fn main(op: usize, dma_base: usize, input_len: usize) -> ! {
         sys_exit(0);
     } else if op == OP_BWRITE {
         set_data(b"DEZH-PERSISTENT-DISK-OK");
-        let st = rw(dma_base, 0, true);
+        let st = rw(dma_base, TEST_SECTOR, true);
         sys_print(b"  [virtio-blk] bwrite via user-space driver status=");
         sys_printnum(st as usize);
         sys_exit(st as usize);
     } else if op == OP_BREAD {
         set_data(b"");
-        let st = rw(dma_base, 0, false);
+        let st = rw(dma_base, TEST_SECTOR, false);
         sys_print(b"  [virtio-blk] bread via user-space driver status=");
         sys_printnum(st as usize);
-        print_data(b"  [virtio-blk] sector0 = \"");
+        print_data(b"  [virtio-blk] test sector = \"");
         sys_exit(st as usize);
     } else if op == OP_PSET {
-        let _ = rw(dma_base, 0, false);
-        let _ = rw(dma_base, 1, true);
+        let _ = rw(dma_base, CAIRN_CURRENT_SECTOR, false);
+        let _ = rw(dma_base, CAIRN_PREVIOUS_SECTOR, true);
         copy_input(input_len);
-        let st = rw(dma_base, 0, true);
+        let st = rw(dma_base, CAIRN_CURRENT_SECTOR, true);
         sys_print(b"  [virtio-blk] cairn set via user-space driver status=");
         sys_printnum(st as usize);
         sys_exit(st as usize);
     } else if op == OP_PGET {
-        let st = rw(dma_base, 0, false);
+        let st = rw(dma_base, CAIRN_CURRENT_SECTOR, false);
         sys_print(b"  [virtio-blk] cairn get via user-space driver status=");
         sys_printnum(st as usize);
         print_data(b"  [virtio-blk] cairn current = \"");
         sys_exit(st as usize);
     } else if op == OP_PROLLBACK {
-        let _ = rw(dma_base, 1, false);
-        let st = rw(dma_base, 0, true);
+        let _ = rw(dma_base, CAIRN_PREVIOUS_SECTOR, false);
+        let st = rw(dma_base, CAIRN_CURRENT_SECTOR, true);
         sys_print(b"  [virtio-blk] rollback via user-space driver status=");
         sys_printnum(st as usize);
         print_data(b"  [virtio-blk] rollback restored current = \"");

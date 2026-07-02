@@ -111,6 +111,7 @@ pub struct BootInfo {
     pub memory: Vec<MemoryRegion>,
     pub init_services: Vec<ServiceSpec>,
     pub capability_seeds: Vec<CapabilitySeed>,
+    pub install_manifest: InstallManifest,
 }
 
 impl BootInfo {
@@ -153,6 +154,7 @@ impl BootInfo {
                 CapabilitySeed::new("virtio-block", KernelCapability::OpenVirtioDevice),
                 CapabilitySeed::new("virtio-block", KernelCapability::SendIpc),
             ],
+            install_manifest: InstallManifest::qemu_v0(),
         }
     }
 
@@ -162,6 +164,7 @@ impl BootInfo {
     pub fn qemu_minimal_riscv(memory: Vec<MemoryRegion>) -> Self {
         let mut info = Self::qemu_minimal(memory);
         info.target = BootTarget::QemuVirtioRiscV64;
+        info.install_manifest = InstallManifest::qemu_riscv_v0();
         info
     }
 }
@@ -171,6 +174,60 @@ pub struct KernelPlan {
     pub target: BootTarget,
     pub usable_bytes: u64,
     pub services: Vec<ServiceSpec>,
+    pub capability_seeds: Vec<CapabilitySeed>,
+    pub install_manifest: InstallManifest,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DiskLayout {
+    pub marker_sector: u64,
+    pub cairn_current_sector: u64,
+    pub cairn_previous_sector: u64,
+    pub root_metadata_sector: u64,
+    pub root_metadata_sectors: u64,
+}
+
+impl DiskLayout {
+    pub const fn qemu_v0() -> Self {
+        DiskLayout {
+            marker_sector: 0,
+            cairn_current_sector: 2,
+            cairn_previous_sector: 3,
+            root_metadata_sector: 4,
+            root_metadata_sectors: 4,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct InstallManifest {
+    pub version: u32,
+    pub target: BootTarget,
+    pub root_service: &'static str,
+    pub block_service: &'static str,
+    pub layout: DiskLayout,
+}
+
+impl InstallManifest {
+    pub const fn qemu_v0() -> Self {
+        InstallManifest {
+            version: 0,
+            target: BootTarget::QemuVirtioX86_64,
+            root_service: "cairn",
+            block_service: "virtio-block",
+            layout: DiskLayout::qemu_v0(),
+        }
+    }
+
+    pub const fn qemu_riscv_v0() -> Self {
+        InstallManifest {
+            version: 0,
+            target: BootTarget::QemuVirtioRiscV64,
+            root_service: "cairn",
+            block_service: "virtio-block",
+            layout: DiskLayout::qemu_v0(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -186,11 +243,15 @@ pub enum BootError {
         capability: KernelCapability,
     },
     AmbientCapabilitySeed,
+    MissingInstallService,
+    InvalidInstallTarget,
+    InvalidRootStorage,
 }
 
 pub fn plan_boot(info: &BootInfo) -> Result<KernelPlan, BootError> {
     validate_memory_map(&info.memory)?;
     validate_services(&info.init_services, &info.capability_seeds)?;
+    validate_install_manifest(&info.install_manifest, &info.init_services, info.target)?;
     Ok(KernelPlan {
         target: info.target,
         usable_bytes: info
@@ -200,7 +261,39 @@ pub fn plan_boot(info: &BootInfo) -> Result<KernelPlan, BootError> {
             .map(|r| r.len)
             .sum(),
         services: info.init_services.clone(),
+        capability_seeds: info.capability_seeds.clone(),
+        install_manifest: info.install_manifest.clone(),
     })
+}
+
+pub fn validate_install_manifest(
+    manifest: &InstallManifest,
+    services: &[ServiceSpec],
+    target: BootTarget,
+) -> Result<(), BootError> {
+    if manifest.target != target {
+        return Err(BootError::InvalidInstallTarget);
+    }
+    if !services
+        .iter()
+        .any(|service| service.name == manifest.root_service)
+        || !services
+            .iter()
+            .any(|service| service.name == manifest.block_service)
+    {
+        return Err(BootError::MissingInstallService);
+    }
+    let layout = &manifest.layout;
+    if layout.root_metadata_sectors == 0
+        || layout.marker_sector == layout.cairn_current_sector
+        || layout.marker_sector == layout.cairn_previous_sector
+        || layout.marker_sector == layout.root_metadata_sector
+        || layout.cairn_current_sector == layout.cairn_previous_sector
+        || layout.root_metadata_sector <= layout.cairn_previous_sector
+    {
+        return Err(BootError::InvalidRootStorage);
+    }
+    Ok(())
 }
 
 pub fn validate_memory_map(regions: &[MemoryRegion]) -> Result<(), BootError> {
@@ -386,5 +479,37 @@ mod tests {
 
         assert!(banner.starts_with("dezh-kernel-boot-v0:qemu-virtio-x86_64"));
         assert!(banner.contains("services=4"));
+    }
+
+    #[test]
+    fn install_manifest_is_validated_with_boot_contract() {
+        let info = BootInfo::qemu_minimal_riscv(memory());
+
+        let plan = plan_boot(&info).unwrap();
+
+        assert_eq!(plan.install_manifest.target, BootTarget::QemuVirtioRiscV64);
+        assert_eq!(plan.install_manifest.root_service, "cairn");
+        assert_eq!(plan.install_manifest.block_service, "virtio-block");
+        assert_eq!(plan.install_manifest.layout.marker_sector, 0);
+    }
+
+    #[test]
+    fn install_manifest_rejects_missing_services() {
+        let mut info = BootInfo::qemu_minimal(memory());
+        info.install_manifest.root_service = "missing-root";
+
+        let err = plan_boot(&info).unwrap_err();
+
+        assert_eq!(err, BootError::MissingInstallService);
+    }
+
+    #[test]
+    fn install_manifest_rejects_invalid_root_storage() {
+        let mut info = BootInfo::qemu_minimal(memory());
+        info.install_manifest.layout.root_metadata_sectors = 0;
+
+        let err = plan_boot(&info).unwrap_err();
+
+        assert_eq!(err, BootError::InvalidRootStorage);
     }
 }
