@@ -83,6 +83,10 @@ boundary every earlier spike ran around.
   a richer installable terminal UI app. Running it launches a dashboard task
   plus worker tasks, exercises scheduler + IPC, and records private app state
   through the registered block daemon.
+- **Process lifecycle + frame reclamation** (`memstat`, `tasks`,
+  `stress-lab`): separately-loaded ELF processes now own their page-table,
+  segment, and stack frames. Foreground processes are reclaimed after exit or
+  fault; long-lived daemons keep their frames while running.
 - Exits QEMU cleanly via the SiFive test finisher when you run `halt`.
 
 ## Layout
@@ -152,8 +156,8 @@ QEMU exits with code 0 after `halt`.
 
 ## Commands
 
-`help` groups commands by purpose. `status`, `tasks`, `caps`, `mem`, and
-`services` inspect the live boot/runtime state. `install-check`, `install-init`,
+`help` groups commands by purpose. `status`, `tasks`, `memstat`, `caps`, `mem`,
+and `services` inspect the live boot/runtime state. `install-check`, `install-init`,
 `root`, and `root-status` inspect the v0 install/root contract. `write <text>`,
 `read`, `history`, and `rollback` are friendly aliases over the durable Cairn
 sector path (`pset`, `pget`, `prollback`). `secret` requires a capability the
@@ -172,6 +176,8 @@ and app registry. `app-install lab` and `app-run lab` install and run a more
 visual multi-task app that drives IPC, scheduler, storage, and app isolation in
 one flow. The labels `[available]`, `[installed]`, and `[removed]` remain
 visible even when ANSI colors are not interpreted by the serial console.
+`stress-lab` repeatedly runs the installable lab app and verifies that free
+frames stay stable after foreground process reclamation.
 
 ## Not yet
 
@@ -182,4 +188,6 @@ partitioner, or bootloader. DMA isolation is modeled with explicit page-table
 mappings, and the virtio data path still uses one shared bounce window, so
 multi-client block data queues need per-client DMA grants next. IOMMU
 enforcement is future work. Virtio is still the legacy QEMU MMIO transport,
-polled rather than interrupt-driven.
+polled rather than interrupt-driven. Reclamation v0 tracks fixed-size frame
+ownership for loaded ELF processes; baked demo tasks still use the legacy
+kernel-address-space path until they are migrated to separate ELFs.

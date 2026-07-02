@@ -101,6 +101,7 @@ def run_riscv64(qemu: str, kernel: Path) -> None:
         commands = [
             ("caps", "console capabilities: INSPECT TIME ECHO HALT SPAWN"),
             ("status", "status:"),
+            ("memstat", "owned: process="),
             ("secret", "denied: 'secret' requires capability SECRET"),
             ("run", "sys_uptime was DENIED (task holds no TIME capability)"),
             ("rogue", "rogue task handled; console survived"),
@@ -138,6 +139,8 @@ def run_riscv64(qemu: str, kernel: Path) -> None:
             ("lab-set manual-lab-value", "lab-set status=0"),
             ("lab-get", "lab value = \"manual-lab-value"),
             ("app-deny lab", "lab device/block direct access denied; console survived"),
+            ("stress-lab", "PASS: free frames stable"),
+            ("services", "VirtioBlock state=Running"),
             ("disk", "disk probe via registered daemon status=0"),
             ("disk", "no-grant probe returned; console survived"),
             ("bwrite", "bwrite via registered daemon status=0"),

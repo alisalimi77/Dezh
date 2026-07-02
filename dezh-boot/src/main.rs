@@ -773,6 +773,70 @@ fn frame_free(f: usize) {
     }
 }
 
+const MAX_TASK_OWNED_FRAMES: usize = 384;
+
+#[derive(Clone, Copy, PartialEq)]
+enum TaskKind {
+    Empty,
+    Foreground,
+    Daemon,
+    LegacyBakedTask,
+}
+
+#[derive(Clone, Copy)]
+struct TaskResources {
+    kind: TaskKind,
+    root: usize,
+    count: usize,
+    frames: [usize; MAX_TASK_OWNED_FRAMES],
+}
+
+#[derive(Clone, Copy)]
+struct AddressSpaceBuild {
+    root: usize,
+    entry: usize,
+    resources: TaskResources,
+}
+
+const EMPTY_TASK_RESOURCES: TaskResources = TaskResources {
+    kind: TaskKind::Empty,
+    root: 0,
+    count: 0,
+    frames: [0; MAX_TASK_OWNED_FRAMES],
+};
+
+impl TaskResources {
+    fn new(kind: TaskKind) -> Self {
+        TaskResources {
+            kind,
+            root: 0,
+            count: 0,
+            frames: [0; MAX_TASK_OWNED_FRAMES],
+        }
+    }
+
+    fn add_frame(&mut self, frame: usize) -> bool {
+        if frame == 0 || self.count >= MAX_TASK_OWNED_FRAMES {
+            return false;
+        }
+        self.frames[self.count] = frame;
+        self.count += 1;
+        true
+    }
+
+    fn alloc_frame(&mut self) -> usize {
+        let frame = frame_alloc();
+        if frame == 0 {
+            return 0;
+        }
+        if !self.add_frame(frame) {
+            frame_free(frame);
+            return 0;
+        }
+        frame
+    }
+}
+
 /// The separate user program, compiled to its own riscv ELF by build.rs and
 /// embedded here. The loader maps it into a fresh address space at runtime.
 const USERPROG_ELF: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/userprog.elf"));
@@ -871,27 +935,39 @@ fn u64_at(b: &[u8], o: usize) -> u64 {
 }
 
 /// Walk one level of an Sv39 table, allocating the next-level table if absent.
-unsafe fn walk_alloc(table: *mut u64, idx: usize) -> *mut u64 {
+unsafe fn walk_alloc(
+    table: *mut u64,
+    idx: usize,
+    resources: &mut TaskResources,
+) -> Option<*mut u64> {
     let e = *table.add(idx);
     if e & PTE_V != 0 {
-        (((e >> 10) << 12) as usize) as *mut u64 // existing next table
+        Some((((e >> 10) << 12) as usize) as *mut u64) // existing next table
     } else {
-        let frame = frame_alloc();
+        let frame = resources.alloc_frame();
+        if frame == 0 {
+            return None;
+        }
         *table.add(idx) = ((frame as u64 >> 12) << 10) | PTE_V; // non-leaf
-        frame as *mut u64
+        Some(frame as *mut u64)
     }
 }
 
 /// Map one 4 KiB page va->pa with `flags` in the page table rooted at `root`.
-fn map_page(root: usize, va: usize, pa: usize, flags: u64) {
+fn map_page(root: usize, va: usize, pa: usize, flags: u64, resources: &mut TaskResources) -> bool {
     let vpn2 = (va >> 30) & 0x1ff;
     let vpn1 = (va >> 21) & 0x1ff;
     let vpn0 = (va >> 12) & 0x1ff;
     unsafe {
-        let l1 = walk_alloc(root as *mut u64, vpn2);
-        let l0 = walk_alloc(l1, vpn1);
+        let Some(l1) = walk_alloc(root as *mut u64, vpn2, resources) else {
+            return false;
+        };
+        let Some(l0) = walk_alloc(l1, vpn1, resources) else {
+            return false;
+        };
         *l0.add(vpn0) = pte(pa as u64, flags);
     }
+    true
 }
 
 const USER_STACK_TOP: usize = 0x4070_0000;
@@ -913,9 +989,27 @@ unsafe fn translate(root: usize, va: usize) -> usize {
 /// Two passes so that segments sharing a page (common: a small RX segment and an
 /// R segment in the same 4 KiB page) are handled correctly: map every covered
 /// page once, then copy each segment's bytes to the right intra-page offset.
-fn build_address_space(spec: &ProcessSpec) -> (usize, usize) {
+fn reclaim_resources(resources: &mut TaskResources) {
+    let mut i = 0usize;
+    while i < resources.count {
+        let frame = resources.frames[i];
+        resources.frames[i] = 0;
+        if frame != 0 {
+            frame_free(frame);
+        }
+        i += 1;
+    }
+    *resources = EMPTY_TASK_RESOURCES;
+}
+
+fn build_address_space(spec: &ProcessSpec, kind: TaskKind) -> Option<AddressSpaceBuild> {
     let img = spec.elf;
-    let root = frame_alloc();
+    let mut resources = TaskResources::new(kind);
+    let root = resources.alloc_frame();
+    if root == 0 {
+        return None;
+    }
+    resources.root = root;
     unsafe {
         let r = root as *mut u64;
         // Kernel mappings so traps resolve while this satp is active (U=0):
@@ -944,7 +1038,11 @@ fn build_address_space(spec: &ProcessSpec) -> (usize, usize) {
     }
     let mut va = lo;
     while va < hi {
-        let frame = frame_alloc();
+        let frame = resources.alloc_frame();
+        if frame == 0 {
+            reclaim_resources(&mut resources);
+            return None;
+        }
         // W^X: derive permissions from the ELF segment flags covering this page —
         // executable code is mapped R+X (never writable), data R+W (never
         // executable). (Linux historically allowed W+X; we don't.)
@@ -966,7 +1064,10 @@ fn build_address_space(spec: &ProcessSpec) -> (usize, usize) {
                 }
             }
         }
-        map_page(root, va, frame, fl);
+        if !map_page(root, va, frame, fl, &mut resources) {
+            reclaim_resources(&mut resources);
+            return None;
+        }
         va += FRAME_SIZE;
     }
 
@@ -991,8 +1092,15 @@ fn build_address_space(spec: &ProcessSpec) -> (usize, usize) {
     // Map the user stack (U=1 RW).
     let mut s = USER_STACK_BOTTOM;
     while s < USER_STACK_TOP {
-        let frame = frame_alloc();
-        map_page(root, s, frame, PTE_U | PTE_R | PTE_W);
+        let frame = resources.alloc_frame();
+        if frame == 0 {
+            reclaim_resources(&mut resources);
+            return None;
+        }
+        if !map_page(root, s, frame, PTE_U | PTE_R | PTE_W, &mut resources) {
+            reclaim_resources(&mut resources);
+            return None;
+        }
         s += FRAME_SIZE;
     }
 
@@ -1000,17 +1108,30 @@ fn build_address_space(spec: &ProcessSpec) -> (usize, usize) {
     // maps that device. Drivers are user processes with device capabilities,
     // not kernel code with ambient hardware reach.
     if spec.map_uart {
-        map_page(root, DEV_UART_VA, UART_BASE as usize, PTE_U | PTE_R | PTE_W);
+        if !map_page(
+            root,
+            DEV_UART_VA,
+            UART_BASE as usize,
+            PTE_U | PTE_R | PTE_W,
+            &mut resources,
+        ) {
+            reclaim_resources(&mut resources);
+            return None;
+        }
     }
     if spec.map_virtio_blk && spec.caps & TASK_DEVICE_VIRTIO_BLK != 0 {
         let mut i = 0usize;
         while i < VIRTIO_MMIO_COUNT {
-            map_page(
+            if !map_page(
                 root,
                 DEV_VIRTIO_BLK_VA + i * VIRTIO_MMIO_STRIDE,
                 VIRTIO_BLK_MMIO_PA + i * VIRTIO_MMIO_STRIDE,
                 PTE_U | PTE_R | PTE_W,
-            );
+                &mut resources,
+            ) {
+                reclaim_resources(&mut resources);
+                return None;
+            }
             i += 1;
         }
     }
@@ -1018,17 +1139,25 @@ fn build_address_space(spec: &ProcessSpec) -> (usize, usize) {
         let dma_pa = core::ptr::addr_of!(VIRTIO_DMA) as usize;
         let mut off = 0usize;
         while off < VIRTIO_DMA_SIZE {
-            map_page(
+            if !map_page(
                 root,
                 VIRTIO_DMA_VA + off,
                 dma_pa + off,
                 PTE_U | PTE_R | PTE_W,
-            );
+                &mut resources,
+            ) {
+                reclaim_resources(&mut resources);
+                return None;
+            }
             off += FRAME_SIZE;
         }
     }
 
-    (root, entry)
+    Some(AddressSpaceBuild {
+        root,
+        entry,
+        resources,
+    })
 }
 
 /// The kernel's own satp (the global identity address space the console runs in).
@@ -1138,11 +1267,83 @@ static mut TSTATE: [TaskState; MAX_TASKS] = [TaskState::Unused; MAX_TASKS];
 static mut TCAPS: [usize; MAX_TASKS] = [0; MAX_TASKS];
 static mut TPERS: [u8; MAX_TASKS] = [0; MAX_TASKS];
 static mut TSATP: [usize; MAX_TASKS] = [0; MAX_TASKS]; // each task's address space (satp)
+static mut TRES: [TaskResources; MAX_TASKS] = [EMPTY_TASK_RESOURCES; MAX_TASKS];
 static mut CURRENT: usize = 0;
 
 fn clear_mailbox(i: usize) {
     unsafe {
         MBOX[i] = EMPTY_MAILBOX;
+    }
+}
+
+fn task_kind_name(kind: TaskKind) -> &'static str {
+    match kind {
+        TaskKind::Empty => "-",
+        TaskKind::Foreground => "foreground",
+        TaskKind::Daemon => "daemon",
+        TaskKind::LegacyBakedTask => "legacy",
+    }
+}
+
+fn reclaim_task_resources(slot: usize) {
+    unsafe {
+        if slot >= MAX_TASKS || TRES[slot].count == 0 {
+            TSATP[slot] = 0;
+            return;
+        }
+        reclaim_resources(&mut TRES[slot]);
+        TSATP[slot] = 0;
+        TCAPS[slot] = 0;
+        TPERS[slot] = PERS_NATIVE;
+        clear_mailbox(slot);
+    }
+}
+
+fn task_owned_frames(slot: usize) -> usize {
+    unsafe {
+        if slot < MAX_TASKS {
+            TRES[slot].count
+        } else {
+            0
+        }
+    }
+}
+
+fn owned_frames_by_kind(kind: TaskKind) -> usize {
+    unsafe {
+        let mut total = 0usize;
+        let mut i = 0usize;
+        while i < MAX_TASKS {
+            if TRES[i].kind == kind {
+                total += TRES[i].count;
+            }
+            i += 1;
+        }
+        total
+    }
+}
+
+fn process_owned_frames() -> usize {
+    unsafe {
+        let mut total = 0usize;
+        let mut i = 0usize;
+        while i < MAX_TASKS {
+            total += TRES[i].count;
+            i += 1;
+        }
+        total
+    }
+}
+
+fn reclaim_finished_foreground_tasks() {
+    unsafe {
+        let mut i = FIRST_FOREGROUND_TASK;
+        while i < MAX_TASKS {
+            if TSTATE[i] == TaskState::Done {
+                reclaim_task_resources(i);
+            }
+            i += 1;
+        }
     }
 }
 
@@ -1436,6 +1637,7 @@ fn run_tasks(specs: &[(usize, usize, u8)]) {
     let n = specs.len().min(MAX_TASKS);
     unsafe {
         for i in 0..MAX_TASKS {
+            reclaim_task_resources(i);
             TSTATE[i] = TaskState::Unused;
             clear_mailbox(i);
         }
@@ -1447,6 +1649,8 @@ fn run_tasks(specs: &[(usize, usize, u8)]) {
             TCAPS[i] = caps;
             TPERS[i] = pers;
             TSATP[i] = kernel_satp(); // baked tasks share the kernel address space
+            TRES[i] = EMPTY_TASK_RESOURCES;
+            TRES[i].kind = TaskKind::LegacyBakedTask;
             TSTATE[i] = TaskState::Ready;
         }
         CURRENT = 0;
@@ -1472,14 +1676,20 @@ fn run_processes(specs: &[ProcessSpec]) {
         // A loaded process must not see any baked-task stack region.
         set_active_task_mem(usize::MAX);
         for i in 0..MAX_TASKS {
+            reclaim_task_resources(i);
             TSTATE[i] = TaskState::Unused;
             clear_mailbox(i);
         }
+        let mut launched = 0usize;
+        let mut first_ready = usize::MAX;
         for (i, spec) in specs.iter().take(n).enumerate() {
-            let (root, entry) = build_address_space(spec);
+            let Some(build) = build_address_space(spec, TaskKind::Foreground) else {
+                kprintln!("  [kernel] process launch failed: out of frames");
+                continue;
+            };
             let f = &mut FRAMES[i];
             *f = [0; 32];
-            f[F_SEPC] = entry;
+            f[F_SEPC] = build.entry;
             f[F_SP] = USER_STACK_TOP; // each process has its own stack in its own space
             f[F_A0] = spec.arg0;
             f[F_A1] = spec.arg1;
@@ -1487,20 +1697,35 @@ fn run_processes(specs: &[ProcessSpec]) {
             f[F_A3] = spec.arg3;
             TCAPS[i] = spec.caps;
             TPERS[i] = spec.personality;
-            TSATP[i] = proc_satp(root);
+            TSATP[i] = proc_satp(build.root);
+            TRES[i] = build.resources;
             TSTATE[i] = TaskState::Ready;
+            if first_ready == usize::MAX {
+                first_ready = i;
+            }
+            launched += 1;
         }
-        CURRENT = 0;
+        if launched == 0 {
+            return;
+        }
+        CURRENT = first_ready;
         asm!("csrw stvec, {}", in(reg) utrap as usize);
         sbi_set_timer(rdtime() + QUANTUM);
-        asm!("csrw satp, {}", in(reg) TSATP[0]); // enter the first process's address space
+        asm!("csrw satp, {}", in(reg) TSATP[first_ready]); // enter the first process's address space
         asm!("sfence.vma");
-        run_first(frame_ptr(0) as *const usize);
+        run_first(frame_ptr(first_ready) as *const usize);
         // Back in the kernel address space once every process has exited.
         asm!("csrw satp, {}", in(reg) kernel_satp());
         asm!("sfence.vma");
         asm!("csrw stvec, {}", in(reg) trap_entry as usize);
         sbi_set_timer(rdtime() + TIMER_DELTA);
+        let mut i = 0usize;
+        while i < MAX_TASKS {
+            if TSTATE[i] == TaskState::Done {
+                reclaim_task_resources(i);
+            }
+            i += 1;
+        }
     }
 }
 
@@ -1519,12 +1744,18 @@ fn run_scheduler_from(first: usize) {
     }
 }
 
-fn spawn_process_at(slot: usize, spec: &ProcessSpec) {
+fn spawn_process_at(slot: usize, spec: &ProcessSpec, kind: TaskKind) -> bool {
     unsafe {
-        let (root, entry) = build_address_space(spec);
+        reclaim_task_resources(slot);
+        let Some(build) = build_address_space(spec, kind) else {
+            kprintln!("  [kernel] process launch failed: out of frames");
+            TSTATE[slot] = TaskState::Unused;
+            clear_mailbox(slot);
+            return false;
+        };
         let f = &mut FRAMES[slot];
         *f = [0; 32];
-        f[F_SEPC] = entry;
+        f[F_SEPC] = build.entry;
         f[F_SP] = USER_STACK_TOP;
         f[F_A0] = spec.arg0;
         f[F_A1] = spec.arg1;
@@ -1532,10 +1763,12 @@ fn spawn_process_at(slot: usize, spec: &ProcessSpec) {
         f[F_A3] = spec.arg3;
         TCAPS[slot] = spec.caps;
         TPERS[slot] = spec.personality;
-        TSATP[slot] = proc_satp(root);
+        TSATP[slot] = proc_satp(build.root);
+        TRES[slot] = build.resources;
         TEXIT[slot] = 0;
         clear_mailbox(slot);
         TSTATE[slot] = TaskState::Ready;
+        true
     }
 }
 
@@ -1543,6 +1776,7 @@ fn clear_foreground_tasks() {
     unsafe {
         let mut i = FIRST_FOREGROUND_TASK;
         while i < MAX_TASKS {
+            reclaim_task_resources(i);
             TSTATE[i] = TaskState::Unused;
             clear_mailbox(i);
             TCAPS[i] = 0;
@@ -1556,10 +1790,22 @@ fn run_foreground_processes(specs: &[ProcessSpec]) {
     let n = specs.len().min(MAX_TASKS - FIRST_FOREGROUND_TASK);
     set_active_task_mem(usize::MAX);
     clear_foreground_tasks();
+    let mut launched = 0usize;
+    let mut first_ready = usize::MAX;
     for (i, spec) in specs.iter().take(n).enumerate() {
-        spawn_process_at(FIRST_FOREGROUND_TASK + i, spec);
+        let slot = FIRST_FOREGROUND_TASK + i;
+        if spawn_process_at(slot, spec, TaskKind::Foreground) {
+            if first_ready == usize::MAX {
+                first_ready = slot;
+            }
+            launched += 1;
+        }
     }
-    run_scheduler_from(FIRST_FOREGROUND_TASK);
+    if launched == 0 {
+        return;
+    }
+    run_scheduler_from(first_ready);
+    reclaim_finished_foreground_tasks();
 }
 
 fn service_state_name(state: ServiceState) -> &'static str {
@@ -1649,9 +1895,11 @@ fn refresh_virtio_service_state() {
                 } else if TSTATE[task] == TaskState::Done && TEXIT[task] == 0 {
                     SERVICES[i].state = ServiceState::Stopped;
                     SERVICES[i].fault = "driver stopped";
+                    reclaim_task_resources(task);
                 } else if TSTATE[task] == TaskState::Done {
                     SERVICES[i].state = ServiceState::Faulted;
                     SERVICES[i].fault = "driver exited or faulted";
+                    reclaim_task_resources(task);
                 }
             }
         }
@@ -1679,7 +1927,11 @@ fn ensure_virtio_block_service(_plan: &KernelPlan) -> Option<usize> {
             .args(virtio_dma_pa(), 0, 0)
             .virtio_blk()
             .virtio_dma();
-        spawn_process_at(VIRTIO_SERVICE_TASK, &spec);
+        if !spawn_process_at(VIRTIO_SERVICE_TASK, &spec, TaskKind::Daemon) {
+            SERVICES[idx].state = ServiceState::Faulted;
+            SERVICES[idx].fault = "driver launch failed: out of frames";
+            return None;
+        }
     }
     run_scheduler_from(VIRTIO_SERVICE_TASK);
     refresh_virtio_service_state();
@@ -2030,6 +2282,49 @@ fn app_deny(plan: &KernelPlan, arg: &str) {
             kprintln!("[app-deny] lab device/block direct access denied; console survived");
         }
         other => kprintln!("[app-deny] unknown app '{other}'"),
+    }
+}
+
+fn parse_small_count(arg: &str, default: usize) -> usize {
+    let bytes = arg.trim().as_bytes();
+    if bytes.is_empty() {
+        return default;
+    }
+    let mut n = 0usize;
+    let mut i = 0usize;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if !b.is_ascii_digit() {
+            return default;
+        }
+        n = n.saturating_mul(10).saturating_add((b - b'0') as usize);
+        i += 1;
+    }
+    n.clamp(1, 8)
+}
+
+fn stress_lab(plan: &KernelPlan, arg: &str) {
+    let count = parse_small_count(arg, 3);
+    kprintln!("[stress-lab] ensuring lab app is installed");
+    app_install(plan, "lab");
+    print_memstat();
+    let free_before = unsafe { FRAME_FREE };
+    let mut i = 0usize;
+    while i < count {
+        kprintln!("[stress-lab] iteration {}/{}", i + 1, count);
+        app_run(plan, "lab");
+        i += 1;
+    }
+    let free_after = unsafe { FRAME_FREE };
+    print_memstat();
+    if free_before == free_after {
+        kprintln!("[stress-lab] PASS: free frames stable at {}", free_after);
+    } else {
+        kprintln!(
+            "[stress-lab] WARN: free frames changed before={} after={}",
+            free_before,
+            free_after
+        );
     }
 }
 
@@ -2465,6 +2760,13 @@ const COMMANDS: &[CommandSpec] = &[
         help: "frame allocator self-test (alloc/zero/free)",
     },
     CommandSpec {
+        name: "memstat",
+        cap: cap::INSPECT,
+        cap_name: "INSPECT",
+        group: "Inspect",
+        help: "show frame ownership and process memory accounting",
+    },
+    CommandSpec {
         name: "status",
         cap: cap::INSPECT,
         cap_name: "INSPECT",
@@ -2780,6 +3082,13 @@ const COMMANDS: &[CommandSpec] = &[
         help: "run the Dezh benchmark/validation suite v0",
     },
     CommandSpec {
+        name: "stress-lab",
+        cap: cap::SPAWN,
+        cap_name: "SPAWN",
+        group: "Demos",
+        help: "run lab repeatedly and check frame reclamation",
+    },
+    CommandSpec {
         name: "ipc",
         cap: cap::SPAWN,
         cap_name: "SPAWN",
@@ -2935,9 +3244,11 @@ fn print_tasks() {
         let mut i = 0usize;
         while i < MAX_TASKS {
             kprintln!(
-                "  task{} state={:<7} caps={:#x} exit={} service={}",
+                "  task{} state={:<7} kind={:<10} frames={:<3} caps={:#x} exit={} service={}",
                 i,
                 task_state_name(TSTATE[i]),
+                task_kind_name(TRES[i].kind),
+                task_owned_frames(i),
                 TCAPS[i],
                 TEXIT[i],
                 service_for_task(i)
@@ -2945,6 +3256,25 @@ fn print_tasks() {
             i += 1;
         }
     }
+}
+
+fn print_memstat() {
+    let total = unsafe { FRAME_TOTAL };
+    let free = unsafe { FRAME_FREE };
+    let used = total.saturating_sub(free);
+    let process_owned = process_owned_frames();
+    let daemon_owned = owned_frames_by_kind(TaskKind::Daemon);
+    let foreground_owned = owned_frames_by_kind(TaskKind::Foreground);
+    let unowned = used.saturating_sub(process_owned);
+    kprintln!("memstat:");
+    kprintln!("  frames: total={} free={} used={}", total, free, used);
+    kprintln!(
+        "  owned: process={} daemon={} foreground={}",
+        process_owned,
+        daemon_owned,
+        foreground_owned
+    );
+    kprintln!("  unowned allocated estimate={}", unowned);
 }
 
 fn console(plan: &KernelPlan, memory: &[MemoryRegion], held: u32) -> ! {
@@ -3000,6 +3330,7 @@ fn dispatch(cmd: &str, arg: &str, plan: &KernelPlan, memory: &[MemoryRegion], he
         }
         "status" => print_status(plan, memory, held),
         "tasks" => print_tasks(),
+        "memstat" => print_memstat(),
         "disk" => {
             kprintln!("[kernel] user-space virtio-blk: first prove no device cap means no MMIO");
             run_virtio_no_grant_probe();
@@ -3178,6 +3509,7 @@ fn dispatch(cmd: &str, arg: &str, plan: &KernelPlan, memory: &[MemoryRegion], he
         "bench-storage" => run_bench_storage(plan),
         "bench-caps" => run_bench_caps(),
         "bench-all" => run_bench_all(plan),
+        "stress-lab" => stress_lab(plan, arg),
         "preempt" => {
             kprintln!("[kernel] two CPU-bound tasks that never yield (watch them interleave)");
             run_tasks(&[
