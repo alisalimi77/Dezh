@@ -95,7 +95,6 @@ def run_riscv64(qemu: str, kernel: Path) -> None:
     try:
         session.wait_for("boot contract VALIDATED")
         session.wait_for("service registry built from boot plan")
-        session.wait_for("virtio-block Running")
         session.wait_for("Dezh console. Every command requires an explicit capability.")
 
         commands = [

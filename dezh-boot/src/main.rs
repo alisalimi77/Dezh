@@ -2660,7 +2660,6 @@ pub extern "C" fn kmain() -> ! {
         plan.install_manifest.layout.marker_sector
     );
     build_service_registry(&plan);
-    let _ = ensure_virtio_block_service(&plan);
 
     let held = cap::INSPECT | cap::TIME | cap::ECHO | cap::HALT | cap::SPAWN;
     console(&plan, &memory, held);
