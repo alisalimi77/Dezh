@@ -79,6 +79,10 @@ boundary every earlier spike ran around.
   app bundle. Its registry state and private data live on disk sectors managed
   by the user-space `virtio-block` daemon, while the app runs with only
   `PRINT | IPC` and no device/DMA grant.
+- **Dezh Lab app** (`app-install lab`, `app-run lab`, `lab-set`, `lab-get`):
+  a richer installable terminal UI app. Running it launches a dashboard task
+  plus worker tasks, exercises scheduler + IPC, and records private app state
+  through the registered block daemon.
 - Exits QEMU cleanly via the SiFive test finisher when you run `halt`.
 
 ## Layout
@@ -96,6 +100,7 @@ boundary every earlier spike ran around.
 - `bench-app/` — separately-linked benchmark/validation process used by the
   `bench-*` commands.
 - `note-app/` — separately-linked installable `dezh-note` bundle.
+- `lab-app/` — separately-linked installable `dezh-lab` terminal UI bundle.
 
 This crate is a **standalone workspace**, excluded from the root workspace,
 because it cross-compiles to bare metal (no host linker, no MSVC needed).
@@ -163,8 +168,10 @@ and `bench-all` run a small U-mode benchmark suite that validates the current
 kernel, IPC, storage, capability, and service-liveness paths. `apps`,
 `app-info note`, `app-install note`, `app-run note`, `app-remove note`,
 `app-deny note`, `note-set <text>`, and `note-get` exercise the v0 installer
-and app registry. The labels `[available]`, `[installed]`, and `[removed]`
-remain visible even when ANSI colors are not interpreted by the serial console.
+and app registry. `app-install lab` and `app-run lab` install and run a more
+visual multi-task app that drives IPC, scheduler, storage, and app isolation in
+one flow. The labels `[available]`, `[installed]`, and `[removed]` remain
+visible even when ANSI colors are not interpreted by the serial console.
 
 ## Not yet
 
