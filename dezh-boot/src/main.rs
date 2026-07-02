@@ -1088,27 +1088,46 @@ static mut SERVICES: [ServiceEntry; MAX_SERVICES] = [EMPTY_SERVICE; MAX_SERVICES
 static mut SERVICE_COUNT: usize = 0;
 static mut TEXIT: [usize; MAX_TASKS] = [0; MAX_TASKS];
 
-// One-slot mailbox per task for capability-passing IPC. A message carries a
+// Small FIFO mailbox per task for capability-passing IPC. A message carries a
 // small payload plus a *granted* capability set (attenuated to what the sender
-// holds). This is the microkernel keystone: services and sub-agents get
-// authority only because someone delegated it to them over IPC.
+// holds). Bounded queues avoid the classic service overwrite bug: two clients
+// can enqueue while a service is busy, but unbounded memory growth is still
+// impossible.
+const MAILBOX_DEPTH: usize = 4;
+
 #[derive(Clone, Copy)]
-struct Mailbox {
-    full: bool,
+struct IpcMessage {
     from: usize,
     len: usize,
     grant: usize,
     word: usize, // a register-passed scalar (used by the value-IPC / Cairn demo)
     buf: [u8; 64],
 }
-static mut MBOX: [Mailbox; MAX_TASKS] = [Mailbox {
-    full: false,
+
+const EMPTY_IPC_MESSAGE: IpcMessage = IpcMessage {
     from: 0,
     len: 0,
     grant: 0,
     word: 0,
     buf: [0; 64],
-}; MAX_TASKS];
+};
+
+#[derive(Clone, Copy)]
+struct Mailbox {
+    head: usize,
+    tail: usize,
+    count: usize,
+    slots: [IpcMessage; MAILBOX_DEPTH],
+}
+
+const EMPTY_MAILBOX: Mailbox = Mailbox {
+    head: 0,
+    tail: 0,
+    count: 0,
+    slots: [EMPTY_IPC_MESSAGE; MAILBOX_DEPTH],
+};
+
+static mut MBOX: [Mailbox; MAX_TASKS] = [EMPTY_MAILBOX; MAX_TASKS];
 
 static mut FRAMES: [[usize; 32]; MAX_TASKS] = [[0; 32]; MAX_TASKS];
 static mut TSTATE: [TaskState; MAX_TASKS] = [TaskState::Unused; MAX_TASKS];
@@ -1116,6 +1135,12 @@ static mut TCAPS: [usize; MAX_TASKS] = [0; MAX_TASKS];
 static mut TPERS: [u8; MAX_TASKS] = [0; MAX_TASKS];
 static mut TSATP: [usize; MAX_TASKS] = [0; MAX_TASKS]; // each task's address space (satp)
 static mut CURRENT: usize = 0;
+
+fn clear_mailbox(i: usize) {
+    unsafe {
+        MBOX[i] = EMPTY_MAILBOX;
+    }
+}
 
 // A task's syscall personality: which ABI its `ecall`s speak.
 const PERS_NATIVE: u8 = 0; // Dezh native syscalls (SYS_*)
@@ -1332,15 +1357,22 @@ extern "C" fn utrap_handler(frame_ptr: *mut usize) -> *const usize {
                     // ATTENUATION: a sender can only delegate capabilities it
                     // itself holds — never widen. (caps = sender's TCAPS.)
                     let granted = requested & caps;
+                    if MBOX[to].count == MAILBOX_DEPTH {
+                        frame[F_A0] = SYS_DENIED;
+                        return frame_ptr;
+                    }
+                    let tail = MBOX[to].tail;
+                    let msg = &mut MBOX[to].slots[tail];
                     if len > 0 {
                         let src = core::slice::from_raw_parts(frame[F_A1] as *const u8, len);
-                        MBOX[to].buf[..len].copy_from_slice(src);
+                        msg.buf[..len].copy_from_slice(src);
                     }
-                    MBOX[to].len = len;
-                    MBOX[to].from = cur;
-                    MBOX[to].grant = granted;
-                    MBOX[to].word = frame[F_A4]; // register-passed scalar (value-IPC)
-                    MBOX[to].full = true;
+                    msg.len = len;
+                    msg.from = cur;
+                    msg.grant = granted;
+                    msg.word = frame[F_A4]; // register-passed scalar (value-IPC)
+                    MBOX[to].tail = (tail + 1) % MAILBOX_DEPTH;
+                    MBOX[to].count += 1;
                     if TSTATE[to] == TaskState::Blocked {
                         TSTATE[to] = TaskState::Ready;
                     }
@@ -1355,18 +1387,22 @@ extern "C" fn utrap_handler(frame_ptr: *mut usize) -> *const usize {
                         frame[F_A0] = SYS_DENIED;
                         return frame_ptr;
                     }
-                    if MBOX[cur].full {
-                        let n = MBOX[cur].len.min(frame[F_A1]);
+                    if MBOX[cur].count > 0 {
+                        let head = MBOX[cur].head;
+                        let msg = MBOX[cur].slots[head];
+                        let n = msg.len.min(frame[F_A1]);
                         if n > 0 {
                             let dst = core::slice::from_raw_parts_mut(frame[F_A0] as *mut u8, n);
-                            dst.copy_from_slice(&MBOX[cur].buf[..n]);
+                            dst.copy_from_slice(&msg.buf[..n]);
                         }
                         // CAPABILITY TRANSFER: the receiver gains exactly the
                         // capabilities the sender delegated (already attenuated).
-                        TCAPS[cur] |= MBOX[cur].grant;
-                        let from = MBOX[cur].from;
-                        let word = MBOX[cur].word;
-                        MBOX[cur].full = false;
+                        TCAPS[cur] |= msg.grant;
+                        let from = msg.from;
+                        let word = msg.word;
+                        MBOX[cur].slots[head] = EMPTY_IPC_MESSAGE;
+                        MBOX[cur].head = (head + 1) % MAILBOX_DEPTH;
+                        MBOX[cur].count -= 1;
                         frame[F_A0] = n; // bytes received
                         frame[F_A1] = from; // sender task id (for replies)
                         frame[F_A2] = word; // register-passed scalar (value-IPC)
@@ -1397,7 +1433,7 @@ fn run_tasks(specs: &[(usize, usize, u8)]) {
     unsafe {
         for i in 0..MAX_TASKS {
             TSTATE[i] = TaskState::Unused;
-            MBOX[i].full = false;
+            clear_mailbox(i);
         }
         for (i, &(entry, caps, pers)) in specs.iter().take(n).enumerate() {
             let f = &mut FRAMES[i];
@@ -1433,7 +1469,7 @@ fn run_processes(specs: &[ProcessSpec]) {
         set_active_task_mem(usize::MAX);
         for i in 0..MAX_TASKS {
             TSTATE[i] = TaskState::Unused;
-            MBOX[i].full = false;
+            clear_mailbox(i);
         }
         for (i, spec) in specs.iter().take(n).enumerate() {
             let (root, entry) = build_address_space(spec);
@@ -1494,7 +1530,7 @@ fn spawn_process_at(slot: usize, spec: &ProcessSpec) {
         TPERS[slot] = spec.personality;
         TSATP[slot] = proc_satp(root);
         TEXIT[slot] = 0;
-        MBOX[slot].full = false;
+        clear_mailbox(slot);
         TSTATE[slot] = TaskState::Ready;
     }
 }
@@ -1504,7 +1540,7 @@ fn clear_foreground_tasks() {
         let mut i = FIRST_FOREGROUND_TASK;
         while i < MAX_TASKS {
             TSTATE[i] = TaskState::Unused;
-            MBOX[i].full = false;
+            clear_mailbox(i);
             TCAPS[i] = 0;
             TEXIT[i] = 0;
             i += 1;
@@ -2013,6 +2049,43 @@ extern "C" fn agent_task() -> ! {
     sys_exit(0)
 }
 
+#[link_section = ".user.text"]
+#[no_mangle]
+extern "C" fn queue_service_task() -> ! {
+    sys_print(b"    [queue-service] delaying receive so two clients enqueue\n");
+    sys_yield();
+    sys_yield();
+
+    let mut first = [0u8; 64];
+    let n1 = sys_recv(&mut first);
+    sys_print(b"    [queue-service] recv #1: ");
+    sys_write(first.as_ptr(), n1);
+
+    let mut second = [0u8; 64];
+    let n2 = sys_recv(&mut second);
+    sys_print(b"    [queue-service] recv #2: ");
+    sys_write(second.as_ptr(), n2);
+
+    sys_print(b"    [queue-service] FIFO mailbox preserved both client messages\n");
+    sys_exit(0)
+}
+
+#[link_section = ".user.text"]
+#[no_mangle]
+extern "C" fn queue_agent_a() -> ! {
+    sys_print(b"    [queue-agent-a] enqueue alpha\n");
+    sys_send(0, b"alpha\n", 0);
+    sys_exit(0)
+}
+
+#[link_section = ".user.text"]
+#[no_mangle]
+extern "C" fn queue_agent_b() -> ! {
+    sys_print(b"    [queue-agent-b] enqueue beta\n");
+    sys_send(0, b"beta\n", 0);
+    sys_exit(0)
+}
+
 // --- A Linux-ABI app, run unmodified through the Pol personality layer. -------
 // It speaks the real Linux riscv64 syscall ABI (write=64, exit=93). The kernel's
 // Pol layer translates each into a capability-checked Dezh action; an
@@ -2286,6 +2359,12 @@ const COMMANDS: &[CommandSpec] = &[
         help: "agent delegates a capability to a service via IPC",
     },
     CommandSpec {
+        name: "ipcq",
+        cap: cap::SPAWN,
+        cap_name: "SPAWN",
+        help: "two clients enqueue IPC messages without overwriting",
+    },
+    CommandSpec {
         name: "cairn",
         cap: cap::SPAWN,
         cap_name: "SPAWN",
@@ -2542,6 +2621,19 @@ fn dispatch(cmd: &str, arg: &str, plan: &KernelPlan, memory: &[MemoryRegion], he
                 (agent_task as usize, TASK_PRINT | TASK_IPC, PERS_NATIVE),
             ]);
             kprintln!("[kernel] IPC demo done; back in the console");
+        }
+        "ipcq" => {
+            kprintln!("[kernel] IPC queue: two clients enqueue while the service is busy");
+            run_tasks(&[
+                (
+                    queue_service_task as usize,
+                    TASK_PRINT | TASK_IPC,
+                    PERS_NATIVE,
+                ),
+                (queue_agent_a as usize, TASK_PRINT | TASK_IPC, PERS_NATIVE),
+                (queue_agent_b as usize, TASK_PRINT | TASK_IPC, PERS_NATIVE),
+            ]);
+            kprintln!("[kernel] IPC queue demo done; back in the console");
         }
         "cairn" => {
             kprintln!(

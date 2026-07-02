@@ -101,8 +101,8 @@ Built bottom-up, each "not like Linux/Windows" where it matters:
   (D003/D016) — kept outside the trusted core by design.
 - **Deferred (next epics):** a wasm→Dezh-IR frontend (outside the kernel) for
   real agents + multi-ISA; turning the v0 install/root marker into a full
-  installer + boot media flow; queued service clients; and eventually
-  IOMMU-backed DMA isolation.
+  installer + boot media flow; per-client DMA/data queues for block services;
+  and eventually IOMMU-backed DMA isolation.
 
 ## Canonical authority model
 

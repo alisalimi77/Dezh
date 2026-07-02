@@ -104,6 +104,7 @@ def run_riscv64(qemu: str, kernel: Path) -> None:
             ("run", "sys_uptime was DENIED (task holds no TIME capability)"),
             ("rogue", "rogue task handled; console survived"),
             ("ipc", "[service] <payload delivered with a delegated PRINT cap>"),
+            ("ipcq", "FIFO mailbox preserved both client messages"),
             ("linux", "unsupported syscall, denied cleanly"),
             ("services", "VirtioBlock state=Running"),
             ("install-check", "install-check: no Dezh root marker yet"),

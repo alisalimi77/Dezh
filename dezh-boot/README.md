@@ -144,12 +144,14 @@ the kernel boundary, then control return to the console. `rogue` spawns a task
 that writes the UART directly; watch it take a page fault and get killed while
 the console survives. `linux` runs a Linux-ABI app through the Pol layer (watch
 `close()` come back as `ENOSYS`). `ipc` runs an agent that delegates its `PRINT`
-capability to a no-authority service over a message. `disk` first proves that a
-process without a device capability faults when touching virtio MMIO, then
-resolves the registered `virtio-block` service. `bwrite`, `bread`, `pset`,
-`pget`, `prollback`, and the install/root commands all use the boot-managed
-daemon over IPC. `vblkd` is now a regression/demo client for that registered
-daemon; only the daemon gets the device/MMIO capability.
+capability to a no-authority service over a message. `ipcq` proves the bounded
+FIFO mailbox path: two clients enqueue while a service is busy, and neither
+message is overwritten. `disk` first proves that a process without a device
+capability faults when touching virtio MMIO, then resolves the registered
+`virtio-block` service. `bwrite`, `bread`, `pset`, `pget`, `prollback`, and the
+install/root commands all use the boot-managed daemon over IPC. `vblkd` is now a
+regression/demo client for that registered daemon; only the daemon gets the
+device/MMIO capability.
 
 ## Not yet
 
@@ -157,5 +159,7 @@ The service registry is real for `virtio-block`, but `init`, Cairn, and the
 runtime are still represented as boot metadata rather than separate production
 ELFs. The install/root marker is a v0 contract, not a full installer,
 partitioner, or bootloader. DMA isolation is modeled with explicit page-table
-mappings; IOMMU enforcement is future work. Virtio is still the legacy QEMU MMIO
-transport, polled rather than interrupt-driven.
+mappings, and the virtio data path still uses one shared bounce window, so
+multi-client block data queues need per-client DMA grants next. IOMMU
+enforcement is future work. Virtio is still the legacy QEMU MMIO transport,
+polled rather than interrupt-driven.
