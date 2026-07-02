@@ -9,8 +9,10 @@ missing from the transcript.
 from __future__ import annotations
 
 import argparse
+import os
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from pathlib import Path
@@ -67,6 +69,12 @@ class QemuSession:
 
 
 def run_riscv64(qemu: str, kernel: Path) -> None:
+    disk = tempfile.NamedTemporaryFile(prefix="dezh-disk-", suffix=".img", delete=False)
+    disk_path = Path(disk.name)
+    try:
+        disk.truncate(2 * 1024 * 1024)
+    finally:
+        disk.close()
     session = QemuSession(
         [
             qemu,
@@ -77,6 +85,10 @@ def run_riscv64(qemu: str, kernel: Path) -> None:
             "default",
             "-kernel",
             str(kernel),
+            "-drive",
+            f"file={disk_path},format=raw,if=none,id=dezhdisk",
+            "-device",
+            "virtio-blk-device,drive=dezhdisk",
         ],
         timeout=30,
     )
@@ -91,6 +103,14 @@ def run_riscv64(qemu: str, kernel: Path) -> None:
             ("rogue", "rogue task handled; console survived"),
             ("ipc", "[service] <payload delivered with a delegated PRINT cap>"),
             ("linux", "unsupported syscall, denied cleanly"),
+            ("disk", "device capability accepted: virtio-blk @ MMIO"),
+            ("disk", "no-grant probe returned; console survived"),
+            ("bwrite", "bwrite via user-space driver status=0"),
+            ("bread", "sector0 = \"DEZH-PERSISTENT-DISK-OK"),
+            ("pset ci-value", "cairn set via user-space driver status=0"),
+            ("pget", "cairn current = \"ci-value"),
+            ("pset bad-edit", "cairn set via user-space driver status=0"),
+            ("prollback", "rollback restored current = \"ci-value"),
             ("halt", "halting."),
         ]
         for command, expected in commands:
@@ -105,6 +125,10 @@ def run_riscv64(qemu: str, kernel: Path) -> None:
         transcript = session.text()
         print(transcript)
         session.stop()
+        try:
+            os.unlink(disk_path)
+        except OSError:
+            pass
 
 
 def run_x86_64(qemu: str, kernel: Path) -> None:

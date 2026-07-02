@@ -62,6 +62,12 @@ boundary every earlier spike ran around.
   an unsupported syscall returns `ENOSYS`. The app has zero ambient authority;
   it only reaches the console because it holds the `PRINT` capability. A first
   taste of legacy compatibility *on the kernel* (D014).
+- **User-space virtio-blk driver** (`disk`, `bwrite`, `bread`, `pset`, `pget`,
+  `prollback`): block I/O now runs through a separate U-mode ELF. The kernel maps
+  the virtio-mmio slots and a DMA/bounce window only when the process is launched
+  with explicit device/block capabilities. A no-grant probe page-faults on MMIO
+  and the console survives; with the grant, reads/writes and rollbackable
+  persistence go through the user-space driver.
 - Exits QEMU cleanly via the SiFive test finisher when you run `halt`.
 
 ## Layout
@@ -71,7 +77,9 @@ boundary every earlier spike ran around.
   `kmain` boot flow, and a panic handler.
 - `linker.ld` — places `.text` at `0x8020_0000` (the OpenSBI hand-off address).
 - `.cargo/config.toml` — defaults the build to `riscv64gc-unknown-none-elf`.
-- `build.rs` — applies the linker script.
+- `build.rs` — applies the linker script and stages the separate user ELFs.
+- `userprog/` — separately-linked demo process loaded into its own address space.
+- `virtio-blk/` — separately-linked user-space block driver/transaction process.
 
 This crate is a **standalone workspace**, excluded from the root workspace,
 because it cross-compiles to bare metal (no host linker, no MSVC needed).
@@ -91,7 +99,9 @@ Interactive (type commands yourself; `halt` exits):
 cd dezh-boot
 cargo build
 qemu-system-riscv64 -machine virt -nographic -bios default \
-    -kernel target/riscv64gc-unknown-none-elf/debug/dezh-boot
+    -kernel target/riscv64gc-unknown-none-elf/debug/dezh-boot \
+    -drive file=dezh-disk.img,format=raw,if=none,id=dezhdisk \
+    -device virtio-blk-device,drive=dezhdisk
 ```
 
 Automated, reproducible transcript (boots, scripts the commands, drains output):
@@ -133,13 +143,14 @@ interleave via `yield`. `linux` runs a Linux-ABI app through the Pol layer
 `PRINT` capability to a no-authority service over a message (watch the service be
 denied, then succeed once the capability is delegated). `bench` measures the
 ecall round-trip cost (see [BENCH.md](BENCH.md) for the real-hardware comparison
-vs Linux). `ipc`
-shows an agent delegating a capability to a service over a message.
+vs Linux). `disk` first proves that a process without a device capability faults
+when touching virtio MMIO, then starts the user-space virtio-blk driver with the
+explicit MMIO + DMA grants. `bwrite`, `bread`, `pset`, `pget`, and `prollback`
+all use that user-space driver path.
 
 ## Not yet
 
-Scheduling is cooperative (no timer preemption yet) and tasks share one user
-region; the kernel/user split uses coarse 1 GiB / 2 MiB pages (W^X not yet
-enforced). Next milestones: timer preemption and per-task regions, then more of
-the first real Pol personality (Linux) on the kernel — each step under the
-no-ambient-authority thesis, now enforced at the hardware boundary.
+The virtio-blk path is still a transaction-style U-mode process, not a long-lived
+driver daemon with queued client IPC. DMA isolation is modeled with explicit
+page-table mappings; IOMMU enforcement is future work. Virtio is still the legacy
+QEMU MMIO transport, polled rather than interrupt-driven.

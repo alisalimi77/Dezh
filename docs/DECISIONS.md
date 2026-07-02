@@ -76,11 +76,12 @@ Built bottom-up, each "not like Linux/Windows" where it matters:
   to it. **No `fork`** (Linux's fork inherits the parent's whole authority, the
   ambient-authority mistake we refuse).
 - **Drivers:** a device is reachable only through a **device capability** (its
-  MMIO mapped into a process). Drivers are user processes holding device
-  capabilities, **not in-kernel code** (anti-monolithic; D008).
+  MMIO mapped into a process). The virtio-blk path now runs through a separate
+  U-mode ELF with explicit MMIO + DMA grants; without the grant, MMIO access
+  page-faults and only that task is killed.
 - **Multi-process:** the scheduler switches per-process address spaces (satp);
   multiple separately-loaded programs run concurrently, preemptively, isolated.
-- **Persistence:** a virtio-blk driver gives real disk I/O; a durable Cairn
+- **Persistence:** user-space virtio-blk gives real disk I/O; a durable Cairn
   store (current + previous sector) provides rollback that survives reboot.
 - **W^X:** loaded programs honor per-segment permissions (code R+X, data R+W;
   never W+X).
@@ -95,8 +96,9 @@ Built bottom-up, each "not like Linux/Windows" where it matters:
   via WRITE/READ host calls. A real wasm frontend can later compile to this IR
   (D003/D016) — kept outside the trusted core by design.
 - **Deferred (next epics):** a wasm→Dezh-IR frontend (outside the kernel) for
-  real agents + multi-ISA; relocating the virtio-blk driver into a user-space
-  process (device-MMIO + DMA capabilities) so drivers are fully out of the kernel.
+  real agents + multi-ISA; turning the transaction-style virtio-blk ELF into a
+  long-lived driver service with queued IPC clients and eventually IOMMU-backed
+  DMA isolation.
 
 ## Canonical authority model
 

@@ -1,0 +1,18 @@
+# User-space virtio-blk driver/transaction program. It is a separate RISC-V ELF
+# loaded into its own U-mode address space by dezh-boot.
+[package]
+name = "virtio-blk"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[[bin]]
+name = "virtio-blk"
+path = "src/main.rs"
+
+[profile.release]
+panic = "abort"
+opt-level = "s"
+lto = true
+
+[workspace]

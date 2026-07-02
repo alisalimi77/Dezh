@@ -18,8 +18,6 @@
 
 extern crate alloc;
 
-mod blk;
-
 // The RISC-V implementation of the shared Dezh-core Host: capability check +
 // the side effect (kernel console). The Dezh-IR engine lives in dezh-core and
 // is identical across ISAs.
@@ -36,11 +34,11 @@ impl dezh_core::ir::Host for KHost {
     fn print_str(&mut self, s: &[u8]) {
         kprintln!("  [ir] {}", core::str::from_utf8(s).unwrap_or("<non-utf8>"));
     }
-    fn cairn_put(&mut self, data: &[u8]) -> bool {
-        blk::store_set_bytes(data).is_some()
+    fn cairn_put(&mut self, _data: &[u8]) -> bool {
+        false
     }
-    fn cairn_get(&mut self, buf: &mut [u8]) -> Option<usize> {
-        blk::store_get_into(buf)
+    fn cairn_get(&mut self, _buf: &mut [u8]) -> Option<usize> {
+        None
     }
 }
 
@@ -447,6 +445,10 @@ const SYS_DENIED: usize = usize::MAX; // result sentinel for "capability not hel
 // --- Per-task capabilities (what the running U-mode task is allowed to do). --
 const TASK_PRINT: usize = 1 << 0;
 const TASK_TIME: usize = 1 << 1;
+const TASK_IPC: usize = 1 << 2;
+const TASK_DEVICE_VIRTIO_BLK: usize = 1 << 3;
+const TASK_BLOCK_READ: usize = 1 << 4;
+const TASK_BLOCK_WRITE: usize = 1 << 5;
 static CURRENT_TASK_CAPS: AtomicUsize = AtomicUsize::new(0);
 
 #[no_mangle]
@@ -770,6 +772,74 @@ fn frame_free(f: usize) {
 /// The separate user program, compiled to its own riscv ELF by build.rs and
 /// embedded here. The loader maps it into a fresh address space at runtime.
 const USERPROG_ELF: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/userprog.elf"));
+const VIRTIO_BLK_ELF: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/virtio-blk.elf"));
+
+const DEV_UART_VA: usize = 0x5000_0000;
+const DEV_VIRTIO_BLK_VA: usize = 0x5000_0000;
+const VIRTIO_BLK_MMIO_PA: usize = 0x1000_1000;
+const VIRTIO_MMIO_STRIDE: usize = 0x1000;
+const VIRTIO_MMIO_COUNT: usize = 8;
+const VIRTIO_DMA_VA: usize = 0x5100_0000;
+const VIRTIO_DMA_SIZE: usize = 16 * 1024;
+const VIRTIO_INPUT_OFF: usize = 12_288;
+
+#[repr(align(4096))]
+#[allow(dead_code)]
+struct DmaWindow([u8; VIRTIO_DMA_SIZE]);
+static mut VIRTIO_DMA: DmaWindow = DmaWindow([0; VIRTIO_DMA_SIZE]);
+
+#[derive(Clone, Copy)]
+struct ProcessSpec {
+    elf: &'static [u8],
+    caps: usize,
+    arg0: usize,
+    arg1: usize,
+    arg2: usize,
+    arg3: usize,
+    personality: u8,
+    map_uart: bool,
+    map_virtio_blk: bool,
+    map_virtio_dma: bool,
+}
+
+impl ProcessSpec {
+    const fn new(elf: &'static [u8], caps: usize, arg0: usize) -> Self {
+        ProcessSpec {
+            elf,
+            caps,
+            arg0,
+            arg1: 0,
+            arg2: 0,
+            arg3: 0,
+            personality: PERS_NATIVE,
+            map_uart: false,
+            map_virtio_blk: false,
+            map_virtio_dma: false,
+        }
+    }
+
+    const fn uart(mut self) -> Self {
+        self.map_uart = true;
+        self
+    }
+
+    const fn virtio_blk(mut self) -> Self {
+        self.map_virtio_blk = true;
+        self
+    }
+
+    const fn virtio_dma(mut self) -> Self {
+        self.map_virtio_dma = true;
+        self
+    }
+
+    const fn args(mut self, arg1: usize, arg2: usize, arg3: usize) -> Self {
+        self.arg1 = arg1;
+        self.arg2 = arg2;
+        self.arg3 = arg3;
+        self
+    }
+}
 
 // --- Program loader + per-process address space ------------------------------
 // A loaded program gets its OWN page table (satp) built from frames: the kernel
@@ -836,7 +906,8 @@ unsafe fn translate(root: usize, va: usize) -> usize {
 /// Two passes so that segments sharing a page (common: a small RX segment and an
 /// R segment in the same 4 KiB page) are handled correctly: map every covered
 /// page once, then copy each segment's bytes to the right intra-page offset.
-fn build_address_space(img: &[u8]) -> (usize, usize) {
+fn build_address_space(spec: &ProcessSpec) -> (usize, usize) {
+    let img = spec.elf;
     let root = frame_alloc();
     unsafe {
         let r = root as *mut u64;
@@ -918,11 +989,32 @@ fn build_address_space(img: &[u8]) -> (usize, usize) {
         s += FRAME_SIZE;
     }
 
-    // Grant a DEVICE capability: map the UART's MMIO page into this address space
-    // at 0x5000_0000. This is how a user-space driver reaches hardware — only a
-    // process the kernel hands the device to can touch it (drivers are user
-    // processes with device capabilities, not kernel code).
-    map_page(root, 0x5000_0000, UART_BASE as usize, PTE_U | PTE_R | PTE_W);
+    // Device grants are explicit: no process sees MMIO unless its launch spec
+    // maps that device. Drivers are user processes with device capabilities,
+    // not kernel code with ambient hardware reach.
+    if spec.map_uart {
+        map_page(root, DEV_UART_VA, UART_BASE as usize, PTE_U | PTE_R | PTE_W);
+    }
+    if spec.map_virtio_blk && spec.caps & TASK_DEVICE_VIRTIO_BLK != 0 {
+        let mut i = 0usize;
+        while i < VIRTIO_MMIO_COUNT {
+            map_page(
+                root,
+                DEV_VIRTIO_BLK_VA + i * VIRTIO_MMIO_STRIDE,
+                VIRTIO_BLK_MMIO_PA + i * VIRTIO_MMIO_STRIDE,
+                PTE_U | PTE_R | PTE_W,
+            );
+            i += 1;
+        }
+    }
+    if spec.map_virtio_dma && spec.caps & (TASK_BLOCK_READ | TASK_BLOCK_WRITE) != 0 {
+        let dma_pa = core::ptr::addr_of!(VIRTIO_DMA) as usize;
+        let mut off = 0usize;
+        while off < VIRTIO_DMA_SIZE {
+            map_page(root, VIRTIO_DMA_VA + off, dma_pa + off, PTE_U | PTE_R | PTE_W);
+            off += FRAME_SIZE;
+        }
+    }
 
     (root, entry)
 }
@@ -1175,6 +1267,11 @@ extern "C" fn utrap_handler(frame_ptr: *mut usize) -> *const usize {
                 }
                 SYS_SEND => {
                     // msg_send(to=a0, ptr=a1, len=a2, grant_caps=a3)
+                    if caps & TASK_IPC == 0 {
+                        kprintln!("  [kernel] DENIED send: task {cur} holds no IPC capability");
+                        frame[F_A0] = SYS_DENIED;
+                        return frame_ptr;
+                    }
                     let to = frame[F_A0];
                     let len = frame[F_A2].min(64);
                     let requested = frame[F_A3];
@@ -1203,6 +1300,11 @@ extern "C" fn utrap_handler(frame_ptr: *mut usize) -> *const usize {
                 SYS_RECV => {
                     // msg_recv(dest=a0, dest_cap=a1) -> bytes received in a0.
                     // Blocks (restartably) until a message is present.
+                    if caps & TASK_IPC == 0 {
+                        kprintln!("  [kernel] DENIED recv: task {cur} holds no IPC capability");
+                        frame[F_A0] = SYS_DENIED;
+                        return frame_ptr;
+                    }
                     if MBOX[cur].full {
                         let n = MBOX[cur].len.min(frame[F_A1]);
                         if n > 0 {
@@ -1274,7 +1376,7 @@ fn run_tasks(specs: &[(usize, usize, u8)]) {
 /// run concurrently under the preemptive scheduler, isolated from one another,
 /// and return to the console once all have exited. Zero ambient authority — a
 /// process holds only the capabilities passed here (no fork).
-fn run_processes(specs: &[(&[u8], usize, usize)]) {
+fn run_processes(specs: &[ProcessSpec]) {
     let n = specs.len().min(MAX_TASKS);
     unsafe {
         // A loaded process must not see any baked-task stack region.
@@ -1283,15 +1385,18 @@ fn run_processes(specs: &[(&[u8], usize, usize)]) {
             TSTATE[i] = TaskState::Unused;
             MBOX[i].full = false;
         }
-        for (i, &(elf, caps, arg)) in specs.iter().take(n).enumerate() {
-            let (root, entry) = build_address_space(elf);
+        for (i, spec) in specs.iter().take(n).enumerate() {
+            let (root, entry) = build_address_space(spec);
             let f = &mut FRAMES[i];
             *f = [0; 32];
             f[F_SEPC] = entry;
             f[F_SP] = USER_STACK_TOP; // each process has its own stack in its own space
-            f[F_A0] = arg; // id passed to the program in a0
-            TCAPS[i] = caps;
-            TPERS[i] = PERS_NATIVE;
+            f[F_A0] = spec.arg0;
+            f[F_A1] = spec.arg1;
+            f[F_A2] = spec.arg2;
+            f[F_A3] = spec.arg3;
+            TCAPS[i] = spec.caps;
+            TPERS[i] = spec.personality;
             TSATP[i] = proc_satp(root);
             TSTATE[i] = TaskState::Ready;
         }
@@ -1307,6 +1412,46 @@ fn run_processes(specs: &[(&[u8], usize, usize)]) {
         asm!("csrw stvec, {}", in(reg) trap_entry as usize);
         sbi_set_timer(rdtime() + TIMER_DELTA);
     }
+}
+
+const BLK_OP_DISK: usize = 1;
+const BLK_OP_BWRITE: usize = 2;
+const BLK_OP_BREAD: usize = 3;
+const BLK_OP_PSET: usize = 4;
+const BLK_OP_PGET: usize = 5;
+const BLK_OP_PROLLBACK: usize = 6;
+const BLK_OP_NO_GRANT_PROBE: usize = 7;
+
+fn virtio_dma_pa() -> usize {
+    core::ptr::addr_of!(VIRTIO_DMA) as usize
+}
+
+fn prepare_virtio_input(text: &str) -> usize {
+    let bytes = text.as_bytes();
+    let n = bytes.len().min(511);
+    unsafe {
+        let base = core::ptr::addr_of_mut!(VIRTIO_DMA) as *mut u8;
+        core::ptr::write_bytes(base.add(VIRTIO_INPUT_OFF), 0, 512);
+        core::ptr::copy_nonoverlapping(bytes.as_ptr(), base.add(VIRTIO_INPUT_OFF), n);
+    }
+    n
+}
+
+fn run_virtio_blk_transaction(op: usize, input: &str) {
+    let input_len = prepare_virtio_input(input);
+    let caps = TASK_PRINT | TASK_DEVICE_VIRTIO_BLK | TASK_BLOCK_READ | TASK_BLOCK_WRITE;
+    run_processes(&[ProcessSpec::new(VIRTIO_BLK_ELF, caps, op)
+        .args(virtio_dma_pa(), input_len, 0)
+        .virtio_blk()
+        .virtio_dma()]);
+}
+
+fn run_virtio_no_grant_probe() {
+    run_processes(&[ProcessSpec::new(
+        VIRTIO_BLK_ELF,
+        TASK_PRINT,
+        BLK_OP_NO_GRANT_PROBE,
+    )]);
 }
 
 // Worker tasks (run in U-mode, so they live in the user region). Each prints a
@@ -1760,27 +1905,17 @@ fn dispatch(cmd: &str, arg: &str, plan: &KernelPlan, memory: &[MemoryRegion], he
                 kprintln!("  {:#012x}..{:#012x}  {:?}", r.start, end, r.kind);
             }
         }
-        "disk" => blk::list_devices(),
-        "bwrite" => match blk::bwrite() {
-            None => kprintln!("  no virtio block device (start QEMU with a disk)"),
-            Some(st) => kprintln!("  wrote sector 0 (status={st}, 0=OK): \"DEZH-PERSISTENT-DISK-OK\""),
-        },
-        "bread" => match blk::bread() {
-            None => kprintln!("  no virtio block device (start QEMU with a disk)"),
-            Some((st, s)) => kprintln!("  read sector 0 (status={st}, 0=OK): \"{s}\""),
-        },
-        "pset" => match blk::store_set(arg) {
-            None => kprintln!("  no virtio block device (start QEMU with a disk)"),
-            Some(()) => kprintln!("  cairn: set current = \"{arg}\" (previous saved, persisted to disk)"),
-        },
-        "pget" => match blk::store_get() {
-            None => kprintln!("  no virtio block device (start QEMU with a disk)"),
-            Some(s) => kprintln!("  cairn: current = \"{s}\""),
-        },
-        "prollback" => match blk::store_rollback() {
-            None => kprintln!("  no virtio block device (start QEMU with a disk)"),
-            Some(s) => kprintln!("  cairn: rolled back; current = \"{s}\" (persisted)"),
-        },
+        "disk" => {
+            kprintln!("[kernel] user-space virtio-blk: first prove no device cap means no MMIO");
+            run_virtio_no_grant_probe();
+            kprintln!("[kernel] no-grant probe returned; console survived");
+            run_virtio_blk_transaction(BLK_OP_DISK, "");
+        }
+        "bwrite" => run_virtio_blk_transaction(BLK_OP_BWRITE, ""),
+        "bread" => run_virtio_blk_transaction(BLK_OP_BREAD, ""),
+        "pset" => run_virtio_blk_transaction(BLK_OP_PSET, arg),
+        "pget" => run_virtio_blk_transaction(BLK_OP_PGET, ""),
+        "prollback" => run_virtio_blk_transaction(BLK_OP_PROLLBACK, ""),
         "agent" => {
             use dezh_core::ir;
             kprintln!("[kernel] Dezh-IR (shared dezh-core engine): verified, capability-gated");
@@ -1842,14 +1977,14 @@ fn dispatch(cmd: &str, arg: &str, plan: &KernelPlan, memory: &[MemoryRegion], he
         }
         "load" => {
             kprintln!("[kernel] loading a separate program into its own address space (cap: PRINT)");
-            run_processes(&[(USERPROG_ELF, TASK_PRINT, 0)]);
+            run_processes(&[ProcessSpec::new(USERPROG_ELF, TASK_PRINT, 0).uart()]);
             kprintln!("[kernel] program exited; back in the console");
         }
         "procs" => {
             kprintln!("[kernel] loading TWO copies as separate processes (own address spaces)");
             run_processes(&[
-                (USERPROG_ELF, TASK_PRINT, 1),
-                (USERPROG_ELF, TASK_PRINT, 2),
+                ProcessSpec::new(USERPROG_ELF, TASK_PRINT, 1),
+                ProcessSpec::new(USERPROG_ELF, TASK_PRINT, 2),
             ]);
             kprintln!("[kernel] all processes exited; back in the console");
         }
@@ -1898,8 +2033,8 @@ fn dispatch(cmd: &str, arg: &str, plan: &KernelPlan, memory: &[MemoryRegion], he
             kprintln!("[kernel] IPC: a no-authority service + an agent that delegates PRINT to it");
             // task 0 = service (no caps), task 1 = agent (holds PRINT)
             run_tasks(&[
-                (service_task as usize, 0, PERS_NATIVE),
-                (agent_task as usize, TASK_PRINT, PERS_NATIVE),
+                (service_task as usize, TASK_IPC, PERS_NATIVE),
+                (agent_task as usize, TASK_PRINT | TASK_IPC, PERS_NATIVE),
             ]);
             kprintln!("[kernel] IPC demo done; back in the console");
         }
@@ -1907,8 +2042,8 @@ fn dispatch(cmd: &str, arg: &str, plan: &KernelPlan, memory: &[MemoryRegion], he
             kprintln!("[kernel] Cairn store service + an agent doing a rollbackable action over IPC");
             // task 0 = cairn store service, task 1 = agent (holds PRINT)
             run_tasks(&[
-                (cairn_service as usize, 0, PERS_NATIVE),
-                (agent_cairn as usize, TASK_PRINT, PERS_NATIVE),
+                (cairn_service as usize, TASK_IPC, PERS_NATIVE),
+                (agent_cairn as usize, TASK_PRINT | TASK_IPC, PERS_NATIVE),
             ]);
             kprintln!("[kernel] Cairn demo done; back in the console");
         }
@@ -2007,8 +2142,9 @@ pub extern "C" fn kmain() -> ! {
         );
     }
     kprintln!(
-        "[dezh-boot] embedded user program: {} bytes (riscv ELF)",
-        USERPROG_ELF.len()
+        "[dezh-boot] embedded user ELFs: userprog={} bytes, virtio-blk={} bytes",
+        USERPROG_ELF.len(),
+        VIRTIO_BLK_ELF.len()
     );
 
     let held = cap::INSPECT | cap::TIME | cap::ECHO | cap::HALT | cap::SPAWN;
