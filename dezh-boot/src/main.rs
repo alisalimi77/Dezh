@@ -1042,7 +1042,7 @@ fn proc_satp(root: usize) -> usize {
 // register frame (saved/restored by utrap), its own 64 KiB stack carved from the
 // top of the user region, and its own capability set. Timer preemption is a
 // future refinement; for now switches happen on yield/exit (cooperative).
-const MAX_TASKS: usize = 8;
+const MAX_TASKS: usize = 4;
 
 #[derive(Clone, Copy, PartialEq)]
 enum TaskState {
