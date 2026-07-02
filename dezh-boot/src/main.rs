@@ -1421,6 +1421,8 @@ const BLK_OP_PSET: usize = 4;
 const BLK_OP_PGET: usize = 5;
 const BLK_OP_PROLLBACK: usize = 6;
 const BLK_OP_NO_GRANT_PROBE: usize = 7;
+const BLK_OP_DAEMON: usize = 8;
+const BLK_OP_CLIENT_DEMO: usize = 9;
 
 fn virtio_dma_pa() -> usize {
     core::ptr::addr_of!(VIRTIO_DMA) as usize
@@ -1452,6 +1454,22 @@ fn run_virtio_no_grant_probe() {
         TASK_PRINT,
         BLK_OP_NO_GRANT_PROBE,
     )]);
+}
+
+fn run_virtio_blk_daemon_demo() {
+    let driver_caps = TASK_PRINT
+        | TASK_IPC
+        | TASK_DEVICE_VIRTIO_BLK
+        | TASK_BLOCK_READ
+        | TASK_BLOCK_WRITE;
+    let client_caps = TASK_PRINT | TASK_IPC | TASK_BLOCK_READ | TASK_BLOCK_WRITE;
+    run_processes(&[
+        ProcessSpec::new(VIRTIO_BLK_ELF, driver_caps, BLK_OP_DAEMON)
+            .args(virtio_dma_pa(), 0, 0)
+            .virtio_blk()
+            .virtio_dma(),
+        ProcessSpec::new(VIRTIO_BLK_ELF, client_caps, BLK_OP_CLIENT_DEMO).virtio_dma(),
+    ]);
 }
 
 // Worker tasks (run in U-mode, so they live in the user region). Each prints a
@@ -1823,6 +1841,7 @@ const COMMANDS: &[CommandSpec] = &[
     CommandSpec { name: "pset", cap: cap::SPAWN, cap_name: "SPAWN", help: "durable Cairn: set current value (persisted) <text>" },
     CommandSpec { name: "pget", cap: cap::INSPECT, cap_name: "INSPECT", help: "durable Cairn: read current value" },
     CommandSpec { name: "prollback", cap: cap::SPAWN, cap_name: "SPAWN", help: "durable Cairn: roll back to previous value" },
+    CommandSpec { name: "vblkd", cap: cap::SPAWN, cap_name: "SPAWN", help: "run long-lived user-space virtio-blk daemon + IPC client" },
     CommandSpec { name: "services", cap: cap::INSPECT, cap_name: "INSPECT", help: "list init services" },
     CommandSpec { name: "uptime", cap: cap::TIME, cap_name: "TIME", help: "show timer uptime" },
     CommandSpec { name: "echo", cap: cap::ECHO, cap_name: "ECHO", help: "echo <text>" },
@@ -1916,6 +1935,12 @@ fn dispatch(cmd: &str, arg: &str, plan: &KernelPlan, memory: &[MemoryRegion], he
         "pset" => run_virtio_blk_transaction(BLK_OP_PSET, arg),
         "pget" => run_virtio_blk_transaction(BLK_OP_PGET, ""),
         "prollback" => run_virtio_blk_transaction(BLK_OP_PROLLBACK, ""),
+        "vblkd" => {
+            kprintln!("[kernel] launching virtio-blk as a long-lived U-mode driver daemon");
+            kprintln!("[kernel] task0 gets DEVICE+DMA+IPC; task1 gets IPC+DMA only (no MMIO)");
+            run_virtio_blk_daemon_demo();
+            kprintln!("[kernel] virtio-blk daemon demo done; back in the console");
+        }
         "agent" => {
             use dezh_core::ir;
             kprintln!("[kernel] Dezh-IR (shared dezh-core engine): verified, capability-gated");

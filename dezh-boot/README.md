@@ -63,11 +63,13 @@ boundary every earlier spike ran around.
   it only reaches the console because it holds the `PRINT` capability. A first
   taste of legacy compatibility *on the kernel* (D014).
 - **User-space virtio-blk driver** (`disk`, `bwrite`, `bread`, `pset`, `pget`,
-  `prollback`): block I/O now runs through a separate U-mode ELF. The kernel maps
-  the virtio-mmio slots and a DMA/bounce window only when the process is launched
-  with explicit device/block capabilities. A no-grant probe page-faults on MMIO
-  and the console survives; with the grant, reads/writes and rollbackable
-  persistence go through the user-space driver.
+  `prollback`, `vblkd`): block I/O now runs through a separate U-mode ELF. The
+  kernel maps the virtio-mmio slots and a DMA/bounce window only when the process
+  is launched with explicit device/block capabilities. A no-grant probe
+  page-faults on MMIO and the console survives; with the grant, reads/writes and
+  rollbackable persistence go through the user-space driver. `vblkd` runs the
+  same ELF as a long-lived driver daemon and a separate IPC client with no MMIO
+  grant.
 - Exits QEMU cleanly via the SiFive test finisher when you run `halt`.
 
 ## Layout
@@ -79,7 +81,8 @@ boundary every earlier spike ran around.
 - `.cargo/config.toml` — defaults the build to `riscv64gc-unknown-none-elf`.
 - `build.rs` — applies the linker script and stages the separate user ELFs.
 - `userprog/` — separately-linked demo process loaded into its own address space.
-- `virtio-blk/` — separately-linked user-space block driver/transaction process.
+- `virtio-blk/` — separately-linked user-space block driver process; supports
+  both single transaction mode and daemon + IPC-client mode.
 
 This crate is a **standalone workspace**, excluded from the root workspace,
 because it cross-compiles to bare metal (no host linker, no MSVC needed).
@@ -146,11 +149,13 @@ ecall round-trip cost (see [BENCH.md](BENCH.md) for the real-hardware comparison
 vs Linux). `disk` first proves that a process without a device capability faults
 when touching virtio MMIO, then starts the user-space virtio-blk driver with the
 explicit MMIO + DMA grants. `bwrite`, `bread`, `pset`, `pget`, and `prollback`
-all use that user-space driver path.
+all use that user-space driver path. `vblkd` starts a long-lived virtio-blk
+driver daemon as task 0 and an IPC client as task 1; only the daemon gets the
+device/MMIO capability.
 
 ## Not yet
 
-The virtio-blk path is still a transaction-style U-mode process, not a long-lived
-driver daemon with queued client IPC. DMA isolation is modeled with explicit
-page-table mappings; IOMMU enforcement is future work. Virtio is still the legacy
-QEMU MMIO transport, polled rather than interrupt-driven.
+The `vblkd` path proves a long-lived driver daemon, but service startup is still
+demo-driven from the console rather than init-managed. DMA isolation is modeled
+with explicit page-table mappings; IOMMU enforcement is future work. Virtio is
+still the legacy QEMU MMIO transport, polled rather than interrupt-driven.

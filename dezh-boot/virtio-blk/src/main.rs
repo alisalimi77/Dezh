@@ -11,6 +11,8 @@ use core::arch::asm;
 
 const SYS_EXIT: usize = 0;
 const SYS_PRINT: usize = 1;
+const SYS_SEND: usize = 6;
+const SYS_RECV: usize = 7;
 const SYS_PRINTNUM: usize = 8;
 
 const OP_DISK: usize = 1;
@@ -20,6 +22,16 @@ const OP_PSET: usize = 4;
 const OP_PGET: usize = 5;
 const OP_PROLLBACK: usize = 6;
 const OP_NO_GRANT_PROBE: usize = 7;
+const OP_DAEMON: usize = 8;
+const OP_CLIENT_DEMO: usize = 9;
+
+const REQ_PROBE: usize = 1;
+const REQ_BWRITE: usize = 2;
+const REQ_BREAD: usize = 3;
+const REQ_PSET: usize = 4;
+const REQ_PGET: usize = 5;
+const REQ_PROLLBACK: usize = 6;
+const REQ_STOP: usize = 7;
 
 static mut MMIO_BASE: usize = 0x5000_0000;
 const MMIO_WINDOW: usize = 0x5000_0000;
@@ -91,6 +103,31 @@ fn sys_printnum(v: usize) {
 
 fn sys_exit(code: usize) -> ! {
     unsafe { asm!("ecall", in("a0") code, in("a7") SYS_EXIT, options(noreturn)) }
+}
+
+fn sys_send(to: usize, word: usize) {
+    unsafe {
+        asm!("ecall",
+            inout("a0") to => _,
+            in("a1") 0usize,
+            in("a2") 0usize,
+            in("a3") 0usize,
+            in("a4") word,
+            in("a7") SYS_SEND)
+    };
+}
+
+fn sys_recv() -> (usize, usize) {
+    let from: usize;
+    let word: usize;
+    unsafe {
+        asm!("ecall",
+            inout("a0") 0usize => _,
+            inout("a1") 0usize => from,
+            out("a2") word,
+            in("a7") SYS_RECV)
+    };
+    (word, from)
 }
 
 fn r32(off: usize) -> u32 {
@@ -231,12 +268,141 @@ fn print_data(prefix: &[u8]) {
     sys_print(b"\n");
 }
 
+fn request_word(op: usize, sector: usize) -> usize {
+    (op << 56) | (sector & 0x00ff_ffff_ffff_ffff)
+}
+
+fn request_op(word: usize) -> usize {
+    word >> 56
+}
+
+fn request_sector(word: usize) -> u64 {
+    (word & 0x00ff_ffff_ffff_ffff) as u64
+}
+
+fn daemon(dma_base: usize) -> ! {
+    clear_dma();
+    sys_print(b"  [virtio-blk-daemon] started as a long-lived U-mode driver service\n");
+    if !init(dma_base) {
+        sys_print(b"  [virtio-blk-daemon] no virtio block device found\n");
+        sys_exit(1);
+    }
+    sys_print(b"  [virtio-blk-daemon] device + DMA capabilities accepted\n");
+    loop {
+        let (word, from) = sys_recv();
+        let op = request_op(word);
+        let sector = request_sector(word);
+        if op == REQ_PROBE {
+            sys_print(b"  [virtio-blk-daemon] PROBE over IPC\n");
+            sys_send(from, 0);
+        } else if op == REQ_BWRITE {
+            set_data(b"DEZH-DAEMON-BLOCK-OK");
+            let st = rw(dma_base, sector, true);
+            sys_print(b"  [virtio-blk-daemon] WRITE sector via IPC status=");
+            sys_printnum(st as usize);
+            sys_send(from, st as usize);
+        } else if op == REQ_BREAD {
+            set_data(b"");
+            let st = rw(dma_base, sector, false);
+            sys_print(b"  [virtio-blk-daemon] READ sector via IPC status=");
+            sys_printnum(st as usize);
+            sys_send(from, st as usize);
+        } else if op == REQ_PSET {
+            let _ = rw(dma_base, 0, false);
+            let _ = rw(dma_base, 1, true);
+            copy_input(sector as usize);
+            let st = rw(dma_base, 0, true);
+            sys_print(b"  [virtio-blk-daemon] CAIRN SET via IPC status=");
+            sys_printnum(st as usize);
+            sys_send(from, st as usize);
+        } else if op == REQ_PGET {
+            let st = rw(dma_base, 0, false);
+            sys_print(b"  [virtio-blk-daemon] CAIRN GET via IPC status=");
+            sys_printnum(st as usize);
+            sys_send(from, st as usize);
+        } else if op == REQ_PROLLBACK {
+            let _ = rw(dma_base, 1, false);
+            let st = rw(dma_base, 0, true);
+            sys_print(b"  [virtio-blk-daemon] CAIRN ROLLBACK via IPC status=");
+            sys_printnum(st as usize);
+            sys_send(from, st as usize);
+        } else if op == REQ_STOP {
+            sys_print(b"  [virtio-blk-daemon] STOP received; exiting cleanly\n");
+            sys_send(from, 0);
+            sys_exit(0);
+        } else {
+            sys_send(from, 2);
+        }
+    }
+}
+
+fn shared_text_len() -> usize {
+    let p = data_ptr();
+    let mut n = 0usize;
+    while n < 64 {
+        let b = unsafe { core::ptr::read_volatile(p.add(n)) };
+        if b == 0 {
+            break;
+        }
+        n += 1;
+    }
+    n
+}
+
+fn client_set_input(s: &[u8]) -> usize {
+    let n = s.len().min(SECTOR_SIZE - 1);
+    unsafe {
+        core::ptr::write_bytes((DMA_VA + INPUT_OFF) as *mut u8, 0, SECTOR_SIZE);
+        core::ptr::copy_nonoverlapping(s.as_ptr(), (DMA_VA + INPUT_OFF) as *mut u8, n);
+    }
+    n
+}
+
+fn client_send(op: usize, sector_or_len: usize) -> usize {
+    sys_send(0, request_word(op, sector_or_len));
+    let (reply, _) = sys_recv();
+    reply
+}
+
+fn client_demo() -> ! {
+    sys_print(b"  [vblk-client] talking to long-lived virtio-blk daemon over IPC\n");
+    let _ = client_send(REQ_PROBE, 0);
+    let _ = client_send(REQ_BWRITE, 0);
+    let st = client_send(REQ_BREAD, 0);
+    sys_print(b"  [vblk-client] read reply status=");
+    sys_printnum(st);
+    print_data(b"  [vblk-client] sector0 via daemon = \"");
+
+    let n = client_set_input(b"daemon-ci-value");
+    let _ = client_send(REQ_PSET, n);
+    let _ = client_send(REQ_PGET, 0);
+    print_data(b"  [vblk-client] cairn current via daemon = \"");
+
+    let n = client_set_input(b"daemon-bad-edit");
+    let _ = client_send(REQ_PSET, n);
+    let _ = client_send(REQ_PROLLBACK, 0);
+    let _ = client_send(REQ_PGET, 0);
+    print_data(b"  [vblk-client] rollback via daemon restored = \"");
+
+    let _ = shared_text_len();
+    let _ = client_send(REQ_STOP, 0);
+    sys_print(b"  [vblk-client] daemon workflow complete\n");
+    sys_exit(0)
+}
+
 extern "C" fn main(op: usize, dma_base: usize, input_len: usize) -> ! {
     if op == OP_NO_GRANT_PROBE {
         sys_print(b"  [virtio-blk] no-grant probe: touching MMIO without a device capability\n");
         let _ = r32(VR_MAGIC);
         sys_print(b"  [virtio-blk] BUG: no-grant MMIO read succeeded\n");
         sys_exit(2);
+    }
+
+    if op == OP_DAEMON {
+        daemon(dma_base);
+    }
+    if op == OP_CLIENT_DEMO {
+        client_demo();
     }
 
     clear_dma();

@@ -111,12 +111,25 @@ def run_riscv64(qemu: str, kernel: Path) -> None:
             ("pget", "cairn current = \"ci-value"),
             ("pset bad-edit", "cairn set via user-space driver status=0"),
             ("prollback", "rollback restored current = \"ci-value"),
+            (
+                "vblkd",
+                [
+                    "virtio-blk-daemon] started as a long-lived U-mode driver service",
+                    "vblk-client] sector0 via daemon = \"DEZH-DAEMON-BLOCK-OK",
+                    "vblk-client] rollback via daemon restored = \"daemon-ci-value",
+                    "virtio-blk daemon demo done; back in the console",
+                ],
+            ),
             ("halt", "halting."),
         ]
         for command, expected in commands:
             session.wait_for("dezh> ")
             session.send_line(command)
-            session.wait_for(expected)
+            if isinstance(expected, list):
+                for needle in expected:
+                    session.wait_for(needle)
+            else:
+                session.wait_for(expected)
 
         exit_code = session.proc.wait(timeout=10)
         if exit_code != 0:

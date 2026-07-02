@@ -160,8 +160,8 @@ W^X/موتورِ IRِ agent همه کار می‌کنند؛ تزِ no-ambient-au
 
 **در راه (epicهای بعدی):**
 * frontendِ wasm → Dezh-IR (بیرونِ هسته).
-* تبدیل مسیر transaction-style فعلیِ virtio-blk به یک سرویسِ driver دائمی با IPC
-  صف‌دار و بعداً DMA/IOMMU کامل‌تر.
+* انتقال daemon فعلیِ `vblkd` از demo کنسول به startup واقعیِ init با registry
+  سرویس‌ها، clientهای صف‌دار، و بعداً DMA/IOMMU کامل‌تر.
 * Cairnِ کاملِ روی هسته (content-addressing + provenanceِ کامل؛ الان نسخهٔ پایه).
 * شخصیت‌های Pol بیشتر (Android, Windows)؛ GUIِ capability-mediated؛ شتاب‌دهنده‌ها با
   IOMMU.
