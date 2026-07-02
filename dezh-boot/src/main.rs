@@ -48,7 +48,7 @@ use core::cell::UnsafeCell;
 use core::fmt::{self, Write};
 use core::panic::PanicInfo;
 use core::ptr::{read_volatile, write_volatile};
-use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
 use alloc::vec;
 use dezh_kernel::{
@@ -420,6 +420,7 @@ const TIMER_HZ: u64 = 10;
 const QUANTUM: u64 = 50_000; // ~5 ms scheduler time slice for preemption
 const STIE: usize = 1 << 5; // supervisor timer interrupt enable (in `sie`)
 static TICKS: AtomicU64 = AtomicU64::new(0);
+static SKIP_LF_AFTER_CR: AtomicBool = AtomicBool::new(false);
 
 fn rdtime() -> u64 {
     let t: u64;
@@ -2926,22 +2927,33 @@ fn read_line(buf: &mut [u8]) -> usize {
         let c = Uart.getc();
         match c {
             b'\n' => {
+                if SKIP_LF_AFTER_CR.swap(false, Ordering::Relaxed) {
+                    continue;
+                }
                 kprintln!();
                 return len;
             }
-            b'\r' => {}
+            b'\r' => {
+                SKIP_LF_AFTER_CR.store(true, Ordering::Relaxed);
+                kprintln!();
+                return len;
+            }
             0x7f | 0x08 => {
+                SKIP_LF_AFTER_CR.store(false, Ordering::Relaxed);
                 if len > 0 {
                     len -= 1;
                     kprint!("\x08 \x08");
                 }
             }
             c if (c == b' ' || c.is_ascii_graphic()) && len < buf.len() => {
+                SKIP_LF_AFTER_CR.store(false, Ordering::Relaxed);
                 buf[len] = c;
                 len += 1;
                 Uart.putc(c);
             }
-            _ => {}
+            _ => {
+                SKIP_LF_AFTER_CR.store(false, Ordering::Relaxed);
+            }
         }
     }
 }
