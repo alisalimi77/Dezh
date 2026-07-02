@@ -778,6 +778,7 @@ fn frame_free(f: usize) {
 const USERPROG_ELF: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/userprog.elf"));
 const VIRTIO_BLK_ELF: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/virtio-blk.elf"));
 const BENCH_ELF: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/dezh-bench.elf"));
+const NOTE_ELF: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/dezh-note.elf"));
 
 const DEV_UART_VA: usize = 0x5000_0000;
 const DEV_VIRTIO_BLK_VA: usize = 0x5000_0000;
@@ -1741,6 +1742,14 @@ const BLK_REQ_PROLLBACK: usize = 6;
 const BLK_REQ_INSTALL_CHECK: usize = 8;
 const BLK_REQ_INSTALL_INIT: usize = 9;
 const BLK_REQ_ROOT_STATUS: usize = 10;
+const BLK_REQ_APP_AVAILABLE: usize = 11;
+const BLK_REQ_APP_INSTALLED: usize = 12;
+const BLK_REQ_APP_INFO: usize = 13;
+const BLK_REQ_APP_INSTALL_NOTE: usize = 14;
+const BLK_REQ_APP_REQUIRE_NOTE: usize = 15;
+const BLK_REQ_APP_REMOVE_NOTE: usize = 16;
+const BLK_REQ_NOTE_SET: usize = 17;
+const BLK_REQ_NOTE_GET: usize = 18;
 const VIRTIO_SERVICE_TASK: usize = 0;
 const FIRST_FOREGROUND_TASK: usize = 1;
 const BENCH_ROLE_SYSCALL: usize = 1;
@@ -1749,6 +1758,9 @@ const BENCH_ROLE_IPC_CLIENT: usize = 3;
 const BENCH_ROLE_CAPS: usize = 4;
 const BENCH_SYSCALL_ITERS: usize = 200_000;
 const BENCH_IPC_ITERS: usize = 32;
+const NOTE_ROLE_RUN: usize = 1;
+const NOTE_ROLE_DENY_MMIO: usize = 2;
+const NOTE_ROLE_DENY_BLOCK: usize = 3;
 
 fn virtio_dma_pa() -> usize {
     core::ptr::addr_of!(VIRTIO_DMA) as usize
@@ -1789,6 +1801,25 @@ fn run_registered_virtio_client(plan: &KernelPlan, req: usize, input: &str) {
             .virtio_dma(),
     ]);
     refresh_virtio_service_state();
+}
+
+fn run_registered_virtio_client_status(plan: &KernelPlan, req: usize, input: &str) -> usize {
+    let Some(daemon) = ensure_virtio_block_service(plan) else {
+        kprintln!("[services] virtio-block unavailable; command failed cleanly");
+        return SYS_DENIED;
+    };
+    let input_len = prepare_virtio_input(input);
+    let client_caps = TASK_PRINT | TASK_IPC | TASK_BLOCK_READ | TASK_BLOCK_WRITE;
+    kprintln!(
+        "[services] resolved service virtio-block task={daemon}; launching foreground client"
+    );
+    run_foreground_processes(&[
+        ProcessSpec::new(VIRTIO_BLK_ELF, client_caps, BLK_OP_CLIENT_REQ)
+            .args(daemon, input_len, req)
+            .virtio_dma(),
+    ]);
+    refresh_virtio_service_state();
+    unsafe { TEXIT[FIRST_FOREGROUND_TASK] }
 }
 
 fn run_virtio_blk_daemon_demo(plan: &KernelPlan) {
@@ -1864,6 +1895,85 @@ fn run_bench_all(plan: &KernelPlan) {
     run_bench_caps();
     refresh_virtio_service_state();
     kprintln!("[bench-all] PASS: syscall, IPC, storage, caps, and service liveness checked");
+}
+
+fn app_note_is_active(plan: &KernelPlan) -> bool {
+    run_registered_virtio_client_status(plan, BLK_REQ_APP_REQUIRE_NOTE, "") == 0
+}
+
+fn print_apps(plan: &KernelPlan, arg: &str) {
+    match arg.trim() {
+        "" => {
+            kprintln!("[apps] available bundles:");
+            run_registered_virtio_client(plan, BLK_REQ_APP_AVAILABLE, "");
+            kprintln!("[apps] installed apps:");
+            run_registered_virtio_client(plan, BLK_REQ_APP_INSTALLED, "");
+        }
+        "available" => run_registered_virtio_client(plan, BLK_REQ_APP_AVAILABLE, ""),
+        "installed" => run_registered_virtio_client(plan, BLK_REQ_APP_INSTALLED, ""),
+        other => kprintln!("[apps] unknown view '{other}' (use: apps available|installed)"),
+    }
+}
+
+fn app_info(plan: &KernelPlan, arg: &str) {
+    if arg.trim() != "note" {
+        kprintln!("[app-info] unknown app '{}'", arg.trim());
+        return;
+    }
+    run_registered_virtio_client(plan, BLK_REQ_APP_INFO, "");
+}
+
+fn app_install(plan: &KernelPlan, arg: &str) {
+    if arg.trim() != "note" {
+        kprintln!("[installer] unknown available app '{}'", arg.trim());
+        return;
+    }
+    run_registered_virtio_client(plan, BLK_REQ_APP_INSTALL_NOTE, "");
+}
+
+fn app_run(plan: &KernelPlan, arg: &str) {
+    if arg.trim() != "note" {
+        kprintln!("[app-run] unknown app '{}'", arg.trim());
+        return;
+    }
+    if !app_note_is_active(plan) {
+        kprintln!("[app-run] note not installed or not active; launch denied");
+        return;
+    }
+    kprintln!("[app-run] launching note with caps=PRINT,IPC and no device/DMA grants");
+    run_foreground_processes(&[ProcessSpec::new(
+        NOTE_ELF,
+        TASK_PRINT | TASK_IPC,
+        NOTE_ROLE_RUN,
+    )]);
+    kprintln!("[app-run] note exited; console returned");
+}
+
+fn app_remove(plan: &KernelPlan, arg: &str) {
+    if arg.trim() != "note" {
+        kprintln!("[installer] unknown installed app '{}'", arg.trim());
+        return;
+    }
+    run_registered_virtio_client(plan, BLK_REQ_APP_REMOVE_NOTE, "");
+}
+
+fn app_deny(plan: &KernelPlan, arg: &str) {
+    if arg.trim() != "note" {
+        kprintln!("[app-deny] unknown app '{}'", arg.trim());
+        return;
+    }
+    let daemon = ensure_virtio_block_service(plan).unwrap_or(usize::MAX);
+    kprintln!("[app-deny] note has no direct block grant when launched without IPC");
+    run_foreground_processes(&[
+        ProcessSpec::new(NOTE_ELF, TASK_PRINT, NOTE_ROLE_DENY_BLOCK).args(daemon, 0, 0)
+    ]);
+    kprintln!("[app-deny] note has no MMIO/device grant");
+    run_foreground_processes(&[ProcessSpec::new(
+        NOTE_ELF,
+        TASK_PRINT | TASK_IPC,
+        NOTE_ROLE_DENY_MMIO,
+    )]);
+    kprintln!("[app-deny] note device/block direct access denied; console survived");
 }
 
 // Worker tasks (run in U-mode, so they live in the user region). Each prints a
@@ -2396,6 +2506,62 @@ const COMMANDS: &[CommandSpec] = &[
         help: "show installed root marker and metadata",
     },
     CommandSpec {
+        name: "apps",
+        cap: cap::INSPECT,
+        cap_name: "INSPECT",
+        group: "Apps",
+        help: "list app bundles or registry state (available|installed)",
+    },
+    CommandSpec {
+        name: "app-info",
+        cap: cap::INSPECT,
+        cap_name: "INSPECT",
+        group: "Apps",
+        help: "show app bundle and install state",
+    },
+    CommandSpec {
+        name: "app-install",
+        cap: cap::SPAWN,
+        cap_name: "SPAWN",
+        group: "Apps",
+        help: "transactionally install an available app",
+    },
+    CommandSpec {
+        name: "app-run",
+        cap: cap::SPAWN,
+        cap_name: "SPAWN",
+        group: "Apps",
+        help: "run an installed app with registry-scoped caps",
+    },
+    CommandSpec {
+        name: "app-remove",
+        cap: cap::SPAWN,
+        cap_name: "SPAWN",
+        group: "Apps",
+        help: "logically remove an installed app",
+    },
+    CommandSpec {
+        name: "app-deny",
+        cap: cap::SPAWN,
+        cap_name: "SPAWN",
+        group: "Apps",
+        help: "prove installed app has no direct device/block grants",
+    },
+    CommandSpec {
+        name: "note-set",
+        cap: cap::SPAWN,
+        cap_name: "SPAWN",
+        group: "Apps",
+        help: "set dezh-note private value via app registry storage",
+    },
+    CommandSpec {
+        name: "note-get",
+        cap: cap::INSPECT,
+        cap_name: "INSPECT",
+        group: "Apps",
+        help: "read dezh-note private value via app registry storage",
+    },
+    CommandSpec {
         name: "vblkd",
         cap: cap::SPAWN,
         cap_name: "SPAWN",
@@ -2603,7 +2769,9 @@ fn cap_names(set: u32) -> &'static str {
 }
 
 fn print_help(held: u32) {
-    const GROUPS: &[&str] = &["Inspect", "Storage", "Services", "Safety", "Demos", "Power"];
+    const GROUPS: &[&str] = &[
+        "Inspect", "Storage", "Apps", "Services", "Safety", "Demos", "Power",
+    ];
     kprintln!("commands (cap required -> held?):");
     for group in GROUPS {
         kprintln!("  [{}]", group);
@@ -2852,6 +3020,14 @@ fn dispatch(cmd: &str, arg: &str, plan: &KernelPlan, memory: &[MemoryRegion], he
             run_registered_virtio_client(plan, BLK_REQ_INSTALL_CHECK, "");
             run_registered_virtio_client(plan, BLK_REQ_ROOT_STATUS, "");
         }
+        "apps" => print_apps(plan, arg),
+        "app-info" => app_info(plan, arg),
+        "app-install" => app_install(plan, arg),
+        "app-run" => app_run(plan, arg),
+        "app-remove" => app_remove(plan, arg),
+        "app-deny" => app_deny(plan, arg),
+        "note-set" => run_registered_virtio_client(plan, BLK_REQ_NOTE_SET, arg),
+        "note-get" => run_registered_virtio_client(plan, BLK_REQ_NOTE_GET, ""),
         "install-check" => {
             kprintln!("[install] validating boot/install manifest v0");
             kprintln!(
@@ -3126,10 +3302,11 @@ pub extern "C" fn kmain() -> ! {
         );
     }
     kprintln!(
-        "[dezh-boot] embedded user ELFs: userprog={} bytes, virtio-blk={} bytes, dezh-bench={} bytes",
+        "[dezh-boot] embedded user ELFs: userprog={} bytes, virtio-blk={} bytes, dezh-bench={} bytes, dezh-note={} bytes",
         USERPROG_ELF.len(),
         VIRTIO_BLK_ELF.len(),
-        BENCH_ELF.len()
+        BENCH_ELF.len(),
+        NOTE_ELF.len()
     );
     kprintln!(
         "[dezh-boot] install manifest v0: root={} block={} marker_sector={}",

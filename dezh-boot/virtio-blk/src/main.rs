@@ -36,6 +36,14 @@ const REQ_STOP: usize = 7;
 const REQ_INSTALL_CHECK: usize = 8;
 const REQ_INSTALL_INIT: usize = 9;
 const REQ_ROOT_STATUS: usize = 10;
+const REQ_APP_AVAILABLE: usize = 11;
+const REQ_APP_INSTALLED: usize = 12;
+const REQ_APP_INFO: usize = 13;
+const REQ_APP_INSTALL_NOTE: usize = 14;
+const REQ_APP_REQUIRE_NOTE: usize = 15;
+const REQ_APP_REMOVE_NOTE: usize = 16;
+const REQ_NOTE_SET: usize = 17;
+const REQ_NOTE_GET: usize = 18;
 
 static mut MMIO_BASE: usize = 0x5000_0000;
 const MMIO_WINDOW: usize = 0x5000_0000;
@@ -77,6 +85,9 @@ const CAIRN_CURRENT_SECTOR: u64 = 2;
 const CAIRN_PREVIOUS_SECTOR: u64 = 3;
 const INSTALL_MARKER_SECTOR: u64 = 0;
 const ROOT_METADATA_SECTOR: u64 = 4;
+const APP_REGISTRY_SECTOR: u64 = 5;
+const APP_REGISTRY_PREVIOUS_SECTOR: u64 = 6;
+const NOTE_PRIVATE_ROOT_SECTOR: u64 = 16;
 const VIRTQ_DESC_F_NEXT: u16 = 1;
 const VIRTQ_DESC_F_WRITE: u16 = 2;
 
@@ -268,6 +279,39 @@ fn data_starts_with(s: &[u8]) -> bool {
     true
 }
 
+fn data_contains(needle: &[u8]) -> bool {
+    let p = data_ptr();
+    let mut hay_len = 0usize;
+    while hay_len < SECTOR_SIZE {
+        let b = unsafe { core::ptr::read_volatile(p.add(hay_len)) };
+        if b == 0 {
+            break;
+        }
+        hay_len += 1;
+    }
+    if needle.is_empty() || needle.len() > hay_len {
+        return false;
+    }
+    let mut start = 0usize;
+    while start + needle.len() <= hay_len {
+        let mut ok = true;
+        let mut j = 0usize;
+        while j < needle.len() {
+            let b = unsafe { core::ptr::read_volatile(p.add(start + j)) };
+            if b != needle[j] {
+                ok = false;
+                break;
+            }
+            j += 1;
+        }
+        if ok {
+            return true;
+        }
+        start += 1;
+    }
+    false
+}
+
 fn copy_input(len: usize) {
     unsafe {
         core::ptr::write_bytes(data_ptr(), 0, SECTOR_SIZE);
@@ -290,6 +334,34 @@ fn print_data(prefix: &[u8]) {
     let s = unsafe { core::slice::from_raw_parts(p as *const u8, n) };
     sys_print(s);
     sys_print(b"\n");
+}
+
+fn registry_is_active(dma_base: usize) -> bool {
+    let st = rw(dma_base, APP_REGISTRY_SECTOR, false);
+    st == 0 && data_starts_with(b"DEZHAPPREG") && data_contains(b"state=Active")
+}
+
+fn registry_is_removed(dma_base: usize) -> bool {
+    let st = rw(dma_base, APP_REGISTRY_SECTOR, false);
+    st == 0 && data_starts_with(b"DEZHAPPREG") && data_contains(b"state=Removed")
+}
+
+fn set_registry_pending() {
+    set_data(
+        b"DEZHAPPREG v0 app=note version=0.1.0 state=Pending caps=PRINT,IPC code_hash=note-elf-v0 manifest_hash=note-manifest-v0 private_root=16 previous_registry_sector=6",
+    );
+}
+
+fn set_registry_active() {
+    set_data(
+        b"DEZHAPPREG v0 app=note version=0.1.0 state=Active caps=PRINT,IPC code_hash=note-elf-v0 manifest_hash=note-manifest-v0 private_root=16 previous_registry_sector=6",
+    );
+}
+
+fn set_registry_removed() {
+    set_data(
+        b"DEZHAPPREG v0 app=note version=0.1.0 state=Removed caps=PRINT,IPC code_hash=note-elf-v0 manifest_hash=note-manifest-v0 private_root=16 previous_registry_sector=6",
+    );
 }
 
 fn request_word(op: usize, sector: usize) -> usize {
@@ -377,6 +449,107 @@ fn daemon(dma_base: usize) -> ! {
             sys_print(b"  [virtio-blk-daemon] root-status: metadata read status=");
             sys_printnum(st as usize);
             let _ = sys_send(from, st as usize);
+        } else if op == REQ_APP_AVAILABLE {
+            sys_print(
+                b"  \x1b[36m[available] note\x1b[0m version=0.1.0 caps=PRINT,IPC storage=PrivateRoot\n",
+            );
+            let _ = sys_send(from, 0);
+        } else if op == REQ_APP_INSTALLED {
+            if registry_is_active(dma_base) {
+                sys_print(
+                    b"  \x1b[32m[installed] note\x1b[0m version=0.1.0 state=Active caps=PRINT,IPC root=sector:16\n",
+                );
+                let _ = sys_send(from, 0);
+            } else if registry_is_removed(dma_base) {
+                sys_print(
+                    b"  \x1b[33m[removed] note\x1b[0m version=0.1.0 state=Removed execution=denied\n",
+                );
+                let _ = sys_send(from, 6);
+            } else {
+                sys_print(b"  [installed] none\n");
+                let _ = sys_send(from, 4);
+            }
+        } else if op == REQ_APP_INFO {
+            sys_print(
+                b"  [app-info] note bundle=available version=0.1.0 requested_caps=PRINT,IPC denied_caps=DEVICE_VIRTIO_BLK,DMA,BLOCK_DIRECT\n",
+            );
+            if registry_is_active(dma_base) {
+                sys_print(b"  [app-info] note install_state=Active private_root=sector:16\n");
+            } else if registry_is_removed(dma_base) {
+                sys_print(b"  [app-info] note install_state=Removed execution=denied\n");
+            } else {
+                sys_print(b"  [app-info] note install_state=NotInstalled\n");
+            }
+            let _ = sys_send(from, 0);
+        } else if op == REQ_APP_INSTALL_NOTE {
+            if registry_is_active(dma_base) {
+                sys_print(
+                    b"  [installer] already installed note version=0.1.0 state=Active\n",
+                );
+                let _ = sys_send(from, 0);
+            } else {
+                let _ = rw(dma_base, APP_REGISTRY_SECTOR, false);
+                let _ = rw(dma_base, APP_REGISTRY_PREVIOUS_SECTOR, true);
+                set_registry_pending();
+                let st0 = rw(dma_base, APP_REGISTRY_SECTOR, true);
+                set_registry_active();
+                let st1 = rw(dma_base, APP_REGISTRY_SECTOR, true);
+                let ok = registry_is_active(dma_base);
+                if st0 == 0 && st1 == 0 && ok {
+                    sys_print(
+                        b"  [installer] installed note version=0.1.0 state=Active caps=PRINT,IPC root=sector:16\n",
+                    );
+                    let _ = sys_send(from, 0);
+                } else {
+                    sys_print(b"  [installer] install failed: registry verify failed\n");
+                    let _ = sys_send(from, 5);
+                }
+            }
+        } else if op == REQ_APP_REQUIRE_NOTE {
+            if registry_is_active(dma_base) {
+                sys_print(b"  [installer] note is installed state=Active\n");
+                let _ = sys_send(from, 0);
+            } else if registry_is_removed(dma_base) {
+                sys_print(b"  [installer] note not active: state=Removed\n");
+                let _ = sys_send(from, 6);
+            } else {
+                sys_print(b"  [installer] note not installed\n");
+                let _ = sys_send(from, 4);
+            }
+        } else if op == REQ_APP_REMOVE_NOTE {
+            if registry_is_active(dma_base) || registry_is_removed(dma_base) {
+                let _ = rw(dma_base, APP_REGISTRY_SECTOR, false);
+                let _ = rw(dma_base, APP_REGISTRY_PREVIOUS_SECTOR, true);
+                set_registry_removed();
+                let st = rw(dma_base, APP_REGISTRY_SECTOR, true);
+                sys_print(b"  [installer] removed note state=Removed status=");
+                sys_printnum(st as usize);
+                let _ = sys_send(from, st as usize);
+            } else {
+                sys_print(b"  [installer] remove skipped: note not installed\n");
+                let _ = sys_send(from, 4);
+            }
+        } else if op == REQ_NOTE_SET {
+            if registry_is_active(dma_base) {
+                copy_input(sector as usize);
+                let st = rw(dma_base, NOTE_PRIVATE_ROOT_SECTOR, true);
+                sys_print(b"  [note-storage] note-set status=");
+                sys_printnum(st as usize);
+                let _ = sys_send(from, st as usize);
+            } else {
+                sys_print(b"  [note-storage] note-set denied: note not installed\n");
+                let _ = sys_send(from, 4);
+            }
+        } else if op == REQ_NOTE_GET {
+            if registry_is_active(dma_base) {
+                let st = rw(dma_base, NOTE_PRIVATE_ROOT_SECTOR, false);
+                sys_print(b"  [note-storage] note-get status=");
+                sys_printnum(st as usize);
+                let _ = sys_send(from, st as usize);
+            } else {
+                sys_print(b"  [note-storage] note-get denied: note not installed\n");
+                let _ = sys_send(from, 4);
+            }
         } else {
             let _ = sys_send(from, 2);
         }
@@ -443,7 +616,7 @@ fn client_demo(daemon: usize) -> ! {
 fn client_request(daemon: usize, input_len: usize, req: usize) -> ! {
     let sector_or_len = if req == REQ_BWRITE || req == REQ_BREAD {
         TEST_SECTOR as usize
-    } else if req == REQ_PSET {
+    } else if req == REQ_PSET || req == REQ_NOTE_SET {
         input_len
     } else {
         0
@@ -481,6 +654,31 @@ fn client_request(daemon: usize, input_len: usize, req: usize) -> ! {
         sys_print(b"  [vblk-client] root-status status=");
         sys_printnum(st);
         print_data(b"  [vblk-client] root metadata = \"");
+    } else if req == REQ_APP_AVAILABLE {
+        sys_print(b"  [vblk-client] apps available status=");
+        sys_printnum(st);
+    } else if req == REQ_APP_INSTALLED {
+        sys_print(b"  [vblk-client] apps installed status=");
+        sys_printnum(st);
+    } else if req == REQ_APP_INFO {
+        sys_print(b"  [vblk-client] app-info status=");
+        sys_printnum(st);
+    } else if req == REQ_APP_INSTALL_NOTE {
+        sys_print(b"  [vblk-client] app-install note status=");
+        sys_printnum(st);
+    } else if req == REQ_APP_REQUIRE_NOTE {
+        sys_print(b"  [vblk-client] app-require note status=");
+        sys_printnum(st);
+    } else if req == REQ_APP_REMOVE_NOTE {
+        sys_print(b"  [vblk-client] app-remove note status=");
+        sys_printnum(st);
+    } else if req == REQ_NOTE_SET {
+        sys_print(b"  [vblk-client] note-set status=");
+        sys_printnum(st);
+    } else if req == REQ_NOTE_GET {
+        sys_print(b"  [vblk-client] note-get status=");
+        sys_printnum(st);
+        print_data(b"  [vblk-client] note value = \"");
     }
     sys_exit(st)
 }

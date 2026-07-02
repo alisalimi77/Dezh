@@ -113,6 +113,36 @@ fn rdtime() -> usize {
     t
 }
 
+fn print_line_num(prefix: &[u8], value: usize) {
+    let mut buf = [0u8; 96];
+    let mut n = 0usize;
+    while n < prefix.len() && n < buf.len() - 1 {
+        buf[n] = prefix[n];
+        n += 1;
+    }
+    let mut digits = [0u8; 20];
+    let mut v = value;
+    let mut d = 0usize;
+    if v == 0 {
+        digits[0] = b'0';
+        d = 1;
+    } else {
+        while v > 0 && d < digits.len() {
+            digits[d] = b'0' + (v % 10) as u8;
+            v /= 10;
+            d += 1;
+        }
+    }
+    while d > 0 && n < buf.len() - 1 {
+        d -= 1;
+        buf[n] = digits[d];
+        n += 1;
+    }
+    buf[n] = b'\n';
+    n += 1;
+    sys_print(&buf[..n]);
+}
+
 fn bench_syscall(iters: usize) -> ! {
     sys_print(b"    [bench-os] U-mode syscall app started\n");
     let t0 = rdtime();
@@ -135,14 +165,12 @@ fn bench_ipc_service(iters: usize) -> ! {
         seen += 1;
         sys_yield();
     }
-    sys_print(b"    [bench-ipc-service] received messages=");
-    sys_printnum(seen);
+    print_line_num(b"    [bench-ipc-service] received messages=", seen);
     sys_exit(0)
 }
 
 fn bench_ipc_client(service: usize, iters: usize) -> ! {
-    sys_print(b"    [bench-ipc-client] sending messages=");
-    sys_printnum(iters);
+    print_line_num(b"    [bench-ipc-client] sending messages=", iters);
     let t0 = rdtime();
     let mut sent = 0usize;
     let mut denied = 0usize;
@@ -155,10 +183,8 @@ fn bench_ipc_client(service: usize, iters: usize) -> ! {
         sys_yield();
     }
     let ticks = rdtime().wrapping_sub(t0);
-    sys_print(b"    [bench-ipc-client] sent=");
-    sys_printnum(sent);
-    sys_print(b"    [bench-ipc-client] denied=");
-    sys_printnum(denied);
+    print_line_num(b"    [bench-ipc-client] sent=", sent);
+    print_line_num(b"    [bench-ipc-client] denied=", denied);
     sys_report(ticks, iters);
     sys_exit(if denied == 0 { 0 } else { 1 })
 }

@@ -14,6 +14,7 @@ fn main() {
     build_user_elf(&manifest, "userprog", "userprog");
     build_user_elf(&manifest, "virtio-blk", "virtio-blk");
     build_user_elf(&manifest, "bench-app", "dezh-bench");
+    build_user_elf(&manifest, "note-app", "dezh-note");
 }
 
 fn build_user_elf(manifest: &PathBuf, dir: &str, bin: &str) {

@@ -74,6 +74,11 @@ boundary every earlier spike ran around.
   `bench-caps`, `bench-all`): a separately-linked U-mode ELF exercises syscall
   trap cost, IPC message flow, denied capabilities, no-grant MMIO, service
   liveness, and storage through the registered user-space block daemon.
+- **Installer + app registry v0** (`apps`, `app-install`, `app-run`,
+  `app-remove`, `note-set`, `note-get`): `dezh-note` is the first installable
+  app bundle. Its registry state and private data live on disk sectors managed
+  by the user-space `virtio-block` daemon, while the app runs with only
+  `PRINT | IPC` and no device/DMA grant.
 - Exits QEMU cleanly via the SiFive test finisher when you run `halt`.
 
 ## Layout
@@ -90,6 +95,7 @@ boundary every earlier spike ran around.
   requests.
 - `bench-app/` — separately-linked benchmark/validation process used by the
   `bench-*` commands.
+- `note-app/` — separately-linked installable `dezh-note` bundle.
 
 This crate is a **standalone workspace**, excluded from the root workspace,
 because it cross-compiles to bare metal (no host linker, no MSVC needed).
@@ -154,7 +160,11 @@ commands all use the boot-managed `virtio-block` daemon over IPC. `vblkd` is a
 regression/demo client for that registered daemon; only the daemon gets the
 device/MMIO capability. `bench-os`, `bench-ipc`, `bench-storage`, `bench-caps`,
 and `bench-all` run a small U-mode benchmark suite that validates the current
-kernel, IPC, storage, capability, and service-liveness paths.
+kernel, IPC, storage, capability, and service-liveness paths. `apps`,
+`app-info note`, `app-install note`, `app-run note`, `app-remove note`,
+`app-deny note`, `note-set <text>`, and `note-get` exercise the v0 installer
+and app registry. The labels `[available]`, `[installed]`, and `[removed]`
+remain visible even when ANSI colors are not interpreted by the serial console.
 
 ## Not yet
 
