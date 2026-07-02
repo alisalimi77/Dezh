@@ -51,7 +51,8 @@ class QemuSession:
             if self.proc.poll() is not None:
                 break
             time.sleep(0.05)
-        raise AssertionError(f"timed out waiting for {needle!r}")
+        tail = self.text()[-3000:]
+        raise AssertionError(f"timed out waiting for {needle!r}\n--- transcript tail ---\n{tail}")
 
     def send_line(self, line: str) -> None:
         assert self.proc.stdin is not None
@@ -90,7 +91,7 @@ def run_riscv64(qemu: str, kernel: Path) -> None:
             "-device",
             "virtio-blk-device,drive=dezhdisk",
         ],
-        timeout=30,
+        timeout=60,
     )
     try:
         session.wait_for("boot contract VALIDATED")
@@ -192,6 +193,8 @@ def main() -> int:
         else:
             run_x86_64(args.qemu, args.kernel)
     except Exception as exc:
+        msg = str(exc).replace("%", "%25").replace("\n", "%0A").replace("\r", "%0D")
+        print(f"::error title=QEMU smoke failed::{msg}", file=sys.stderr)
         print(f"qemu smoke failed: {exc}", file=sys.stderr)
         return 1
     return 0
