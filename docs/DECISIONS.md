@@ -34,6 +34,7 @@ hypothesis, deferred, or rejected.
 | D016 | accepted | One program should eventually run across ISAs through the typed contract. | Portability and sandboxing should share one validation path. | IR contract validated; bare-metal x86_64 smoke validates a second path. |
 | D017 | hypothesis | Accelerator and DMA access require IOMMU-backed grants. | DMA can bypass CPU page tables unless device-side translation enforces grants. | Current DMA discipline is modeled; real IOMMU work is deferred. |
 | D018 | accepted | Cross-domain data sharing should move toward zero-copy object capabilities. | Immutable object capabilities can reduce copy cost without broadening authority. | Cairn provides immutable objects; bare-metal zero-copy path is future work. |
+| D019 | accepted | MVP scope is: installable, programmable, and four demonstrable differentiators. | External review requires independence (bootable VM images), an SDK (out-of-tree apps with capability manifests), and reproducible flagship demos for agent containment, Cairn rollback storage, multi-ISA app portability, and Pol foreign-binary execution — each with D015-compliant claim wording. Outreach waits until all four demos are green in CI. | Roadmap workstreams W1–W7; not yet validated. |
 
 ## Current Bare-Metal State
 
