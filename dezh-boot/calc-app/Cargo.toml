@@ -1,0 +1,16 @@
+[package]
+name = "dezh-calc"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[[bin]]
+name = "dezh-calc"
+path = "src/main.rs"
+
+[profile.release]
+panic = "abort"
+opt-level = "s"
+lto = true
+
+[workspace]

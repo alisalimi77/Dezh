@@ -43,21 +43,24 @@ class QemuSession:
     def text(self) -> str:
         return self.output.decode("utf-8", errors="replace")
 
-    def wait_for(self, needle: str, timeout: float | None = None) -> None:
+    def wait_for(self, needle: str, timeout: float | None = None, since: int = 0) -> int:
         deadline = time.monotonic() + (timeout or self.timeout)
         while time.monotonic() < deadline:
-            if needle in self.text():
-                return
+            idx = self.text().find(needle, since)
+            if idx >= 0:
+                return idx + len(needle)
             if self.proc.poll() is not None:
                 break
             time.sleep(0.05)
         tail = self.text()[-3000:]
         raise AssertionError(f"timed out waiting for {needle!r}\n--- transcript tail ---\n{tail}")
 
-    def send_line(self, line: str) -> None:
+    def send_line(self, line: str) -> int:
         assert self.proc.stdin is not None
+        start = len(self.output)
         self.proc.stdin.write((line + "\n").encode("ascii"))
         self.proc.stdin.flush()
+        return start
 
     def stop(self) -> None:
         if self.proc.poll() is None:
@@ -100,8 +103,24 @@ def run_riscv64(qemu: str, kernel: Path) -> None:
 
         commands = [
             ("caps", "console capabilities: INSPECT TIME ECHO HALT SPAWN"),
+            ("version", "v0.2-control-surface"),
+            ("about", "capability-secure research prototype"),
             ("status", "status:"),
             ("memstat", "owned: process="),
+            ("help install", "usage: install"),
+            ("explain install run", "path: boot manifest"),
+            ("install --dry-run", "dry-run complete; disk not modified"),
+            (
+                "ipc-typed-demo",
+                [
+                    "[typed-ipc] PING -> 0",
+                    "[typed-ipc] BADREQ -> 4",
+                    "[typed-ipc] RECV_TIMEOUT -> 3",
+                    "[typed-ipc] no-IPC SEND -> 1",
+                    "[typed-ipc] PASS: OK=OK, BAD_REQUEST=BAD_REQUEST, TIMEOUT=TIMEOUT, DENIED=DENIED",
+                ],
+            ),
+            ("ipcstat", "timeouts="),
             ("secret", "denied: 'secret' requires capability SECRET"),
             ("run", "sys_uptime was DENIED (task holds no TIME capability)"),
             ("rogue", "rogue task handled; console survived"),
@@ -112,21 +131,36 @@ def run_riscv64(qemu: str, kernel: Path) -> None:
             ("services", "VirtioBlock state=Running"),
             ("tasks", "service=virtio-block"),
             ("install-check", "install-check: no Dezh root marker yet"),
+            (
+                "install run",
+                [
+                    "Install Plan: Dezh Root v1",
+                    "[install-v1] verifying root marker, metadata, and base app registry",
+                    "Install Report: Dezh Root v1",
+                    "install.run",
+                ],
+            ),
+            ("events", "install.run"),
+            ("audit", "audit summary:"),
             ("install-init", "install-init status=0"),
             ("root-status", "root metadata = \"DEZHROOT v0"),
             ("root", "installed root marker found"),
             ("apps available", "[available] note"),
-            ("apps installed", "[installed] none"),
-            ("app-run note", "note not installed"),
-            ("app-install note", "installed note version=0.1.0 state=Active"),
+            ("apps available", "[available] calc"),
+            ("apps available", "[available] vault"),
             ("apps installed", "[installed] note"),
+            ("apps installed", "[installed] calc"),
+            ("apps installed", "[installed] vault"),
+            ("app-install note", "already installed note version=0.1.0 state=Active"),
+            ("apps installed", "[installed] note"),
+            ("app-permissions note", "DENIED     DEVICE_VIRTIO_BLK"),
             ("app-run note", "[note] running with caps=PRINT,IPC only"),
             ("note-set hello-note", "note-set status=0"),
             ("note-get", "note value = \"hello-note"),
             ("app-deny note", "note device/block direct access denied; console survived"),
             ("app-remove note", "removed note state=Removed status=0"),
             ("app-run note", "note not installed or not active; launch denied"),
-            ("app-install lab", "installed lab version=0.1.0 state=Active"),
+            ("app-install lab", "already installed lab version=0.1.0 state=Active"),
             (
                 "app-run lab",
                 [
@@ -139,8 +173,27 @@ def run_riscv64(qemu: str, kernel: Path) -> None:
             ("lab-set manual-lab-value", "lab-set status=0"),
             ("lab-get", "lab value = \"manual-lab-value"),
             ("app-deny lab", "lab device/block direct access denied; console survived"),
+            ("app-install calc", "already installed calc version=0.1.0 state=Active"),
+            ("app-run calc", "Dezh Calc :: installed U-mode app"),
+            ("calc 7 + 5", "[calc] 7 + 5 = 12"),
+            ("calc-history", "calc last = \"7 + 5 = 12"),
+            ("app-permissions calc", "DENIED     DEVICE_VIRTIO_BLK"),
+            ("app-install vault", "already installed vault version=0.1.0 state=Active"),
+            ("app-run vault", "Dezh Vault :: private app storage"),
+            ("vault-put alpha-secret", "vault-put status=0"),
+            ("vault-get", "vault value = \"alpha-secret"),
+            ("app-permissions vault", "DENIED     DEVICE_VIRTIO_BLK"),
+            ("app-deny vault", "vault device/block direct access denied; console survived"),
             ("stress-lab", "PASS: free frames stable"),
             ("services", "VirtioBlock state=Running"),
+            ("svc-stop virtio-block", "svc-stop virtio-block status=0 state=Stopped"),
+            ("read", "virtio-block unavailable; command failed cleanly"),
+            ("svc-restart virtio-block", "svc-restart virtio-block state=Running restart_count=1"),
+            ("write after-restart", "cairn set via registered daemon status=0"),
+            ("read", "cairn current = \"after-restart"),
+            ("svc-fault-demo virtio-block", "svc-fault-demo virtio-block request_status=0 state=Faulted"),
+            ("read", "virtio-block unavailable; command failed cleanly"),
+            ("svc-restart virtio-block", "svc-restart virtio-block state=Running restart_count=2"),
             ("disk", "disk probe via registered daemon status=0"),
             ("disk", "no-grant probe returned; console survived"),
             ("bwrite", "bwrite via registered daemon status=0"),
@@ -174,14 +227,16 @@ def run_riscv64(qemu: str, kernel: Path) -> None:
             ),
             ("halt", "halting."),
         ]
+        cursor = session.wait_for("dezh> ")
         for command, expected in commands:
-            session.wait_for("dezh> ")
-            session.send_line(command)
+            start = session.send_line(command)
             if isinstance(expected, list):
                 for needle in expected:
-                    session.wait_for(needle)
+                    session.wait_for(needle, since=start)
             else:
-                session.wait_for(expected)
+                session.wait_for(expected, since=start)
+            if command != "halt":
+                cursor = session.wait_for("dezh> ", since=start)
 
         exit_code = session.proc.wait(timeout=10)
         if exit_code != 0:

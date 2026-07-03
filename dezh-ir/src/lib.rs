@@ -557,8 +557,7 @@ mod tests {
     fn rejects_dezh_import_not_offered_by_host() {
         // valid_module imports all four host functions; a host that only offers
         // cap_read must reject the other three up front.
-        let violations =
-            validate_module_with(&valid_module(), &[HostImport::CapRead]).unwrap_err();
+        let violations = validate_module_with(&valid_module(), &[HostImport::CapRead]).unwrap_err();
 
         for missing in ["cap_write", "cap_print", "cap_attenuate"] {
             assert!(violations.iter().any(|v| matches!(

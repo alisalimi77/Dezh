@@ -32,6 +32,9 @@ jobs:
       - name: Run host workspace tests
         run: cargo test --locked --workspace
 
+      - name: Run public review hygiene scan
+        run: python3 tools/review/scan_public.py
+
   bare-metal:
     name: Bare-metal builds and QEMU smoke tests
     runs-on: ubuntu-latest

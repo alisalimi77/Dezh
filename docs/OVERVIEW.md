@@ -1,191 +1,63 @@
-# Dezh — یک سیستم‌عاملِ از-صفر برای عصرِ agentها
+# Dezh OS Overview
 
-> **یک‌جمله‌ای:** Dezh یک سیستم‌عاملِ نوشته‌شده از صفر (به زبان Rust) است که روی **یک
-> اصلِ غیرقابل‌مذاکره** بنا شده: *هیچ اختیارِ پیش‌فرضی وجود ندارد* (no ambient
-> authority). هر برنامه — از جمله agentهای هوش‌مصنوعی — با **صفر** دسترسی شروع
-> می‌کند و فقط از طریق یک «کلیدِ» صریح، غیرقابل‌جعل و قابل‌محدودسازی (capability)
-> می‌تواند به یک منبعِ مشخص دست بزند.
+Dezh OS is a capability-secure operating-system research prototype. It tests a
+microkernel-shaped design where programs, apps, services, and drivers receive no
+default authority. Authority is granted explicitly through capabilities,
+address-space mappings, IPC permissions, device grants, and DMA windows.
 
-این سند توضیح می‌دهد **چه چیزی ساخته شده**، **چرا**، و **چه چیزی واقعاً اثبات شده**
-در مقابلِ چیزی که هنوز در راه است.
+## Why This Exists
 
----
+Modern systems still carry many broad authority paths: inherited process
+authority, global filesystem assumptions, kernel-resident drivers, and service
+interfaces that blur ownership. Dezh explores a stricter baseline:
 
-## ۱. مسئله‌ای که حل می‌کند
+```text
+No authority exists unless the boot plan, service registry, or caller grants it.
+```
 
-در لینوکس و ویندوز، وقتی برنامه‌ای را اجرا می‌کنی، آن برنامه **تمامِ اختیارِ تو** را
-به ارث می‌برد: هر فایلی که تو می‌توانی بخوانی، آن هم می‌تواند؛ به شبکه، به دیسک، به
-همه‌چیز. این مدل را *ambient authority* می‌گویند. نتیجه‌اش: یک برنامهٔ آلوده یا یک
-agentِ بدرفتار = فاجعه.
+This rule is enforced in the current prototype at several layers:
 
-Dezh این پیش‌فرض را وارونه می‌کند: **در بسته است، مگر اینکه کلید بدهی.** این دقیقاً
-مسئلهٔ امروزِ دنیاست — *چطور کدِ غیرقابل‌اعتماد را با خیالِ راحت اجرا کنیم؟* — و در
-عصرِ agentهای AI که خودشان کد می‌نویسند و اجرا می‌کنند، حیاتی است.
+- syscall capability checks
+- U-mode page-table isolation
+- explicit device and DMA mappings
+- capability-gated IPC
+- service-mediated storage
+- app registry validation
 
-نامِ Dezh (دژ) یعنی قلعه: امنیت با ساختار، نه با وصله.
+## Current Demonstration
 
----
+The RISC-V QEMU build demonstrates:
 
-## ۲. ایدهٔ مرکزی: capability (کلیدِ اختیار)
+- boot contract validation
+- capability-scoped console
+- isolated U-mode ELF processes
+- user-space virtio-block daemon
+- typed IPC status and timeout behavior
+- install/root marker on a real disk image
+- app install, run, remove, and deny flows
+- service stop, restart, and controlled fault recovery
+- benchmark and denial suites
 
-یک capability یک شیءِ غیرقابل‌جعل است که می‌گوید: «دارندهٔ این، اجازه دارد
-*این عمل* را روی *این منبع* انجام دهد.» سه خاصیتِ کلیدی:
+The x86_64 build demonstrates the shared Dezh IR path on a second ISA.
 
-1. **غیرقابل‌جعل (unforgeable):** برنامه نمی‌تواند خودش یکی بسازد؛ فقط می‌تواند آنچه
-   را که به او داده‌اند، استفاده کند.
-2. **قابل‌محدودسازی (attenuable):** دارنده می‌تواند نسخه‌ای *ضعیف‌تر* از کلیدش را به
-   دیگری بدهد — مثلاً «فقط خواندن» به‌جای «خواندن+نوشتن». **هرگز قوی‌تر** نمی‌شود
-   (`granted = requested ∩ ownerʼs` — قانونِ تضعیف، در خودِ هسته اجبار می‌شود).
-3. **صریح (explicit):** اگر کلیدی نگرفتی، آن در برایت بسته است. تمام.
+## What Makes The Prototype Interesting
 
-به این ترتیب، می‌توانی به یک agent کاری بسپاری، و کلیدِ دقیقِ همان کار را بدهی — نه
-بیشتر. agent هم می‌تواند به زیرـagentِ خودش بخشی از اختیارش را بسپارد، امن.
+- **No ambient authority:** there is no default device, filesystem, block, IPC,
+  or time access for tasks.
+- **Drivers outside the kernel:** the block device is serviced by a U-mode
+  daemon that alone receives the MMIO and DMA grants.
+- **Typed service contracts:** important storage and installer paths return
+  structured statuses instead of raw ad hoc values.
+- **Service supervision:** the console survives service stop and controlled
+  service fault, then restarts the driver explicitly.
+- **Install path discipline:** app install and app private storage go through
+  the registered service path.
+- **Reviewable evidence:** the smoke test and review demo exercise the path end
+  to end under QEMU.
 
----
+## Prototype Boundaries
 
-## ۳. معماری در یک نگاه
-
-Dezh در دو فاز ساخته شد:
-
-* **فاز اول — اثباتِ تصمیم‌ها (Steps 1–9):** هر تصمیمِ معماریِ مهم، قبل از کارِ هسته،
-  به‌صورت یک *نمونهٔ اجراییِ host-process* (روی همین کامپیوتر، با تست) اثبات شد.
-* **فاز دوم — هستهٔ واقعی روی فلز (Step 10):** یک kernelِ `no_std` به زبان Rust که
-  روی **QEMU RISC-V** بوت می‌شود و روی سخت‌افزارِ شبیه‌سازی‌شده واقعاً کار می‌کند.
-
-تصمیم‌های معماری در `docs/DECISIONS.md` ثبت شده‌اند (D001 تا D018) با وضعیتِ شفاف:
-*validated / accepted / hypothesis / deferred / rejected* — تا پروژه در دامِ
-«همه‌چیز را برای همیشه بساز» نیفتد.
-
----
-
-## ۴. هستهٔ واقعی (dezh-boot) — چه چیزی روی فلز کار می‌کند
-
-این بخش‌ها همگی روی QEMU RISC-V بوت می‌شوند و با خروجِ تمیز (exit 0) تست شده‌اند.
-هر کدام عمداً «شبیهِ لینوکس/ویندوز نیست» جایی که اهمیت دارد:
-
-| لایه | چه کاری می‌کند | تفاوتِ اصولی |
-|---|---|---|
-| **بوت** | از OpenSBI به S-mode می‌آید، banner و کنسول | از همان دستورِ اول، مدلِ capability برقرار است (D012) |
-| **حافظهٔ فیزیکی** | frame allocator (صفحاتِ ۴ کیلوبایتی، صفر-بر-تخصیص) | بدونِ نشتِ داده بینِ صاحب‌ها |
-| **پردازه‌های واقعی** | بارگذاریِ برنامه از ELFِ جدا، در **فضای آدرسِ مستقلِ خودش** (Sv39 paging) | **بدونِ `fork`** — fork کلِ اختیارِ والد را ارث می‌دهد، همان اشتباهی که رد می‌کنیم. `spawn` با **صفر** اختیارِ ارثی |
-| **ایزولاسیونِ حافظه** | هر پردازه فقط حافظهٔ خودش را می‌بیند؛ کرنل و دستگاه‌ها supervisor-only | تجاوز = page fault → پردازه کشته می‌شود، کنسول زنده می‌ماند (نشان‌داده با `spy`) |
-| **زمان‌بند** | round-robinِ **preemptive** (وقفهٔ تایمر ~۵ms) | یک پردازه نمی‌تواند CPU را قبضه کند — امنیت برای agentِ غیرقابل‌اعتماد |
-| **چندپردازه‌ای** | چند برنامهٔ جدا، هم‌زمان، با satpِ مستقل | ایزولاسیونِ واقعی، نه فقط thread |
-| **IPC** | پیام‌رسانی با **انتقالِ capability** + تضعیف | کلیدِ معماریِ میکروکرنل: agent به سرویس‌ها کلید می‌دهد، هسته کوچک می‌ماند (D008) |
-| **درایور** | دستگاه فقط از طریقِ **device capability** (MMIO نگاشته در پردازه) | درایور = پردازهٔ کاربر، **نه کدِ داخلِ هسته** (ضدِ یکپارچه/ضدِ لینوکس) |
-| **پایداری (Cairn)** | درایورِ user-space virtio-blk → I/O واقعیِ دیسک؛ storeِ برگشت‌پذیر | عملِ ماندگار که **بعد از ریبوت می‌ماند** و **rollback** دارد |
-| **W^X** | برنامه‌های بارگذاری‌شده: کد R+X، داده R+W | هیچ صفحه‌ای هم‌زمان نوشتنی+اجرایی نیست (حفرهٔ کلاسیکِ لینوکسِ قدیم) |
-| **موتورِ agent (Dezh-IR)** | bytecodeِ کوچک، sandbox، **verifiable**، host-callِ capability-gated | agent به‌صورتِ کدِ قابل‌تأیید اجرا می‌شود، نه native و نه یک موتورِ غول‌پیکر در هسته |
-
----
-
-## ۵. سه ستونِ ویژه که Dezh را برای agentها مناسب می‌کند
-
-agentهای AI سه ترسِ بزرگ ایجاد می‌کنند. معماریِ Dezh **به‌صورتِ ساختاری** (نه با
-وصله) جوابِ هر سه را دارد:
-
-### الف) برگشت‌پذیری → **Cairn** (فایل‌سیستم/storeِ ما)
-فایل‌سیستمِ معمولی روی دادهٔ قبلی می‌نویسد و نسخهٔ قدیم نابود می‌شود. Cairn فرق دارد:
-**content-addressed و immutable** — داده عوض نمی‌شود، نسخهٔ جدید کنارِ قدیمی ساخته
-می‌شود. نتیجه:
-* **rollback:** همیشه می‌توانی به نسخهٔ قبل برگردی (تست‌شده: `pset`→`prollback`،
-  حتی بعد از ریبوت).
-* **provenance:** می‌دانی هر نسخه از کجا، با چه اختیاری آمد (کی، به‌نیابتِ که، چه شد).
-* **dedup:** دادهٔ تکراری یک‌بار ذخیره می‌شود.
-
-یعنی فایل‌سیستم خودش یک **دکمهٔ Undoِ ماندگار** برای کارهای agent است.
-
-### ب) محدودیت → **capability** (بخش ۲)
-agent فقط به چیزی دست می‌زند که صریحاً کلیدش را داری. بقیه در بسته است.
-
-### ج) ردیابی → **provenance & identity**
-هویتِ principalها و زنجیرهٔ delegation ثبت می‌شود؛ هر عملِ guest به یک commitِ Cairn
-با ردِ منشأ تبدیل می‌شود.
-
----
-
-## ۶. سازگاری با برنامه‌های قدیمی → **Pol**
-
-برای اینکه Dezh جزیره نباشد، یک لایهٔ سازگاری به‌نامِ **Pol** (پل) دارد: «سرورهای
-شخصیتیِ» capability-mediated. یک برنامهٔ لینوکسی، **بدونِ تغییر**، با ABIِ واقعیِ
-لینوکس اجرا می‌شود — اما هر syscallش به یک عملِ capability-checkedِ Dezh ترجمه
-می‌شود. یعنی **برنامهٔ قدیمی هم صفر اختیارِ پیش‌فرض می‌گیرد** (سازگاری = ارتقاءِ
-امنیتی، نه حفرهٔ امنیتی). syscallِ پشتیبانی‌نشده → `ENOSYS`.
-
-روی هسته نشان داده شد (`linux`): یک appِ با ABIِ لینوکسِ riscv64 (`write`, `exit`)
-از مسیرِ Pol سرویس گرفت. ترتیب: Linux → Android → Windows؛ macOS در نسخهٔ ۱ نیست.
-
----
-
-## ۷. موتورِ اجرای agent: **Dezh-IR**
-
-به‌جای اینکه یک موتورِ wasmِ غول‌پیکر را داخلِ هستهٔ مورد-اعتماد بکوبیم (که با اصلِ
-«هسته کوچک و قابل‌بازبینی» تضاد دارد)، **IR خودمان** را به یک ماشینِ واقعی تبدیل
-کردیم. سه خاصیت:
-
-1. **sandbox:** برنامه فقط پشتهٔ خودش و یک حافظهٔ خطیِ کوچک را می‌بیند؛ هر دسترسیِ
-   حافظه bounds-checked است.
-2. **verifiable:** یک مرحلهٔ `verify` برنامهٔ ناسالم را (opcodeِ ناشناخته، immediateِ
-   بریده، هدفِ پرشِ نامعتبر) **قبل از اجرا رد می‌کند** (D003).
-3. **بدونِ اختیارِ پیش‌فرض:** تنها راهِ اثر گذاشتن بر دنیا، یک host-call است و هر
-   host-call از یک capability رد می‌شود.
-
-نشان‌داده‌شده (`agent`): یک حلقه مجموع ۱..۵ را حساب و چاپ کرد (با کلیدِ PRINT)،
-بدونِ کلید **رد شد** (TRAP)، و یک برنامهٔ sandbox‌شده روی **Cairnِ ماندگار** نوشت و
-خواند — همه فقط از مسیرِ capability. در آینده یک frontendِ wasm می‌تواند به همین IR
-کامپایل شود (D016: یک برنامه → IR تایپ‌دار → هر ISA)، اما بیرونِ هسته.
-
----
-
-## ۸. اعداد (اندازه‌گیری‌شده، نه ادعا)
-
-اصلِ ما (D015): هر ادعای کارایی باید هم به یک اهرمِ معماری وصل باشد، هم در برابرِ یک
-baselineِ واقعی اندازه‌گیری شود.
-
-* روی همان CPUِ واقعی: بررسیِ یک capability در Dezh **~۰٫۹۸ نانوثانیه** در برابرِ
-  کفِ یک syscallِ لینوکس (`getpid` ~۴۹ نانوثانیه) → **حدود ۵۰ برابر ارزان‌تر** برای
-  میانجی‌گریِ دسترسی با capability به‌جای syscallِ هر-بار. (جزئیات: `dezh-boot/BENCH.md`.)
-
-این پایهٔ سخت‌افزاریِ این ایده است که «میانجی‌گری با capability» می‌تواند از
-«میانجی‌گری با syscall» ارزان‌تر باشد.
-
----
-
-## ۹. چه چیزی واقعی است، چه چیزی در راه (صادقانه)
-
-**واقعی و تست‌شده:**
-هسته روی QEMU RISC-V بوت می‌شود؛ حافظه/پردازه/زمان‌بند/IPC/درایور/persistence/
-W^X/موتورِ IRِ agent همه کار می‌کنند؛ تزِ no-ambient-authority در **هر مرز** اجبار
-می‌شود (syscall، حافظهٔ سخت‌افزاری، بین‌پردازه‌ای، دستگاه، و spawnِ بدونِ ارث).
-
-**در راه (epicهای بعدی):**
-* frontendِ wasm → Dezh-IR (بیرونِ هسته).
-* تبدیل قرارداد نصب/boot فعلی به installer کامل، boot media واقعی، و root store
-  قابل‌گسترش.
-* clientهای صف‌دار برای سرویس‌ها و بعداً DMA/IOMMU کامل‌تر.
-* Cairnِ کاملِ روی هسته (content-addressing + provenanceِ کامل؛ الان نسخهٔ پایه).
-* شخصیت‌های Pol بیشتر (Android, Windows)؛ GUIِ capability-mediated؛ شتاب‌دهنده‌ها با
-  IOMMU.
-
-**این یک نمونهٔ تحقیقاتیِ کارکن است، نه محصولِ آماده.** اما تزِ اصلی را روی فلز
-**ثابت** کرده، نه روی کاغذ.
-
----
-
-## ۱۰. نام‌ها
-
-* **Dezh** (دژ، قلعه) — خودِ سیستم‌عامل.
-* **Cairn** — storeِ محتوا-آدرس‌پذیر و تغییرناپذیر (D004).
-* **Pol** (پل) — لایهٔ سازگاریِ برنامه‌های قدیمی (D014).
-
----
-
-## جمع‌بندیِ یک‌پاراگرافی (برای گفتن به دیگران)
-
-> «Dezh یک سیستم‌عاملِ از-صفر است که در آن هر برنامه — مخصوصاً agentهای AI — با صفر
-> دسترسی شروع می‌کند و فقط از طریقِ کلیدهای صریح و غیرقابل‌جعل (capability) کار
-> می‌کند. هر عملِ مهم **برگشت‌پذیر** (با فایل‌سیستمِ immutableِ ما، Cairn) و
-> **ردیابی‌پذیر** است، درایورها و سرویس‌ها بیرونِ هسته‌ی کوچک‌اند (میکروکرنل)، و
-> agentها به‌صورتِ یک bytecodeِ قابل‌تأیید و sandbox اجرا می‌شوند. یعنی می‌توانی به
-> یک agent کار بسپاری بدونِ ترس از اینکه همه‌چیز را خراب کند. روی QEMU RISC-V بوت
-> می‌شود و کار می‌کند.»
+Dezh is not production-ready. The current work is a research artifact with a
+small kernel, embedded app bundles, a v0 registry format, and QEMU-centered
+device support. The point of the current repository state is to make the
+architecture concrete enough for serious review.

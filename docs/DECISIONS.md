@@ -1,115 +1,57 @@
 # Dezh Architecture Decision Register
 
-This register keeps Dezh out of the "build everything forever" trap. Each
-entry states whether an architectural choice is already validated, accepted as
-direction, still a hypothesis, deferred, or rejected.
+This register records the architectural decisions behind the current prototype.
+Each decision is either validated by running code, accepted as direction,
+hypothesis, deferred, or rejected.
 
-## Status key
+## Status Key
 
-- `validated`: proven by running code and tests.
-- `accepted`: chosen as architectural direction, but not fully proven yet.
-- `hypothesis`: important enough to test with a focused spike.
-- `deferred`: intentionally out of scope until an earlier decision is proven.
-- `rejected`: explicitly not a target for the current architecture.
+- `validated`: proven by code, tests, or QEMU demo output.
+- `accepted`: chosen direction, not fully proven yet.
+- `hypothesis`: important enough to test next.
+- `deferred`: intentionally out of scope for the current prototype.
+- `rejected`: not a target for this architecture.
 
 ## Decisions
 
 | ID | Status | Decision | Rationale | Validation |
 | --- | --- | --- | --- | --- |
-| D001 | validated | No ambient authority via explicit capabilities. | This is Dezh's security foundation: no program, service, app, or agent starts with default access. | Step 1 capability core plus Step 4 runtime integration: wasm guests can only act through granted handles. |
-| D002 | accepted | Rust is the trusted-core language. | Memory safety without GC matches the security and latency goals; Rust ownership also mirrors capability transfer. | Keep core crates Rust; revisit only if a kernel proof strategy requires another path. |
-| D003 | validated | WASM-like typed IR is the first native execution substrate. | A typed, verifiable IR supports multi-ISA deployment, local optimization, and sandboxing. | Step 8 defines the Dezh IR/WASM v0 contract (allowed `dezh` imports, denied ambient imports, required memory, required `run() -> i64`, content-addressed compiled-cache keys). The contract is **enforced on the execution path**: `dezh-runtime` validates every guest against its declared host surface (`HOST_SURFACE`) before instantiation, so a module with WASI/ambient or unoffered imports is rejected at the gate. |
-| D004 | validated | Cairn is the content-addressed immutable object store. | Rollbackable agent actions, crash consistency, deduplication, and provenance all depend on immutable content-addressed objects. | Step 2 Cairn v0: persistent append-only store with refs, commits, rollback, and recovery. |
-| D005 | validated | Agent actions must be rollbackable. | The main safety promise for autonomous agents is that important state changes are transactional and reversible. | Cairn proves object rollback; Step 4 shows guest writes become Cairn commits through capability checks. |
-| D006 | validated | Provenance is first-class metadata. | Dezh must answer who acted, on whose behalf, with which authority, and what object or commit resulted. | Step 3 identity model records principals/delegation; Step 4 records invocations for guest-produced Cairn objects and commits. |
-| D007 | validated | Compatibility is a bridge, not the destination. | Legacy app support should help migration without trapping Dezh in old APIs forever. | Step 9 validates a user-space Linux personality filesystem view: legacy paths map to Cairn refs, all access is capability-mediated, writes produce Cairn commits and provenance, and unsupported syscalls return `ENOSYS`. |
-| D008 | validated | The final OS shape is microkernel-based. | User-space drivers/services improve isolation, restartability, and capability mediation. | Step 6 validates the user-space actor/message model, capability transfer discipline, panic isolation, and message-path benchmark. On the bare-metal kernel (`dezh-boot`, `ipc`), capability-passing IPC is now the core mechanism: a task delegates a capability to another via a message, the kernel enforcing attenuation (a sender can only grant authority it holds). This keeps the kernel minimal — Cairn and Pol remain user-space *services* reached over IPC, not kernel code — and is the foundation for agents calling services and spawning attenuated sub-agents (D013). Zero-copy object handoff (D018) is a planned optimization on top. |
-| D009 | validated | Scheduling is task placement, not only thread time slicing. | Dezh must span mobile, desktop, server, accelerators, and eventually clusters. | Step 7 validates policy-driven *placement* (workload hints, data locality, queue pressure, energy, NUMA penalties). On the bare-metal kernel (`dezh-boot`) the time-slicing half is now real too: a preemptive round-robin scheduler with a ~5 ms quantum (timer interrupt → context switch), so a non-yielding task cannot monopolize the CPU (`preempt` demo). Placement-aware scheduling on the kernel is future work. |
-| D010 | accepted | GUI access is mediated by compositor capabilities. | Apps must not read global input, screenshots, clipboard, or other surfaces by default. | GUI spike after core runtime integration. |
-| D011 | validated | Linux compatibility comes before Windows and Android; macOS is not v1. | Linux ABI is the most stable first bridge; macOS frameworks and policy make it unrealistic for v1. | Step 9 starts with a Linux personality server spike before any Windows, Android, or macOS compatibility work. |
-| D012 | validated | Kernel boot is QEMU-first with user-space services seeded by explicit capabilities. | Boot work should start on a narrow virtio/QEMU surface and preserve the capability model from the first instruction after init. | Step 10 boots for real: `dezh-boot` is a `no_std` RISC-V kernel that comes up in S-mode on QEMU `virt` (via OpenSBI), runs the boot description through the validated `dezh-kernel` contract, prints the banner + init service plan over UART, and exits cleanly. Crosses the simulation → bare-metal boundary. |
-| D013 | accepted | Dezh is an agent-first OS: AI agents are first-class principals, not bolt-ons. | An agent OS must make agent actions capability-bound, rollbackable, and provenance-tracked *by construction* — which is exactly what Dezh's core provides, so agents are a primary target, not an afterthought. | Partially backed already: identity principals/delegation (Step 3), guest actions → Cairn commits + invocation provenance (Step 4), Cairn rollback (Step 2). A dedicated agent runtime layer is deferred (name TBD, to be approved). |
-| D014 | accepted | Legacy app compatibility is delivered by **Pol** — capability-mediated personality servers. | Each legacy app runs inside a capability sandbox; its syscalls are translated and gated, so Linux/Android/Windows apps get **zero ambient authority by construction** (compatibility as a security upgrade, not a hole). Order: Linux → Android → Windows; macOS not v1. Performance target: near-native compute, with minimized — not zero — syscall-translation overhead. | First Pol personality (Linux) spiked in user space at Step 9 (`dezh-linux`): legacy paths → Cairn refs, capability-mediated, writes record provenance, unsupported syscalls return `ENOSYS`. A minimal Pol/Linux personality now also runs **on the bare-metal kernel** (`dezh-boot`, `linux` command): a U-mode app speaking the real Linux riscv64 syscall ABI (`write`=64, `exit`=93) is serviced through capability checks, with unsupported syscalls returning `ENOSYS` — first legacy compatibility on the kernel itself. Android and Windows personalities not started. Refines D007 (bridge) and D011 (order). |
-| D015 | accepted | Performance is delivered by architecture and proven by measurement against baselines. | "Faster than existing OSes" is meaningless as a bare assertion. Every performance claim must trace to a specific architectural lever *and* a benchmark against a real baseline (Linux/Windows) on the same workload. The microkernel's IPC cost is a real thing to engineer around (seL4-style fast paths + D018 zero-copy), not to assume away. We do not chase novelty that breaks the thesis or never ships. | First comparative benchmark done (`dezh-boot/BENCH.md`): on the same real CPU, Dezh's capability check (~0.98 ns) is ~50× cheaper than Linux's syscall floor (`getpid` ~49 ns) — the real-hardware basis for capability-mediated access over per-access syscalls. The kernel `ecall` round trip (~1041 ns) is QEMU-emulated and explicitly *not* compared to native. End-to-end same-substrate benchmarks vs Linux are the next milestone. |
-| D016 | accepted | One program runs across ISAs via the typed IR. | Compiling to a verifiable typed IR instead of fixed machine code lets the same program target RISC-V, x86, and ARM and be optimized per host — portability and sandboxing together, without ambient authority. Order: RISC-V first (the kernel today), then x86/ARM. | IR contract validated and enforced in the runtime (Step 8 / D003). The bare-metal kernel runs on RISC-V only so far. Sharpens D003. |
-| D017 | hypothesis | Heterogeneous execution (CPU efficiency/performance cores + GPU/NPU) under the capability thesis, with IOMMU-enforced device isolation. | Dezh must place work on the best core type (D009) AND preserve no-ambient-authority on accelerators. Accelerators use DMA = ambient memory access, so an IOMMU (device-side address translation) is required so a device can only touch memory it was explicitly granted — the hardware memory-boundary thesis (proven for U-mode via Sv39) extended to devices. | Placement scoring validated in user space (Step 7: energy/NUMA/locality/workload hints). No real GPU/NPU execution or IOMMU integration yet. |
-| D018 | accepted | Cross-domain data sharing is zero-copy via content-addressed capabilities. | Instead of copying bytes between protection domains (the classic IPC cost), pass an unforgeable capability to an immutable content-addressed object; the receiver reads it in place. This preserves the thesis (no ambient access — only the handed capability) and offsets microkernel IPC overhead, supporting D015. | Cairn provides immutable content-addressed objects (Step 2); the runtime already passes ref capabilities to guests (Step 4). A zero-copy shared-object path on the bare-metal kernel is future work. |
+| D001 | validated | No ambient authority via explicit capabilities. | Programs, services, drivers, and apps should start with no default access. | Host capability tests, runtime integration, and bare-metal syscall checks. |
+| D002 | accepted | Rust is the trusted-core implementation language. | Memory safety without a garbage collector fits the kernel and service goals. | Core crates and bare-metal kernels are Rust. |
+| D003 | validated | A typed, verifiable execution contract is the first portable app/agent substrate. | A small typed surface supports validation and multi-ISA direction. | `dezh-ir` and `dezh-runtime` validate imports, memory, and entry contracts. |
+| D004 | validated | Cairn-style storage is content-addressed and rollback-oriented. | Immutable objects plus refs make recovery and rollback structural. | `dezh-cairn` tests and bare-metal current/previous sector flow. |
+| D005 | validated | Important app and agent state changes should be rollbackable. | Recovery must be a first-class state property, not an afterthought. | Cairn tests and bare-metal rollback command. |
+| D006 | validated | Provenance metadata is first-class. | Reviewable systems need to know actor, authority, action, and output. | Identity and runtime tests record delegation and invocation metadata. |
+| D007 | validated | Compatibility should be a bridge, not the security baseline. | Legacy-style interfaces should map into capability-checked services. | Linux personality spike and bare-metal unsupported-syscall denial. |
+| D008 | validated | The OS shape is microkernel-based. | Drivers and stateful services should be isolated and restartable. | User-space IPC spike and bare-metal user-space virtio-block daemon. |
+| D009 | validated | Scheduling includes isolation and placement direction. | Runtime policy needs both task switching and future placement decisions. | Scheduler policy crate plus bare-metal preemptive round-robin demo. |
+| D010 | accepted | GUI access will be mediated by compositor capabilities. | Apps should not receive global input, clipboard, screenshot, or surface access by default. | Deferred until GUI work starts. |
+| D011 | validated | Linux-style compatibility is the first legacy personality path. | It is a practical first bridge with a clear syscall surface. | `dezh-linux` and bare-metal Linux ABI demo. |
+| D012 | validated | Kernel boot is QEMU-first with explicit service capability seeds. | A narrow hardware surface keeps authority boundaries reviewable. | RISC-V QEMU boot contract and service registry. |
+| D013 | accepted | Agent execution is a primary target. | Autonomous software needs capability-bound, rollbackable, provenance-aware effects. | Identity, runtime, Cairn, and IR layers partially validate the direction. |
+| D014 | accepted | Legacy compatibility is delivered through capability-mediated personality services. | Compatibility should not reintroduce ambient authority. | Linux personality prototype; additional personalities are deferred. |
+| D015 | accepted | Performance claims must be evidence-backed. | Architectural claims need measured support and clear baselines. | Existing microbenchmarks and QEMU benchmark suite; broader comparisons deferred. |
+| D016 | accepted | One program should eventually run across ISAs through the typed contract. | Portability and sandboxing should share one validation path. | IR contract validated; bare-metal x86_64 smoke validates a second path. |
+| D017 | hypothesis | Accelerator and DMA access require IOMMU-backed grants. | DMA can bypass CPU page tables unless device-side translation enforces grants. | Current DMA discipline is modeled; real IOMMU work is deferred. |
+| D018 | accepted | Cross-domain data sharing should move toward zero-copy object capabilities. | Immutable object capabilities can reduce copy cost without broadening authority. | Cairn provides immutable objects; bare-metal zero-copy path is future work. |
 
-## Current phase
+## Current Bare-Metal State
 
-Step 1 through Step 10 are validated. Step 10 boots for real: `dezh-boot` comes
-up on bare-metal QEMU `virt` (RISC-V), prints the validated kernel contract
-banner, installs an S-mode trap vector + SBI timer (background uptime), runs **Dezh's own
-capability-gated console** over the UART, and from the console `run` drops a task
-to **U-mode** (zero ambient authority) that can only reach the kernel via
-`ecall`s checked against the *task's* capabilities — an ungranted syscall
-(`sys_uptime`) is denied at the kernel boundary, then a real S→U→S context switch
-returns to the console. **Sv39 paging** then confines each U-mode task to its own
-region: kernel + MMIO pages are supervisor-only, so a task touching the UART
-directly (`rogue`) takes a page fault and is killed while the console survives.
-The no-ambient-authority thesis is now enforced at **both the syscall boundary
-and the hardware memory boundary**, not just by Rust types. Next: multiple tasks
-with scheduling and per-task regions, then the first real Pol personality (Linux)
-on the kernel.
+The RISC-V kernel boots in QEMU, validates its boot contract, runs a
+capability-gated console, launches isolated U-mode ELF processes, and uses Sv39
+to deny access outside each process grant.
 
-## Names (ours — user-approved)
+The current storage path runs through a user-space `virtio-block` daemon. The
+daemon receives explicit MMIO and DMA grants; clients communicate with it over
+typed IPC. The service registry supports start, stop, controlled fault, and
+explicit restart.
 
-Dezh's proper nouns are deliberate and **require the user's approval** before
-use; proposed names are not adopted until approved.
+The app registry v0 supports embedded app bundles, install/remove state,
+private app storage sectors, and no-grant denial demos. This is sufficient for
+reviewing the authority model, not a production package ecosystem.
 
-- **Dezh** — the OS itself (دژ, "fortress/citadel": security by construction).
-- **Cairn** — the content-addressed immutable object store (D004).
-- **Pol** — the legacy-compatibility subsystem: capability-mediated personality
-  servers (پل, "bridge"; D014). `dezh-linux` is the first Pol personality.
+## Naming Policy
 
-The agent-runtime layer (D013) is intentionally **unnamed for now**.
-
-## Kernel foundation status (dezh-boot)
-
-Built bottom-up, each "not like Linux/Windows" where it matters:
-
-- **Physical memory:** a frame allocator (4 KiB frames, zero-on-alloc — no
-  cross-owner leaks).
-- **Real processes:** separate programs are loaded from their own ELF into their
-  own per-process address space (Sv39, kernel mapped U=0 for traps). `spawn`
-  grants **zero ambient authority** — a process gets only the capabilities passed
-  to it. **No `fork`** (Linux's fork inherits the parent's whole authority, the
-  ambient-authority mistake we refuse).
-- **Drivers:** a device is reachable only through a **device capability** (its
-  MMIO mapped into a process). The virtio-blk path now runs through a separate
-  U-mode ELF with explicit MMIO + DMA grants; without the grant, MMIO access
-  page-faults and only that task is killed. The boot plan is materialized as a
-  service registry, and `virtio-block` starts as a long-lived U-mode daemon
-  reached by IPC clients that have no MMIO grant.
-- **Multi-process:** the scheduler switches per-process address spaces (satp);
-  multiple separately-loaded programs run concurrently, preemptively, isolated.
-- **Persistence/install contract:** user-space virtio-blk gives real disk I/O; a
-  v0 install manifest defines the Dezh root marker and metadata sectors, and the
-  durable Cairn-style current/previous sectors provide rollback that survives
-  reboot.
-- **W^X:** loaded programs honor per-segment permissions (code R+X, data R+W;
-  never W+X).
-- **Agent runtime (Dezh-IR):** the kernel runs agents as a small, **verifiable**
-  bytecode (our own stack machine), not native code and not a large embedded
-  engine — keeping the trusted core small (D002). The program is sandboxed
-  (own operand stack + bounds-checked linear memory), a `verify` pass rejects
-  malformed programs (unknown opcode, truncated immediate, off-boundary branch
-  target) before execution, and **every effect is a capability-gated host call**.
-  Demonstrated (`agent`): a loop computes a sum and prints it (with PRINT), is
-  denied without PRINT, and a sandboxed program writes+reads the durable Cairn
-  via WRITE/READ host calls. A real wasm frontend can later compile to this IR
-  (D003/D016) — kept outside the trusted core by design.
-- **Deferred (next epics):** a wasm→Dezh-IR frontend (outside the kernel) for
-  real agents + multi-ISA; turning the v0 install/root marker into a full
-  installer + boot media flow; per-client DMA/data queues for block services;
-  and eventually IOMMU-backed DMA isolation.
-
-## Canonical authority model
-
-`dezh-identity::Authority` (with `AuthorityGrant` / delegation chains) is the
-**canonical** authority vocabulary; the live crates (`dezh-runtime`, `dezh-ipc`,
-`dezh-linux`) all build on it. `dezh-host::Ops` is the **Step 1 proof
-vocabulary** — it validated the unforgeable-handle + attenuation *mechanism* and
-is intentionally not reused downstream. New work standardizes on `Authority`; a
-shared `cap-core` crate is deliberately deferred until a second live vocabulary
-exists (avoid premature abstraction).
+Public documentation uses the name `Dezh OS` only as a project label. Public
+review material does not include origin stories, location claims, or personal
+identity details. The review package is intentionally neutral and technical.

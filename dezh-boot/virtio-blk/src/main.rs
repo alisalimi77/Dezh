@@ -49,6 +49,27 @@ const REQ_APP_REQUIRE_LAB: usize = 20;
 const REQ_APP_REMOVE_LAB: usize = 21;
 const REQ_LAB_SET: usize = 22;
 const REQ_LAB_GET: usize = 23;
+const REQ_FAULT_DEMO: usize = 24;
+const REQ_APP_INSTALL_CALC: usize = 25;
+const REQ_APP_REQUIRE_CALC: usize = 26;
+const REQ_APP_REMOVE_CALC: usize = 27;
+const REQ_CALC_SET: usize = 28;
+const REQ_CALC_GET: usize = 29;
+const REQ_APP_INSTALL_VAULT: usize = 30;
+const REQ_APP_REQUIRE_VAULT: usize = 31;
+const REQ_APP_REMOVE_VAULT: usize = 32;
+const REQ_VAULT_SET: usize = 33;
+const REQ_VAULT_GET: usize = 34;
+
+const IPC_PROTO_V1: usize = 0xd1;
+const IPC_SERVICE_VIRTIO_BLOCK: usize = 1;
+const IPC_STATUS_OK: usize = 0;
+const IPC_STATUS_DENIED: usize = 1;
+const IPC_STATUS_UNAVAILABLE: usize = 2;
+const IPC_STATUS_TIMEOUT: usize = 3;
+const IPC_STATUS_BAD_REQUEST: usize = 4;
+const IPC_STATUS_IO_FAILURE: usize = 5;
+const IPC_STATUS_FAULTED: usize = 6;
 
 static mut MMIO_BASE: usize = 0x5000_0000;
 const MMIO_WINDOW: usize = 0x5000_0000;
@@ -93,8 +114,12 @@ const ROOT_METADATA_SECTOR: u64 = 4;
 const APP_REGISTRY_SECTOR: u64 = 5;
 const APP_REGISTRY_PREVIOUS_SECTOR: u64 = 6;
 const LAB_REGISTRY_SECTOR: u64 = 7;
+const CALC_REGISTRY_SECTOR: u64 = 9;
+const VAULT_REGISTRY_SECTOR: u64 = 10;
 const NOTE_PRIVATE_ROOT_SECTOR: u64 = 16;
 const LAB_PRIVATE_ROOT_SECTOR: u64 = 17;
+const CALC_PRIVATE_ROOT_SECTOR: u64 = 18;
+const VAULT_PRIVATE_ROOT_SECTOR: u64 = 19;
 const VIRTQ_DESC_F_NEXT: u16 = 1;
 const VIRTQ_DESC_F_WRITE: u16 = 2;
 
@@ -363,6 +388,26 @@ fn lab_registry_is_removed(dma_base: usize) -> bool {
     st == 0 && data_starts_with(b"DEZHLABREG") && data_contains(b"state=Removed")
 }
 
+fn calc_registry_is_active(dma_base: usize) -> bool {
+    let st = rw(dma_base, CALC_REGISTRY_SECTOR, false);
+    st == 0 && data_starts_with(b"DEZHCALCREG") && data_contains(b"state=Active")
+}
+
+fn calc_registry_is_removed(dma_base: usize) -> bool {
+    let st = rw(dma_base, CALC_REGISTRY_SECTOR, false);
+    st == 0 && data_starts_with(b"DEZHCALCREG") && data_contains(b"state=Removed")
+}
+
+fn vault_registry_is_active(dma_base: usize) -> bool {
+    let st = rw(dma_base, VAULT_REGISTRY_SECTOR, false);
+    st == 0 && data_starts_with(b"DEZHVAULTREG") && data_contains(b"state=Active")
+}
+
+fn vault_registry_is_removed(dma_base: usize) -> bool {
+    let st = rw(dma_base, VAULT_REGISTRY_SECTOR, false);
+    st == 0 && data_starts_with(b"DEZHVAULTREG") && data_contains(b"state=Removed")
+}
+
 fn set_registry_pending() {
     set_data(
         b"DEZHAPPREG v0 app=note version=0.1.0 state=Pending caps=PRINT,IPC code_hash=note-elf-v0 manifest_hash=note-manifest-v0 private_root=16 previous_registry_sector=6",
@@ -399,16 +444,97 @@ fn set_lab_registry_removed() {
     );
 }
 
-fn request_word(op: usize, sector: usize) -> usize {
-    (op << 56) | (sector & 0x00ff_ffff_ffff_ffff)
+fn set_calc_registry_pending() {
+    set_data(
+        b"DEZHCALCREG v0 app=calc version=0.1.0 state=Pending caps=PRINT,IPC code_hash=calc-elf-v0 manifest_hash=calc-manifest-v0 private_root=18 previous_registry_sector=6",
+    );
+}
+
+fn set_calc_registry_active() {
+    set_data(
+        b"DEZHCALCREG v0 app=calc version=0.1.0 state=Active caps=PRINT,IPC code_hash=calc-elf-v0 manifest_hash=calc-manifest-v0 private_root=18 previous_registry_sector=6",
+    );
+}
+
+fn set_calc_registry_removed() {
+    set_data(
+        b"DEZHCALCREG v0 app=calc version=0.1.0 state=Removed caps=PRINT,IPC code_hash=calc-elf-v0 manifest_hash=calc-manifest-v0 private_root=18 previous_registry_sector=6",
+    );
+}
+
+fn set_vault_registry_pending() {
+    set_data(
+        b"DEZHVAULTREG v0 app=vault version=0.1.0 state=Pending caps=PRINT,IPC code_hash=vault-elf-v0 manifest_hash=vault-manifest-v0 private_root=19 previous_registry_sector=6",
+    );
+}
+
+fn set_vault_registry_active() {
+    set_data(
+        b"DEZHVAULTREG v0 app=vault version=0.1.0 state=Active caps=PRINT,IPC code_hash=vault-elf-v0 manifest_hash=vault-manifest-v0 private_root=19 previous_registry_sector=6",
+    );
+}
+
+fn set_vault_registry_removed() {
+    set_data(
+        b"DEZHVAULTREG v0 app=vault version=0.1.0 state=Removed caps=PRINT,IPC code_hash=vault-elf-v0 manifest_hash=vault-manifest-v0 private_root=19 previous_registry_sector=6",
+    );
+}
+
+fn typed_word(op: usize, request_id: usize, status: usize, arg: usize) -> usize {
+    (IPC_PROTO_V1 << 56)
+        | ((IPC_SERVICE_VIRTIO_BLOCK & 0xff) << 48)
+        | ((op & 0xff) << 40)
+        | ((request_id & 0xffff) << 24)
+        | ((status & 0xff) << 16)
+        | (arg & 0xffff)
+}
+
+fn request_word(op: usize, arg: usize) -> usize {
+    typed_word(op, 1, IPC_STATUS_OK, arg)
+}
+
+fn request_proto(word: usize) -> usize {
+    (word >> 56) & 0xff
+}
+
+fn request_service(word: usize) -> usize {
+    (word >> 48) & 0xff
 }
 
 fn request_op(word: usize) -> usize {
-    word >> 56
+    (word >> 40) & 0xff
 }
 
-fn request_sector(word: usize) -> u64 {
-    (word & 0x00ff_ffff_ffff_ffff) as u64
+fn request_id(word: usize) -> usize {
+    (word >> 24) & 0xffff
+}
+
+fn request_arg(word: usize) -> usize {
+    word & 0xffff
+}
+
+fn response_status(word: usize) -> usize {
+    if request_proto(word) == IPC_PROTO_V1 && request_service(word) == IPC_SERVICE_VIRTIO_BLOCK {
+        (word >> 16) & 0xff
+    } else {
+        IPC_STATUS_BAD_REQUEST
+    }
+}
+
+fn reply_word(req: usize, status: usize) -> usize {
+    typed_word(request_op(req), request_id(req), status, 0)
+}
+
+fn send_status(to: usize, req: usize, status: usize) {
+    let _ = sys_send(to, reply_word(req, status));
+}
+
+fn status_from_io(st: u8) -> usize {
+    if st == 0 {
+        IPC_STATUS_OK
+    } else {
+        IPC_STATUS_IO_FAILURE
+    }
 }
 
 fn daemon(dma_base: usize) -> ! {
@@ -421,23 +547,28 @@ fn daemon(dma_base: usize) -> ! {
     sys_print(b"  [virtio-blk-daemon] device + DMA capabilities accepted\n");
     loop {
         let (word, from) = sys_recv();
+        if request_proto(word) != IPC_PROTO_V1 || request_service(word) != IPC_SERVICE_VIRTIO_BLOCK {
+            sys_print(b"  [virtio-blk-daemon] typed IPC BAD_REQUEST: malformed envelope\n");
+            let _ = sys_send(from, typed_word(0, 0, IPC_STATUS_BAD_REQUEST, 0));
+            continue;
+        }
         let op = request_op(word);
-        let sector = request_sector(word);
+        let sector = request_arg(word) as u64;
         if op == REQ_PROBE {
             sys_print(b"  [virtio-blk-daemon] PROBE over IPC\n");
-            let _ = sys_send(from, 0);
+            send_status(from, word, IPC_STATUS_OK);
         } else if op == REQ_BWRITE {
             set_data(b"DEZH-DAEMON-BLOCK-OK");
             let st = rw(dma_base, sector, true);
             sys_print(b"  [virtio-blk-daemon] WRITE sector via IPC status=");
             sys_printnum(st as usize);
-            let _ = sys_send(from, st as usize);
+            send_status(from, word, status_from_io(st));
         } else if op == REQ_BREAD {
             set_data(b"");
             let st = rw(dma_base, sector, false);
             sys_print(b"  [virtio-blk-daemon] READ sector via IPC status=");
             sys_printnum(st as usize);
-            let _ = sys_send(from, st as usize);
+            send_status(from, word, status_from_io(st));
         } else if op == REQ_PSET {
             let _ = rw(dma_base, CAIRN_CURRENT_SECTOR, false);
             let _ = rw(dma_base, CAIRN_PREVIOUS_SECTOR, true);
@@ -445,30 +576,30 @@ fn daemon(dma_base: usize) -> ! {
             let st = rw(dma_base, CAIRN_CURRENT_SECTOR, true);
             sys_print(b"  [virtio-blk-daemon] CAIRN SET via IPC status=");
             sys_printnum(st as usize);
-            let _ = sys_send(from, st as usize);
+            send_status(from, word, status_from_io(st));
         } else if op == REQ_PGET {
             let st = rw(dma_base, CAIRN_CURRENT_SECTOR, false);
             sys_print(b"  [virtio-blk-daemon] CAIRN GET via IPC status=");
             sys_printnum(st as usize);
-            let _ = sys_send(from, st as usize);
+            send_status(from, word, status_from_io(st));
         } else if op == REQ_PROLLBACK {
             let _ = rw(dma_base, CAIRN_PREVIOUS_SECTOR, false);
             let st = rw(dma_base, CAIRN_CURRENT_SECTOR, true);
             sys_print(b"  [virtio-blk-daemon] CAIRN ROLLBACK via IPC status=");
             sys_printnum(st as usize);
-            let _ = sys_send(from, st as usize);
+            send_status(from, word, status_from_io(st));
         } else if op == REQ_STOP {
             sys_print(b"  [virtio-blk-daemon] STOP received; exiting cleanly\n");
-            let _ = sys_send(from, 0);
+            send_status(from, word, IPC_STATUS_OK);
             sys_exit(0);
         } else if op == REQ_INSTALL_CHECK {
             let st = rw(dma_base, INSTALL_MARKER_SECTOR, false);
             if st == 0 && data_starts_with(b"DEZHINST") {
                 sys_print(b"  [virtio-blk-daemon] install-check: installed root marker found\n");
-                let _ = sys_send(from, 0);
+                send_status(from, word, IPC_STATUS_OK);
             } else {
                 sys_print(b"  [virtio-blk-daemon] install-check: no Dezh root marker yet\n");
-                let _ = sys_send(from, 3);
+                send_status(from, word, IPC_STATUS_UNAVAILABLE);
             }
         } else if op == REQ_INSTALL_INIT {
             set_data(b"DEZHINST v0 target=riscv64 root=cairn block=virtio-block");
@@ -478,12 +609,12 @@ fn daemon(dma_base: usize) -> ! {
             let st = if st0 == 0 { st1 } else { st0 };
             sys_print(b"  [virtio-blk-daemon] install-init: wrote marker/root metadata status=");
             sys_printnum(st as usize);
-            let _ = sys_send(from, st as usize);
+            send_status(from, word, status_from_io(st));
         } else if op == REQ_ROOT_STATUS {
             let st = rw(dma_base, ROOT_METADATA_SECTOR, false);
             sys_print(b"  [virtio-blk-daemon] root-status: metadata read status=");
             sys_printnum(st as usize);
-            let _ = sys_send(from, st as usize);
+            send_status(from, word, status_from_io(st));
         } else if op == REQ_APP_AVAILABLE {
             sys_print(
                 b"  \x1b[36m[available] note\x1b[0m version=0.1.0 caps=PRINT,IPC storage=PrivateRoot\n",
@@ -491,7 +622,13 @@ fn daemon(dma_base: usize) -> ! {
             sys_print(
                 b"  \x1b[36m[available] lab\x1b[0m version=0.1.0 caps=PRINT,IPC ui=terminal tasks=3 storage=PrivateRoot\n",
             );
-            let _ = sys_send(from, 0);
+            sys_print(
+                b"  \x1b[36m[available] calc\x1b[0m version=0.1.0 caps=PRINT,IPC compute=integer storage=LastResult\n",
+            );
+            sys_print(
+                b"  \x1b[36m[available] vault\x1b[0m version=0.1.0 caps=PRINT,IPC storage=PrivateValue\n",
+            );
+            send_status(from, word, IPC_STATUS_OK);
         } else if op == REQ_APP_INSTALLED {
             let mut shown = false;
             if registry_is_active(dma_base) {
@@ -516,11 +653,33 @@ fn daemon(dma_base: usize) -> ! {
                 );
                 shown = true;
             }
+            if calc_registry_is_active(dma_base) {
+                sys_print(
+                    b"  \x1b[32m[installed] calc\x1b[0m version=0.1.0 state=Active caps=PRINT,IPC root=sector:18 compute=integer\n",
+                );
+                shown = true;
+            } else if calc_registry_is_removed(dma_base) {
+                sys_print(
+                    b"  \x1b[33m[removed] calc\x1b[0m version=0.1.0 state=Removed execution=denied\n",
+                );
+                shown = true;
+            }
+            if vault_registry_is_active(dma_base) {
+                sys_print(
+                    b"  \x1b[32m[installed] vault\x1b[0m version=0.1.0 state=Active caps=PRINT,IPC root=sector:19 storage=PrivateValue\n",
+                );
+                shown = true;
+            } else if vault_registry_is_removed(dma_base) {
+                sys_print(
+                    b"  \x1b[33m[removed] vault\x1b[0m version=0.1.0 state=Removed execution=denied\n",
+                );
+                shown = true;
+            }
             if shown {
-                let _ = sys_send(from, 0);
+                send_status(from, word, IPC_STATUS_OK);
             } else {
                 sys_print(b"  [installed] none\n");
-                let _ = sys_send(from, 4);
+                send_status(from, word, IPC_STATUS_UNAVAILABLE);
             }
         } else if op == REQ_APP_INFO {
             sys_print(
@@ -528,6 +687,12 @@ fn daemon(dma_base: usize) -> ! {
             );
             sys_print(
                 b"  [app-info] lab bundle=available version=0.1.0 requested_caps=PRINT,IPC ui=terminal workers=2 denied_caps=DEVICE_VIRTIO_BLK,DMA,BLOCK_DIRECT\n",
+            );
+            sys_print(
+                b"  [app-info] calc bundle=available version=0.1.0 requested_caps=PRINT,IPC integer_ops=+,-,*,/ denied_caps=DEVICE_VIRTIO_BLK,DMA,BLOCK_DIRECT\n",
+            );
+            sys_print(
+                b"  [app-info] vault bundle=available version=0.1.0 requested_caps=PRINT,IPC private_value=true denied_caps=DEVICE_VIRTIO_BLK,DMA,BLOCK_DIRECT\n",
             );
             if registry_is_active(dma_base) {
                 sys_print(b"  [app-info] note install_state=Active private_root=sector:16\n");
@@ -543,13 +708,27 @@ fn daemon(dma_base: usize) -> ! {
             } else {
                 sys_print(b"  [app-info] lab install_state=NotInstalled\n");
             }
-            let _ = sys_send(from, 0);
+            if calc_registry_is_active(dma_base) {
+                sys_print(b"  [app-info] calc install_state=Active private_root=sector:18\n");
+            } else if calc_registry_is_removed(dma_base) {
+                sys_print(b"  [app-info] calc install_state=Removed execution=denied\n");
+            } else {
+                sys_print(b"  [app-info] calc install_state=NotInstalled\n");
+            }
+            if vault_registry_is_active(dma_base) {
+                sys_print(b"  [app-info] vault install_state=Active private_root=sector:19\n");
+            } else if vault_registry_is_removed(dma_base) {
+                sys_print(b"  [app-info] vault install_state=Removed execution=denied\n");
+            } else {
+                sys_print(b"  [app-info] vault install_state=NotInstalled\n");
+            }
+            send_status(from, word, IPC_STATUS_OK);
         } else if op == REQ_APP_INSTALL_NOTE {
             if registry_is_active(dma_base) {
                 sys_print(
                     b"  [installer] already installed note version=0.1.0 state=Active\n",
                 );
-                let _ = sys_send(from, 0);
+                send_status(from, word, IPC_STATUS_OK);
             } else {
                 let _ = rw(dma_base, APP_REGISTRY_SECTOR, false);
                 let _ = rw(dma_base, APP_REGISTRY_PREVIOUS_SECTOR, true);
@@ -562,22 +741,22 @@ fn daemon(dma_base: usize) -> ! {
                     sys_print(
                         b"  [installer] installed note version=0.1.0 state=Active caps=PRINT,IPC root=sector:16\n",
                     );
-                    let _ = sys_send(from, 0);
+                    send_status(from, word, IPC_STATUS_OK);
                 } else {
                     sys_print(b"  [installer] install failed: registry verify failed\n");
-                    let _ = sys_send(from, 5);
+                    send_status(from, word, IPC_STATUS_IO_FAILURE);
                 }
             }
         } else if op == REQ_APP_REQUIRE_NOTE {
             if registry_is_active(dma_base) {
                 sys_print(b"  [installer] note is installed state=Active\n");
-                let _ = sys_send(from, 0);
+                send_status(from, word, IPC_STATUS_OK);
             } else if registry_is_removed(dma_base) {
                 sys_print(b"  [installer] note not active: state=Removed\n");
-                let _ = sys_send(from, 6);
+                send_status(from, word, IPC_STATUS_FAULTED);
             } else {
                 sys_print(b"  [installer] note not installed\n");
-                let _ = sys_send(from, 4);
+                send_status(from, word, IPC_STATUS_UNAVAILABLE);
             }
         } else if op == REQ_APP_REMOVE_NOTE {
             if registry_is_active(dma_base) || registry_is_removed(dma_base) {
@@ -587,10 +766,10 @@ fn daemon(dma_base: usize) -> ! {
                 let st = rw(dma_base, APP_REGISTRY_SECTOR, true);
                 sys_print(b"  [installer] removed note state=Removed status=");
                 sys_printnum(st as usize);
-                let _ = sys_send(from, st as usize);
+                send_status(from, word, status_from_io(st));
             } else {
                 sys_print(b"  [installer] remove skipped: note not installed\n");
-                let _ = sys_send(from, 4);
+                send_status(from, word, IPC_STATUS_UNAVAILABLE);
             }
         } else if op == REQ_NOTE_SET {
             if registry_is_active(dma_base) {
@@ -598,25 +777,25 @@ fn daemon(dma_base: usize) -> ! {
                 let st = rw(dma_base, NOTE_PRIVATE_ROOT_SECTOR, true);
                 sys_print(b"  [note-storage] note-set status=");
                 sys_printnum(st as usize);
-                let _ = sys_send(from, st as usize);
+                send_status(from, word, status_from_io(st));
             } else {
                 sys_print(b"  [note-storage] note-set denied: note not installed\n");
-                let _ = sys_send(from, 4);
+                send_status(from, word, IPC_STATUS_UNAVAILABLE);
             }
         } else if op == REQ_NOTE_GET {
             if registry_is_active(dma_base) {
                 let st = rw(dma_base, NOTE_PRIVATE_ROOT_SECTOR, false);
                 sys_print(b"  [note-storage] note-get status=");
                 sys_printnum(st as usize);
-                let _ = sys_send(from, st as usize);
+                send_status(from, word, status_from_io(st));
             } else {
                 sys_print(b"  [note-storage] note-get denied: note not installed\n");
-                let _ = sys_send(from, 4);
+                send_status(from, word, IPC_STATUS_UNAVAILABLE);
             }
         } else if op == REQ_APP_INSTALL_LAB {
             if lab_registry_is_active(dma_base) {
                 sys_print(b"  [installer] already installed lab version=0.1.0 state=Active\n");
-                let _ = sys_send(from, 0);
+                send_status(from, word, IPC_STATUS_OK);
             } else {
                 let _ = rw(dma_base, LAB_REGISTRY_SECTOR, false);
                 let _ = rw(dma_base, APP_REGISTRY_PREVIOUS_SECTOR, true);
@@ -629,22 +808,22 @@ fn daemon(dma_base: usize) -> ! {
                     sys_print(
                         b"  [installer] installed lab version=0.1.0 state=Active caps=PRINT,IPC root=sector:17 ui=terminal workers=2\n",
                     );
-                    let _ = sys_send(from, 0);
+                    send_status(from, word, IPC_STATUS_OK);
                 } else {
                     sys_print(b"  [installer] install failed: lab registry verify failed\n");
-                    let _ = sys_send(from, 5);
+                    send_status(from, word, IPC_STATUS_IO_FAILURE);
                 }
             }
         } else if op == REQ_APP_REQUIRE_LAB {
             if lab_registry_is_active(dma_base) {
                 sys_print(b"  [installer] lab is installed state=Active\n");
-                let _ = sys_send(from, 0);
+                send_status(from, word, IPC_STATUS_OK);
             } else if lab_registry_is_removed(dma_base) {
                 sys_print(b"  [installer] lab not active: state=Removed\n");
-                let _ = sys_send(from, 6);
+                send_status(from, word, IPC_STATUS_FAULTED);
             } else {
                 sys_print(b"  [installer] lab not installed\n");
-                let _ = sys_send(from, 4);
+                send_status(from, word, IPC_STATUS_UNAVAILABLE);
             }
         } else if op == REQ_APP_REMOVE_LAB {
             if lab_registry_is_active(dma_base) || lab_registry_is_removed(dma_base) {
@@ -654,10 +833,10 @@ fn daemon(dma_base: usize) -> ! {
                 let st = rw(dma_base, LAB_REGISTRY_SECTOR, true);
                 sys_print(b"  [installer] removed lab state=Removed status=");
                 sys_printnum(st as usize);
-                let _ = sys_send(from, st as usize);
+                send_status(from, word, status_from_io(st));
             } else {
                 sys_print(b"  [installer] remove skipped: lab not installed\n");
-                let _ = sys_send(from, 4);
+                send_status(from, word, IPC_STATUS_UNAVAILABLE);
             }
         } else if op == REQ_LAB_SET {
             if lab_registry_is_active(dma_base) {
@@ -665,23 +844,162 @@ fn daemon(dma_base: usize) -> ! {
                 let st = rw(dma_base, LAB_PRIVATE_ROOT_SECTOR, true);
                 sys_print(b"  [lab-storage] lab-set status=");
                 sys_printnum(st as usize);
-                let _ = sys_send(from, st as usize);
+                send_status(from, word, status_from_io(st));
             } else {
                 sys_print(b"  [lab-storage] lab-set denied: lab not installed\n");
-                let _ = sys_send(from, 4);
+                send_status(from, word, IPC_STATUS_UNAVAILABLE);
             }
         } else if op == REQ_LAB_GET {
             if lab_registry_is_active(dma_base) {
                 let st = rw(dma_base, LAB_PRIVATE_ROOT_SECTOR, false);
                 sys_print(b"  [lab-storage] lab-get status=");
                 sys_printnum(st as usize);
-                let _ = sys_send(from, st as usize);
+                send_status(from, word, status_from_io(st));
             } else {
                 sys_print(b"  [lab-storage] lab-get denied: lab not installed\n");
-                let _ = sys_send(from, 4);
+                send_status(from, word, IPC_STATUS_UNAVAILABLE);
             }
+        } else if op == REQ_APP_INSTALL_CALC {
+            if calc_registry_is_active(dma_base) {
+                sys_print(b"  [installer] already installed calc version=0.1.0 state=Active\n");
+                send_status(from, word, IPC_STATUS_OK);
+            } else {
+                let _ = rw(dma_base, CALC_REGISTRY_SECTOR, false);
+                let _ = rw(dma_base, APP_REGISTRY_PREVIOUS_SECTOR, true);
+                set_calc_registry_pending();
+                let st0 = rw(dma_base, CALC_REGISTRY_SECTOR, true);
+                set_calc_registry_active();
+                let st1 = rw(dma_base, CALC_REGISTRY_SECTOR, true);
+                let ok = calc_registry_is_active(dma_base);
+                if st0 == 0 && st1 == 0 && ok {
+                    sys_print(
+                        b"  [installer] installed calc version=0.1.0 state=Active caps=PRINT,IPC root=sector:18 compute=integer\n",
+                    );
+                    send_status(from, word, IPC_STATUS_OK);
+                } else {
+                    sys_print(b"  [installer] install failed: calc registry verify failed\n");
+                    send_status(from, word, IPC_STATUS_IO_FAILURE);
+                }
+            }
+        } else if op == REQ_APP_REQUIRE_CALC {
+            if calc_registry_is_active(dma_base) {
+                sys_print(b"  [installer] calc is installed state=Active\n");
+                send_status(from, word, IPC_STATUS_OK);
+            } else if calc_registry_is_removed(dma_base) {
+                sys_print(b"  [installer] calc not active: state=Removed\n");
+                send_status(from, word, IPC_STATUS_FAULTED);
+            } else {
+                sys_print(b"  [installer] calc not installed\n");
+                send_status(from, word, IPC_STATUS_UNAVAILABLE);
+            }
+        } else if op == REQ_APP_REMOVE_CALC {
+            if calc_registry_is_active(dma_base) || calc_registry_is_removed(dma_base) {
+                let _ = rw(dma_base, CALC_REGISTRY_SECTOR, false);
+                let _ = rw(dma_base, APP_REGISTRY_PREVIOUS_SECTOR, true);
+                set_calc_registry_removed();
+                let st = rw(dma_base, CALC_REGISTRY_SECTOR, true);
+                sys_print(b"  [installer] removed calc state=Removed status=");
+                sys_printnum(st as usize);
+                send_status(from, word, status_from_io(st));
+            } else {
+                sys_print(b"  [installer] remove skipped: calc not installed\n");
+                send_status(from, word, IPC_STATUS_UNAVAILABLE);
+            }
+        } else if op == REQ_CALC_SET {
+            if calc_registry_is_active(dma_base) {
+                copy_input(sector as usize);
+                let st = rw(dma_base, CALC_PRIVATE_ROOT_SECTOR, true);
+                sys_print(b"  [calc-storage] calc-set status=");
+                sys_printnum(st as usize);
+                send_status(from, word, status_from_io(st));
+            } else {
+                sys_print(b"  [calc-storage] calc-set denied: calc not installed\n");
+                send_status(from, word, IPC_STATUS_UNAVAILABLE);
+            }
+        } else if op == REQ_CALC_GET {
+            if calc_registry_is_active(dma_base) {
+                let st = rw(dma_base, CALC_PRIVATE_ROOT_SECTOR, false);
+                sys_print(b"  [calc-storage] calc-get status=");
+                sys_printnum(st as usize);
+                send_status(from, word, status_from_io(st));
+            } else {
+                sys_print(b"  [calc-storage] calc-get denied: calc not installed\n");
+                send_status(from, word, IPC_STATUS_UNAVAILABLE);
+            }
+        } else if op == REQ_APP_INSTALL_VAULT {
+            if vault_registry_is_active(dma_base) {
+                sys_print(b"  [installer] already installed vault version=0.1.0 state=Active\n");
+                send_status(from, word, IPC_STATUS_OK);
+            } else {
+                let _ = rw(dma_base, VAULT_REGISTRY_SECTOR, false);
+                let _ = rw(dma_base, APP_REGISTRY_PREVIOUS_SECTOR, true);
+                set_vault_registry_pending();
+                let st0 = rw(dma_base, VAULT_REGISTRY_SECTOR, true);
+                set_vault_registry_active();
+                let st1 = rw(dma_base, VAULT_REGISTRY_SECTOR, true);
+                let ok = vault_registry_is_active(dma_base);
+                if st0 == 0 && st1 == 0 && ok {
+                    sys_print(
+                        b"  [installer] installed vault version=0.1.0 state=Active caps=PRINT,IPC root=sector:19 storage=PrivateValue\n",
+                    );
+                    send_status(from, word, IPC_STATUS_OK);
+                } else {
+                    sys_print(b"  [installer] install failed: vault registry verify failed\n");
+                    send_status(from, word, IPC_STATUS_IO_FAILURE);
+                }
+            }
+        } else if op == REQ_APP_REQUIRE_VAULT {
+            if vault_registry_is_active(dma_base) {
+                sys_print(b"  [installer] vault is installed state=Active\n");
+                send_status(from, word, IPC_STATUS_OK);
+            } else if vault_registry_is_removed(dma_base) {
+                sys_print(b"  [installer] vault not active: state=Removed\n");
+                send_status(from, word, IPC_STATUS_FAULTED);
+            } else {
+                sys_print(b"  [installer] vault not installed\n");
+                send_status(from, word, IPC_STATUS_UNAVAILABLE);
+            }
+        } else if op == REQ_APP_REMOVE_VAULT {
+            if vault_registry_is_active(dma_base) || vault_registry_is_removed(dma_base) {
+                let _ = rw(dma_base, VAULT_REGISTRY_SECTOR, false);
+                let _ = rw(dma_base, APP_REGISTRY_PREVIOUS_SECTOR, true);
+                set_vault_registry_removed();
+                let st = rw(dma_base, VAULT_REGISTRY_SECTOR, true);
+                sys_print(b"  [installer] removed vault state=Removed status=");
+                sys_printnum(st as usize);
+                send_status(from, word, status_from_io(st));
+            } else {
+                sys_print(b"  [installer] remove skipped: vault not installed\n");
+                send_status(from, word, IPC_STATUS_UNAVAILABLE);
+            }
+        } else if op == REQ_VAULT_SET {
+            if vault_registry_is_active(dma_base) {
+                copy_input(sector as usize);
+                let st = rw(dma_base, VAULT_PRIVATE_ROOT_SECTOR, true);
+                sys_print(b"  [vault-storage] vault-put status=");
+                sys_printnum(st as usize);
+                send_status(from, word, status_from_io(st));
+            } else {
+                sys_print(b"  [vault-storage] vault-put denied: vault not installed\n");
+                send_status(from, word, IPC_STATUS_UNAVAILABLE);
+            }
+        } else if op == REQ_VAULT_GET {
+            if vault_registry_is_active(dma_base) {
+                let st = rw(dma_base, VAULT_PRIVATE_ROOT_SECTOR, false);
+                sys_print(b"  [vault-storage] vault-get status=");
+                sys_printnum(st as usize);
+                send_status(from, word, status_from_io(st));
+            } else {
+                sys_print(b"  [vault-storage] vault-get denied: vault not installed\n");
+                send_status(from, word, IPC_STATUS_UNAVAILABLE);
+            }
+        } else if op == REQ_FAULT_DEMO {
+            sys_print(b"  [virtio-blk-daemon] FAULT-DEMO received; exiting with fault code\n");
+            send_status(from, word, IPC_STATUS_OK);
+            sys_exit(99);
         } else {
-            let _ = sys_send(from, 2);
+            sys_print(b"  [virtio-blk-daemon] typed IPC BAD_REQUEST: unknown op\n");
+            send_status(from, word, IPC_STATUS_BAD_REQUEST);
         }
     }
 }
@@ -712,10 +1030,10 @@ fn client_send(to: usize, op: usize, sector_or_len: usize) -> usize {
     let rc = sys_send(to, request_word(op, sector_or_len));
     if rc != 0 {
         sys_print(b"  [vblk-client] service unavailable or IPC denied\n");
-        return rc;
+        return IPC_STATUS_UNAVAILABLE;
     }
     let (reply, _) = sys_recv();
-    reply
+    response_status(reply)
 }
 
 fn client_demo(daemon: usize) -> ! {
@@ -746,7 +1064,12 @@ fn client_demo(daemon: usize) -> ! {
 fn client_request(daemon: usize, input_len: usize, req: usize) -> ! {
     let sector_or_len = if req == REQ_BWRITE || req == REQ_BREAD {
         TEST_SECTOR as usize
-    } else if req == REQ_PSET || req == REQ_NOTE_SET || req == REQ_LAB_SET {
+    } else if req == REQ_PSET
+        || req == REQ_NOTE_SET
+        || req == REQ_LAB_SET
+        || req == REQ_CALC_SET
+        || req == REQ_VAULT_SET
+    {
         input_len
     } else {
         0
@@ -825,6 +1148,38 @@ fn client_request(daemon: usize, input_len: usize, req: usize) -> ! {
         sys_print(b"  [vblk-client] lab-get status=");
         sys_printnum(st);
         print_data(b"  [vblk-client] lab value = \"");
+    } else if req == REQ_APP_INSTALL_CALC {
+        sys_print(b"  [vblk-client] app-install calc status=");
+        sys_printnum(st);
+    } else if req == REQ_APP_REQUIRE_CALC {
+        sys_print(b"  [vblk-client] app-require calc status=");
+        sys_printnum(st);
+    } else if req == REQ_APP_REMOVE_CALC {
+        sys_print(b"  [vblk-client] app-remove calc status=");
+        sys_printnum(st);
+    } else if req == REQ_CALC_SET {
+        sys_print(b"  [vblk-client] calc-set status=");
+        sys_printnum(st);
+    } else if req == REQ_CALC_GET {
+        sys_print(b"  [vblk-client] calc-history status=");
+        sys_printnum(st);
+        print_data(b"  [vblk-client] calc last = \"");
+    } else if req == REQ_APP_INSTALL_VAULT {
+        sys_print(b"  [vblk-client] app-install vault status=");
+        sys_printnum(st);
+    } else if req == REQ_APP_REQUIRE_VAULT {
+        sys_print(b"  [vblk-client] app-require vault status=");
+        sys_printnum(st);
+    } else if req == REQ_APP_REMOVE_VAULT {
+        sys_print(b"  [vblk-client] app-remove vault status=");
+        sys_printnum(st);
+    } else if req == REQ_VAULT_SET {
+        sys_print(b"  [vblk-client] vault-put status=");
+        sys_printnum(st);
+    } else if req == REQ_VAULT_GET {
+        sys_print(b"  [vblk-client] vault-get status=");
+        sys_printnum(st);
+        print_data(b"  [vblk-client] vault value = \"");
     }
     sys_exit(st)
 }

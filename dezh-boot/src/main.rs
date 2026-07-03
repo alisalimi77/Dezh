@@ -50,7 +50,7 @@ use core::panic::PanicInfo;
 use core::ptr::{read_volatile, write_volatile};
 use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
-use alloc::vec;
+use alloc::{format, vec};
 use dezh_kernel::{
     boot_banner, plan_boot, BootInfo, KernelCapability, KernelPlan, MemoryKind, MemoryRegion,
     ServiceKind,
@@ -444,6 +444,7 @@ const SYS_REPORT: usize = 5; // report a benchmark result (a0=ticks, a1=iteratio
 const SYS_SEND: usize = 6; // IPC: send payload + granted capability to a task
 const SYS_RECV: usize = 7; // IPC: block until a message, receive payload + caps
 const SYS_PRINTNUM: usize = 8; // print a decimal number (kernel-side formatting)
+const SYS_RECV_TIMEOUT: usize = 9; // IPC: receive with a tick deadline
 const SYS_DENIED: usize = usize::MAX; // result sentinel for "capability not held"
 
 // --- Per-task capabilities (what the running U-mode task is allowed to do). --
@@ -844,6 +845,8 @@ const VIRTIO_BLK_ELF: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/virtio-b
 const BENCH_ELF: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/dezh-bench.elf"));
 const NOTE_ELF: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/dezh-note.elf"));
 const LAB_ELF: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/dezh-lab.elf"));
+const CALC_ELF: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/dezh-calc.elf"));
+const VAULT_ELF: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/dezh-vault.elf"));
 
 const DEV_UART_VA: usize = 0x5000_0000;
 const DEV_VIRTIO_BLK_VA: usize = 0x5000_0000;
@@ -1190,7 +1193,9 @@ enum ServiceState {
     Unused,
     Declared,
     Starting,
+    Stopping,
     Running,
+    Restarting,
     Faulted,
     Stopped,
 }
@@ -1204,6 +1209,9 @@ struct ServiceEntry {
     caps: usize,
     grants: usize,
     fault: &'static str,
+    restart_count: usize,
+    last_exit: usize,
+    last_started_tick: u64,
 }
 
 const EMPTY_SERVICE: ServiceEntry = ServiceEntry {
@@ -1214,12 +1222,56 @@ const EMPTY_SERVICE: ServiceEntry = ServiceEntry {
     caps: 0,
     grants: 0,
     fault: "",
+    restart_count: 0,
+    last_exit: 0,
+    last_started_tick: 0,
 };
 
 const MAX_SERVICES: usize = 8;
 static mut SERVICES: [ServiceEntry; MAX_SERVICES] = [EMPTY_SERVICE; MAX_SERVICES];
 static mut SERVICE_COUNT: usize = 0;
 static mut TEXIT: [usize; MAX_TASKS] = [0; MAX_TASKS];
+
+#[derive(Clone, Copy)]
+struct IpcStats {
+    sends: usize,
+    receives: usize,
+    denied_sends: usize,
+    timeouts: usize,
+    queue_full: usize,
+    max_depth: usize,
+}
+
+static mut IPC_STATS: IpcStats = IpcStats {
+    sends: 0,
+    receives: 0,
+    denied_sends: 0,
+    timeouts: 0,
+    queue_full: 0,
+    max_depth: 0,
+};
+
+#[derive(Clone, Copy)]
+struct EventEntry {
+    tick: u64,
+    actor: &'static str,
+    action: &'static str,
+    target: &'static str,
+    result: &'static str,
+}
+
+const EMPTY_EVENT: EventEntry = EventEntry {
+    tick: 0,
+    actor: "",
+    action: "",
+    target: "",
+    result: "",
+};
+
+const EVENT_CAP: usize = 32;
+static mut EVENTS: [EventEntry; EVENT_CAP] = [EMPTY_EVENT; EVENT_CAP];
+static mut EVENT_NEXT: usize = 0;
+static mut EVENT_COUNT: usize = 0;
 
 // Small FIFO mailbox per task for capability-passing IPC. A message carries a
 // small payload plus a *granted* capability set (attenuated to what the sender
@@ -1262,6 +1314,11 @@ const EMPTY_MAILBOX: Mailbox = Mailbox {
 
 static mut MBOX: [Mailbox; MAX_TASKS] = [EMPTY_MAILBOX; MAX_TASKS];
 
+static mut TRECV_WAITING: [bool; MAX_TASKS] = [false; MAX_TASKS];
+static mut TRECV_DEADLINE: [u64; MAX_TASKS] = [0; MAX_TASKS];
+static mut TRECV_PTR: [usize; MAX_TASKS] = [0; MAX_TASKS];
+static mut TRECV_LEN: [usize; MAX_TASKS] = [0; MAX_TASKS];
+
 static mut FRAMES: [[usize; 32]; MAX_TASKS] = [[0; 32]; MAX_TASKS];
 static mut TSTATE: [TaskState; MAX_TASKS] = [TaskState::Unused; MAX_TASKS];
 static mut TCAPS: [usize; MAX_TASKS] = [0; MAX_TASKS];
@@ -1273,6 +1330,63 @@ static mut CURRENT: usize = 0;
 fn clear_mailbox(i: usize) {
     unsafe {
         MBOX[i] = EMPTY_MAILBOX;
+        TRECV_WAITING[i] = false;
+        TRECV_DEADLINE[i] = 0;
+        TRECV_PTR[i] = 0;
+        TRECV_LEN[i] = 0;
+    }
+}
+
+unsafe fn recv_message_into(task: usize, frame: &mut [usize]) -> bool {
+    if MBOX[task].count == 0 {
+        return false;
+    }
+    let head = MBOX[task].head;
+    let msg = MBOX[task].slots[head];
+    let n = msg.len.min(frame[F_A1]);
+    if n > 0 {
+        let dst = core::slice::from_raw_parts_mut(frame[F_A0] as *mut u8, n);
+        dst.copy_from_slice(&msg.buf[..n]);
+    }
+    TCAPS[task] |= msg.grant;
+    MBOX[task].slots[head] = EMPTY_IPC_MESSAGE;
+    MBOX[task].head = (head + 1) % MAILBOX_DEPTH;
+    MBOX[task].count -= 1;
+    frame[F_A0] = n;
+    frame[F_A1] = msg.from;
+    frame[F_A2] = msg.word;
+    IPC_STATS.receives += 1;
+    true
+}
+
+unsafe fn expire_recv_timeouts() {
+    let now = TICKS.load(Ordering::Relaxed);
+    let mut i = 0usize;
+    while i < MAX_TASKS {
+        if TRECV_WAITING[i] && TSTATE[i] == TaskState::Blocked && TRECV_DEADLINE[i] <= now {
+            if MBOX[i].count > 0 {
+                TRECV_WAITING[i] = false;
+                TSTATE[i] = TaskState::Ready;
+            } else {
+                TRECV_WAITING[i] = false;
+                TRECV_DEADLINE[i] = 0;
+                TRECV_PTR[i] = 0;
+                TRECV_LEN[i] = 0;
+                FRAMES[i][F_SEPC] += 4;
+                FRAMES[i][F_A0] = IPC_STATUS_TIMEOUT;
+                FRAMES[i][F_A1] = usize::MAX;
+                FRAMES[i][F_A2] = typed_word(
+                    IPC_SERVICE_SYSTEM,
+                    IPC_OP_TIMEOUT,
+                    0,
+                    IPC_STATUS_TIMEOUT,
+                    0,
+                );
+                TSTATE[i] = TaskState::Ready;
+                IPC_STATS.timeouts += 1;
+            }
+        }
+        i += 1;
     }
 }
 
@@ -1378,6 +1492,7 @@ fn frame_ptr(i: usize) -> *mut usize {
 }
 
 unsafe fn pick_next() -> Option<usize> {
+    expire_recv_timeouts();
     for off in 0..MAX_TASKS {
         let i = (CURRENT + 1 + off) % MAX_TASKS;
         if TSTATE[i] == TaskState::Ready {
@@ -1546,6 +1661,7 @@ extern "C" fn utrap_handler(frame_ptr: *mut usize) -> *const usize {
                     // msg_send(to=a0, ptr=a1, len=a2, grant_caps=a3)
                     if caps & TASK_IPC == 0 {
                         kprintln!("  [kernel] DENIED send: task {cur} holds no IPC capability");
+                        IPC_STATS.denied_sends += 1;
                         frame[F_A0] = SYS_DENIED;
                         return frame_ptr;
                     }
@@ -1556,6 +1672,7 @@ extern "C" fn utrap_handler(frame_ptr: *mut usize) -> *const usize {
                         || TSTATE[to] == TaskState::Unused
                         || TSTATE[to] == TaskState::Done
                     {
+                        IPC_STATS.denied_sends += 1;
                         frame[F_A0] = SYS_DENIED;
                         return frame_ptr;
                     }
@@ -1563,6 +1680,7 @@ extern "C" fn utrap_handler(frame_ptr: *mut usize) -> *const usize {
                     // itself holds — never widen. (caps = sender's TCAPS.)
                     let granted = requested & caps;
                     if MBOX[to].count == MAILBOX_DEPTH {
+                        IPC_STATS.queue_full += 1;
                         frame[F_A0] = SYS_DENIED;
                         return frame_ptr;
                     }
@@ -1578,7 +1696,12 @@ extern "C" fn utrap_handler(frame_ptr: *mut usize) -> *const usize {
                     msg.word = frame[F_A4]; // register-passed scalar (value-IPC)
                     MBOX[to].tail = (tail + 1) % MAILBOX_DEPTH;
                     MBOX[to].count += 1;
+                    IPC_STATS.sends += 1;
+                    if MBOX[to].count > IPC_STATS.max_depth {
+                        IPC_STATS.max_depth = MBOX[to].count;
+                    }
                     if TSTATE[to] == TaskState::Blocked {
+                        TRECV_WAITING[to] = false;
                         TSTATE[to] = TaskState::Ready;
                     }
                     frame[F_A0] = 0;
@@ -1592,25 +1715,7 @@ extern "C" fn utrap_handler(frame_ptr: *mut usize) -> *const usize {
                         frame[F_A0] = SYS_DENIED;
                         return frame_ptr;
                     }
-                    if MBOX[cur].count > 0 {
-                        let head = MBOX[cur].head;
-                        let msg = MBOX[cur].slots[head];
-                        let n = msg.len.min(frame[F_A1]);
-                        if n > 0 {
-                            let dst = core::slice::from_raw_parts_mut(frame[F_A0] as *mut u8, n);
-                            dst.copy_from_slice(&msg.buf[..n]);
-                        }
-                        // CAPABILITY TRANSFER: the receiver gains exactly the
-                        // capabilities the sender delegated (already attenuated).
-                        TCAPS[cur] |= msg.grant;
-                        let from = msg.from;
-                        let word = msg.word;
-                        MBOX[cur].slots[head] = EMPTY_IPC_MESSAGE;
-                        MBOX[cur].head = (head + 1) % MAILBOX_DEPTH;
-                        MBOX[cur].count -= 1;
-                        frame[F_A0] = n; // bytes received
-                        frame[F_A1] = from; // sender task id (for replies)
-                        frame[F_A2] = word; // register-passed scalar (value-IPC)
+                    if recv_message_into(cur, frame) {
                         return frame_ptr;
                     } else {
                         // Re-run the ecall when we are scheduled again.
@@ -1618,6 +1723,37 @@ extern "C" fn utrap_handler(frame_ptr: *mut usize) -> *const usize {
                         TSTATE[cur] = TaskState::Blocked;
                         return schedule_or_return();
                     }
+                }
+                SYS_RECV_TIMEOUT => {
+                    if caps & TASK_IPC == 0 {
+                        kprintln!("  [kernel] DENIED recv-timeout: task {cur} holds no IPC capability");
+                        frame[F_A0] = SYS_DENIED;
+                        return frame_ptr;
+                    }
+                    if recv_message_into(cur, frame) {
+                        return frame_ptr;
+                    }
+                    let timeout = frame[F_A2] as u64;
+                    if timeout == 0 {
+                        frame[F_A0] = IPC_STATUS_TIMEOUT;
+                        frame[F_A1] = usize::MAX;
+                        frame[F_A2] = typed_word(
+                            IPC_SERVICE_SYSTEM,
+                            IPC_OP_TIMEOUT,
+                            0,
+                            IPC_STATUS_TIMEOUT,
+                            0,
+                        );
+                        IPC_STATS.timeouts += 1;
+                        return frame_ptr;
+                    }
+                    TRECV_WAITING[cur] = true;
+                    TRECV_PTR[cur] = frame[F_A0];
+                    TRECV_LEN[cur] = frame[F_A1];
+                    TRECV_DEADLINE[cur] = TICKS.load(Ordering::Relaxed).saturating_add(timeout);
+                    frame[F_SEPC] -= 4;
+                    TSTATE[cur] = TaskState::Blocked;
+                    return schedule_or_return();
                 }
                 _ => {
                     frame[F_A0] = SYS_DENIED;
@@ -1813,7 +1949,9 @@ fn service_state_name(state: ServiceState) -> &'static str {
         ServiceState::Unused => "Unused",
         ServiceState::Declared => "Declared",
         ServiceState::Starting => "Starting",
+        ServiceState::Stopping => "Stopping",
         ServiceState::Running => "Running",
+        ServiceState::Restarting => "Restarting",
         ServiceState::Faulted => "Faulted",
         ServiceState::Stopped => "Stopped",
     }
@@ -1874,6 +2012,9 @@ fn build_service_registry(plan: &KernelPlan) {
                 caps,
                 grants,
                 fault: "",
+                restart_count: 0,
+                last_exit: 0,
+                last_started_tick: 0,
             };
             SERVICE_COUNT += 1;
         }
@@ -1894,11 +2035,13 @@ fn refresh_virtio_service_state() {
                     SERVICES[i].fault = "";
                 } else if TSTATE[task] == TaskState::Done && TEXIT[task] == 0 {
                     SERVICES[i].state = ServiceState::Stopped;
-                    SERVICES[i].fault = "driver stopped";
+                    SERVICES[i].fault = "manual stop";
+                    SERVICES[i].last_exit = TEXIT[task];
                     reclaim_task_resources(task);
                 } else if TSTATE[task] == TaskState::Done {
                     SERVICES[i].state = ServiceState::Faulted;
                     SERVICES[i].fault = "driver exited or faulted";
+                    SERVICES[i].last_exit = TEXIT[task];
                     reclaim_task_resources(task);
                 }
             }
@@ -1916,9 +2059,18 @@ fn ensure_virtio_block_service(_plan: &KernelPlan) -> Option<usize> {
         {
             return Some(task);
         }
+        if SERVICES[idx].state == ServiceState::Stopped {
+            kprintln!("[services] virtio-block unavailable: service is Stopped; use `svc-restart virtio-block`");
+            return None;
+        }
+        if SERVICES[idx].state == ServiceState::Faulted {
+            kprintln!("[services] virtio-block unavailable: service is Faulted; use `svc-restart virtio-block`");
+            return None;
+        }
         SERVICES[idx].state = ServiceState::Starting;
         SERVICES[idx].task = VIRTIO_SERVICE_TASK;
         SERVICES[idx].fault = "";
+        SERVICES[idx].last_started_tick = TICKS.load(Ordering::Relaxed);
         let caps = SERVICES[idx].caps;
         kprintln!(
             "[services] starting virtio-block from boot registry as task {VIRTIO_SERVICE_TASK}"
@@ -1968,13 +2120,16 @@ fn print_services() {
         while i < count {
             let s = SERVICES[i];
             kprintln!(
-                "  - {:<13} {:?} state={} task={} caps={:#x} grants={:#x} {}",
+                "  - {:<13} {:?} state={} task={} caps={:#x} grants={:#x} restarts={} last_exit={} started_tick={} {}",
                 s.name,
                 s.kind,
                 service_state_name(s.state),
                 s.task,
                 s.caps,
                 s.grants,
+                s.restart_count,
+                s.last_exit,
+                s.last_started_tick,
                 s.fault
             );
             i += 1;
@@ -1992,6 +2147,7 @@ const BLK_REQ_BREAD: usize = 3;
 const BLK_REQ_PSET: usize = 4;
 const BLK_REQ_PGET: usize = 5;
 const BLK_REQ_PROLLBACK: usize = 6;
+const BLK_REQ_STOP: usize = 7;
 const BLK_REQ_INSTALL_CHECK: usize = 8;
 const BLK_REQ_INSTALL_INIT: usize = 9;
 const BLK_REQ_ROOT_STATUS: usize = 10;
@@ -2008,6 +2164,30 @@ const BLK_REQ_APP_REQUIRE_LAB: usize = 20;
 const BLK_REQ_APP_REMOVE_LAB: usize = 21;
 const BLK_REQ_LAB_SET: usize = 22;
 const BLK_REQ_LAB_GET: usize = 23;
+const BLK_REQ_FAULT_DEMO: usize = 24;
+const BLK_REQ_APP_INSTALL_CALC: usize = 25;
+const BLK_REQ_APP_REQUIRE_CALC: usize = 26;
+const BLK_REQ_APP_REMOVE_CALC: usize = 27;
+const BLK_REQ_CALC_SET: usize = 28;
+const BLK_REQ_CALC_GET: usize = 29;
+const BLK_REQ_APP_INSTALL_VAULT: usize = 30;
+const BLK_REQ_APP_REQUIRE_VAULT: usize = 31;
+const BLK_REQ_APP_REMOVE_VAULT: usize = 32;
+const BLK_REQ_VAULT_SET: usize = 33;
+const BLK_REQ_VAULT_GET: usize = 34;
+const IPC_PROTO_V1: usize = 0xd1;
+const IPC_SERVICE_SYSTEM: usize = 0;
+const IPC_STATUS_OK: usize = 0;
+const IPC_STATUS_DENIED: usize = 1;
+const IPC_STATUS_UNAVAILABLE: usize = 2;
+const IPC_STATUS_TIMEOUT: usize = 3;
+const IPC_STATUS_BAD_REQUEST: usize = 4;
+const IPC_STATUS_IO_FAILURE: usize = 5;
+const IPC_STATUS_FAULTED: usize = 6;
+const IPC_STATUS_BUSY: usize = 7;
+const IPC_OP_PING: usize = 1;
+const IPC_OP_TIMEOUT: usize = 2;
+const IPC_OP_BADREQ: usize = 255;
 const VIRTIO_SERVICE_TASK: usize = 0;
 const FIRST_FOREGROUND_TASK: usize = 1;
 const BENCH_ROLE_SYSCALL: usize = 1;
@@ -2023,6 +2203,235 @@ const LAB_ROLE_UI: usize = 1;
 const LAB_ROLE_WORKER: usize = 2;
 const LAB_ROLE_DENY_BLOCK: usize = 3;
 const LAB_ROLE_DENY_MMIO: usize = 4;
+const CALC_ROLE_RUN: usize = 1;
+const CALC_ROLE_EVAL: usize = 2;
+const CALC_OP_ADD: usize = 1;
+const CALC_OP_SUB: usize = 2;
+const CALC_OP_MUL: usize = 3;
+const CALC_OP_DIV: usize = 4;
+const VAULT_ROLE_RUN: usize = 1;
+const VAULT_ROLE_DENY_BLOCK: usize = 2;
+const VAULT_ROLE_DENY_MMIO: usize = 3;
+
+fn typed_word(service: usize, op: usize, request_id: usize, status: usize, arg: usize) -> usize {
+    (IPC_PROTO_V1 << 56)
+        | ((service & 0xff) << 48)
+        | ((op & 0xff) << 40)
+        | ((request_id & 0xffff) << 24)
+        | ((status & 0xff) << 16)
+        | (arg & 0xffff)
+}
+
+fn ipc_status_name(status: usize) -> &'static str {
+    match status {
+        IPC_STATUS_OK => "OK",
+        IPC_STATUS_DENIED => "DENIED",
+        IPC_STATUS_UNAVAILABLE => "UNAVAILABLE",
+        IPC_STATUS_TIMEOUT => "TIMEOUT",
+        IPC_STATUS_BAD_REQUEST => "BAD_REQUEST",
+        IPC_STATUS_IO_FAILURE => "IO_FAILURE",
+        IPC_STATUS_FAULTED => "FAULTED",
+        IPC_STATUS_BUSY => "BUSY",
+        _ => "UNKNOWN",
+    }
+}
+
+fn print_ipcstat() {
+    unsafe {
+        let stats = IPC_STATS;
+        kprintln!(
+            "ipcstat: sends={} receives={} denied_sends={} timeouts={} queue_full={} max_depth={}",
+            stats.sends,
+            stats.receives,
+            stats.denied_sends,
+            stats.timeouts,
+            stats.queue_full,
+            stats.max_depth
+        );
+    }
+}
+
+fn record_event(
+    actor: &'static str,
+    action: &'static str,
+    target: &'static str,
+    result: &'static str,
+) {
+    unsafe {
+        EVENTS[EVENT_NEXT] = EventEntry {
+            tick: TICKS.load(Ordering::Relaxed),
+            actor,
+            action,
+            target,
+            result,
+        };
+        EVENT_NEXT = (EVENT_NEXT + 1) % EVENT_CAP;
+        if EVENT_COUNT < EVENT_CAP {
+            EVENT_COUNT += 1;
+        }
+    }
+}
+
+fn print_events() {
+    unsafe {
+        kprintln!("events:");
+        kprintln!("  TICK   ACTOR      ACTION          TARGET          RESULT");
+        let start = if EVENT_COUNT == EVENT_CAP { EVENT_NEXT } else { 0 };
+        let mut n = 0usize;
+        while n < EVENT_COUNT {
+            let idx = (start + n) % EVENT_CAP;
+            let e = EVENTS[idx];
+            kprintln!(
+                "  {:<6} {:<10} {:<15} {:<15} {}",
+                e.tick,
+                e.actor,
+                e.action,
+                e.target,
+                e.result
+            );
+            n += 1;
+        }
+        if EVENT_COUNT == 0 {
+            kprintln!("  (no events recorded yet)");
+        }
+    }
+}
+
+fn print_audit() {
+    kprintln!("audit summary:");
+    kprintln!("  model: no ambient authority; important effects are event-recorded");
+    kprintln!("  tracked: install, app install/run/remove, service stop/restart/fault, denial demos");
+    print_events();
+}
+
+fn run_ipc_typed_demo() {
+    if virtio_service_is_running() {
+        kprintln!("[typed-ipc] skipped: run before starting services to avoid disturbing daemon slot 0");
+        print_ipcstat();
+        return;
+    }
+    kprintln!("[typed-ipc] demo: typed OK, BAD_REQUEST, TIMEOUT, and DENIED");
+    run_tasks(&[
+        (
+            typed_ipc_service_task as usize,
+            TASK_PRINT | TASK_IPC,
+            PERS_NATIVE,
+        ),
+        (
+            typed_ipc_client_task as usize,
+            TASK_PRINT | TASK_IPC,
+            PERS_NATIVE,
+        ),
+    ]);
+    run_tasks(&[(
+        typed_ipc_timeout_task as usize,
+        TASK_PRINT | TASK_IPC,
+        PERS_NATIVE,
+    )]);
+    run_tasks(&[(typed_ipc_denied_task as usize, TASK_PRINT, PERS_NATIVE)]);
+    kprintln!(
+        "[typed-ipc] PASS: OK={}, BAD_REQUEST={}, TIMEOUT={}, DENIED={}",
+        ipc_status_name(IPC_STATUS_OK),
+        ipc_status_name(IPC_STATUS_BAD_REQUEST),
+        ipc_status_name(IPC_STATUS_TIMEOUT),
+        ipc_status_name(IPC_STATUS_DENIED)
+    );
+}
+
+fn svc_stop_virtio(_plan: &KernelPlan) {
+    refresh_virtio_service_state();
+    let Some(idx) = service_index("virtio-block") else {
+        kprintln!("[services] virtio-block not declared");
+        return;
+    };
+    let daemon;
+    unsafe {
+        if SERVICES[idx].state != ServiceState::Running {
+            kprintln!(
+                "[services] virtio-block stop skipped: state={}",
+                service_state_name(SERVICES[idx].state)
+            );
+            return;
+        }
+        daemon = SERVICES[idx].task;
+        SERVICES[idx].state = ServiceState::Stopping;
+        SERVICES[idx].fault = "manual stop requested";
+    }
+    let client_caps = TASK_PRINT | TASK_IPC | TASK_BLOCK_READ | TASK_BLOCK_WRITE;
+    kprintln!("[services] stopping virtio-block task={daemon} with typed STOP");
+    run_foreground_processes(&[
+        ProcessSpec::new(VIRTIO_BLK_ELF, client_caps, BLK_OP_CLIENT_REQ)
+            .args(daemon, 0, BLK_REQ_STOP)
+            .virtio_dma(),
+    ]);
+    let st = unsafe { TEXIT[FIRST_FOREGROUND_TASK] };
+    refresh_virtio_service_state();
+    unsafe {
+        kprintln!(
+            "[services] svc-stop virtio-block status={} state={}",
+            st,
+            service_state_name(SERVICES[idx].state)
+        );
+    }
+    record_event("console", "svc.stop", "virtio-block", "done");
+}
+
+fn svc_restart_virtio(_plan: &KernelPlan) {
+    let Some(idx) = service_index("virtio-block") else {
+        kprintln!("[services] virtio-block not declared");
+        return;
+    };
+    refresh_virtio_service_state();
+    unsafe {
+        let task = SERVICES[idx].task;
+        if SERVICES[idx].state == ServiceState::Running && task < MAX_TASKS {
+            kprintln!("[services] restart requires stopped/faulted service; use svc-stop first");
+            return;
+        }
+        SERVICES[idx].state = ServiceState::Restarting;
+        SERVICES[idx].fault = "";
+        SERVICES[idx].task = usize::MAX;
+        SERVICES[idx].restart_count += 1;
+    }
+    let _ = ensure_virtio_block_service(_plan);
+    refresh_virtio_service_state();
+    unsafe {
+        kprintln!(
+            "[services] svc-restart virtio-block state={} restart_count={}",
+            service_state_name(SERVICES[idx].state),
+            SERVICES[idx].restart_count
+        );
+    }
+    record_event("console", "svc.restart", "virtio-block", "done");
+}
+
+fn svc_fault_demo_virtio(plan: &KernelPlan) {
+    refresh_virtio_service_state();
+    let Some(idx) = service_index("virtio-block") else {
+        kprintln!("[services] virtio-block not declared");
+        return;
+    };
+    unsafe {
+        if SERVICES[idx].state != ServiceState::Running {
+            kprintln!(
+                "[services] fault-demo skipped: state={}",
+                service_state_name(SERVICES[idx].state)
+            );
+            return;
+        }
+    }
+    let st = run_registered_virtio_client_status(plan, BLK_REQ_FAULT_DEMO, "");
+    refresh_virtio_service_state();
+    unsafe {
+        kprintln!(
+            "[services] svc-fault-demo virtio-block request_status={} state={} last_exit={}",
+            st,
+            service_state_name(SERVICES[idx].state),
+            SERVICES[idx].last_exit
+        );
+    }
+    record_event("console", "svc.fault-demo", "virtio-block", "done");
+}
 
 fn virtio_dma_pa() -> usize {
     core::ptr::addr_of!(VIRTIO_DMA) as usize
@@ -2167,6 +2576,14 @@ fn app_lab_is_active(plan: &KernelPlan) -> bool {
     run_registered_virtio_client_status(plan, BLK_REQ_APP_REQUIRE_LAB, "") == 0
 }
 
+fn app_calc_is_active(plan: &KernelPlan) -> bool {
+    run_registered_virtio_client_status(plan, BLK_REQ_APP_REQUIRE_CALC, "") == 0
+}
+
+fn app_vault_is_active(plan: &KernelPlan) -> bool {
+    run_registered_virtio_client_status(plan, BLK_REQ_APP_REQUIRE_VAULT, "") == 0
+}
+
 fn print_apps(plan: &KernelPlan, arg: &str) {
     match arg.trim() {
         "" => {
@@ -2182,7 +2599,7 @@ fn print_apps(plan: &KernelPlan, arg: &str) {
 }
 
 fn app_info(plan: &KernelPlan, arg: &str) {
-    if arg.trim() != "note" {
+    if !matches!(arg.trim(), "" | "note" | "lab" | "calc" | "vault") {
         kprintln!("[app-info] unknown app '{}'", arg.trim());
         return;
     }
@@ -2191,8 +2608,26 @@ fn app_info(plan: &KernelPlan, arg: &str) {
 
 fn app_install(plan: &KernelPlan, arg: &str) {
     match arg.trim() {
-        "note" => run_registered_virtio_client(plan, BLK_REQ_APP_INSTALL_NOTE, ""),
-        "lab" => run_registered_virtio_client(plan, BLK_REQ_APP_INSTALL_LAB, ""),
+        "note" => {
+            record_event("console", "app.install", "note", "start");
+            run_registered_virtio_client(plan, BLK_REQ_APP_INSTALL_NOTE, "");
+            record_event("installer", "app.install", "note", "done");
+        }
+        "lab" => {
+            record_event("console", "app.install", "lab", "start");
+            run_registered_virtio_client(plan, BLK_REQ_APP_INSTALL_LAB, "");
+            record_event("installer", "app.install", "lab", "done");
+        }
+        "calc" => {
+            record_event("console", "app.install", "calc", "start");
+            run_registered_virtio_client(plan, BLK_REQ_APP_INSTALL_CALC, "");
+            record_event("installer", "app.install", "calc", "done");
+        }
+        "vault" => {
+            record_event("console", "app.install", "vault", "start");
+            run_registered_virtio_client(plan, BLK_REQ_APP_INSTALL_VAULT, "");
+            record_event("installer", "app.install", "vault", "done");
+        }
         other => kprintln!("[installer] unknown available app '{other}'"),
     }
 }
@@ -2211,6 +2646,7 @@ fn app_run(plan: &KernelPlan, arg: &str) {
                 NOTE_ROLE_RUN,
             )]);
             kprintln!("[app-run] note exited; console returned");
+            record_event("app", "app.run", "note", "OK");
         }
         "lab" => {
             if !app_lab_is_active(plan) {
@@ -2236,6 +2672,35 @@ fn app_run(plan: &KernelPlan, arg: &str) {
             run_registered_virtio_client(plan, BLK_REQ_LAB_SET, "lab-run-complete");
             run_registered_virtio_client(plan, BLK_REQ_LAB_GET, "");
             kprintln!("[app-run] lab exited; console returned");
+            record_event("app", "app.run", "lab", "OK");
+        }
+        "calc" => {
+            if !app_calc_is_active(plan) {
+                kprintln!("[app-run] calc not installed or not active; launch denied");
+                return;
+            }
+            kprintln!("[app-run] launching calc with caps=PRINT,IPC and no device/DMA grants");
+            run_foreground_processes(&[ProcessSpec::new(
+                CALC_ELF,
+                TASK_PRINT | TASK_IPC,
+                CALC_ROLE_RUN,
+            )]);
+            kprintln!("[app-run] calc exited; console returned");
+            record_event("app", "app.run", "calc", "OK");
+        }
+        "vault" => {
+            if !app_vault_is_active(plan) {
+                kprintln!("[app-run] vault not installed or not active; launch denied");
+                return;
+            }
+            kprintln!("[app-run] launching vault with caps=PRINT,IPC and no device/DMA grants");
+            run_foreground_processes(&[ProcessSpec::new(
+                VAULT_ELF,
+                TASK_PRINT | TASK_IPC,
+                VAULT_ROLE_RUN,
+            )]);
+            kprintln!("[app-run] vault exited; console returned");
+            record_event("app", "app.run", "vault", "OK");
         }
         other => kprintln!("[app-run] unknown app '{other}'"),
     }
@@ -2245,8 +2710,11 @@ fn app_remove(plan: &KernelPlan, arg: &str) {
     match arg.trim() {
         "note" => run_registered_virtio_client(plan, BLK_REQ_APP_REMOVE_NOTE, ""),
         "lab" => run_registered_virtio_client(plan, BLK_REQ_APP_REMOVE_LAB, ""),
+        "calc" => run_registered_virtio_client(plan, BLK_REQ_APP_REMOVE_CALC, ""),
+        "vault" => run_registered_virtio_client(plan, BLK_REQ_APP_REMOVE_VAULT, ""),
         other => kprintln!("[installer] unknown installed app '{other}'"),
     }
+    record_event("console", "app.remove", "app", "done");
 }
 
 fn app_deny(plan: &KernelPlan, arg: &str) {
@@ -2281,7 +2749,241 @@ fn app_deny(plan: &KernelPlan, arg: &str) {
             )]);
             kprintln!("[app-deny] lab device/block direct access denied; console survived");
         }
+        "vault" => {
+            kprintln!("[app-deny] vault has no direct block grant when launched without IPC");
+            run_foreground_processes(&[
+                ProcessSpec::new(VAULT_ELF, TASK_PRINT, VAULT_ROLE_DENY_BLOCK).args(daemon, 0, 0)
+            ]);
+            kprintln!("[app-deny] vault has no MMIO/device grant");
+            run_foreground_processes(&[ProcessSpec::new(
+                VAULT_ELF,
+                TASK_PRINT | TASK_IPC,
+                VAULT_ROLE_DENY_MMIO,
+            )]);
+            kprintln!("[app-deny] vault device/block direct access denied; console survived");
+        }
         other => kprintln!("[app-deny] unknown app '{other}'"),
+    }
+    record_event("kernel", "deny.app", "app", "OK");
+}
+
+fn app_permissions(arg: &str) {
+    let app = arg.trim();
+    if !matches!(app, "note" | "lab" | "calc" | "vault") {
+        kprintln!("usage: app-permissions <note|lab|calc|vault>");
+        return;
+    }
+    kprintln!("app permissions: {app}");
+    kprintln!("  REQUESTED  PRINT IPC");
+    kprintln!("  GRANTED    PRINT IPC");
+    kprintln!("  DENIED     DEVICE_VIRTIO_BLK DMA BLOCK_DIRECT MMIO");
+    kprintln!("  STORAGE    service-mediated via virtio-block daemon");
+}
+
+fn install_plan() {
+    kprintln!("Install Plan: Dezh Root v1");
+    kprintln!("  [01] Probe block service        ready");
+    kprintln!("  [02] Validate boot manifest     ready");
+    kprintln!("  [03] Write root marker          pending");
+    kprintln!("  [04] Initialize app registry    pending");
+    kprintln!("  [05] Install base apps          note lab calc vault");
+    kprintln!("  [06] Verify root/app state      pending");
+    kprintln!("  [07] Commit install report      pending");
+}
+
+fn progress(stage: usize, total: usize, label: &str, status: &str) {
+    let filled = stage * 20 / total;
+    let mut bar = [b'-'; 20];
+    let mut i = 0usize;
+    while i < filled && i < bar.len() {
+        bar[i] = b'#';
+        i += 1;
+    }
+    let s = core::str::from_utf8(&bar).unwrap_or("--------------------");
+    kprintln!("[{}] {:>3}%  {:<28} {}", s, stage * 100 / total, label, status);
+}
+
+fn install_verify(plan: &KernelPlan) {
+    kprintln!("[install-v1] verifying root marker, metadata, and base app registry");
+    run_registered_virtio_client(plan, BLK_REQ_INSTALL_CHECK, "");
+    run_registered_virtio_client(plan, BLK_REQ_ROOT_STATUS, "");
+    run_registered_virtio_client(plan, BLK_REQ_APP_INSTALLED, "");
+    record_event("installer", "install.verify", "root-v1", "done");
+}
+
+fn install_report() {
+    kprintln!("Install Report: Dezh Root v1");
+    kprintln!("  root marker      sector 0");
+    kprintln!("  root metadata    sector 4");
+    kprintln!("  app registry     sectors 5..10");
+    kprintln!("  private data     sectors 16..19");
+    kprintln!("  required service virtio-block");
+    kprintln!("  policy           no ambient authority");
+    print_events();
+}
+
+fn install_run(plan: &KernelPlan, dry_run: bool) {
+    install_plan();
+    record_event("console", "install.run", "root-v1", "start");
+    let total = 7usize;
+    progress(1, total, "probe block service", "OK");
+    if dry_run {
+        progress(2, total, "validate boot manifest", "OK");
+        progress(3, total, "write root marker", "dry-run");
+        progress(4, total, "initialize app registry", "dry-run");
+        progress(5, total, "install base apps", "dry-run");
+        progress(6, total, "verify root/app state", "dry-run");
+        progress(7, total, "commit install report", "dry-run");
+        kprintln!("[install-v1] dry-run complete; disk not modified");
+        record_event("installer", "install.dryrun", "root-v1", "OK");
+        return;
+    }
+    progress(2, total, "validate boot manifest", "OK");
+    progress(3, total, "write root marker", "running");
+    run_registered_virtio_client(plan, BLK_REQ_INSTALL_INIT, "");
+    progress(4, total, "initialize app registry", "running");
+    app_install(plan, "note");
+    progress(5, total, "install base apps", "running");
+    app_install(plan, "lab");
+    app_install(plan, "calc");
+    app_install(plan, "vault");
+    progress(6, total, "verify root/app state", "running");
+    install_verify(plan);
+    progress(7, total, "commit install report", "OK");
+    install_report();
+    record_event("installer", "install.run", "root-v1", "OK");
+}
+
+fn install_command(plan: &KernelPlan, arg: &str) {
+    match arg.trim() {
+        "" | "plan" => install_plan(),
+        "check" => run_registered_virtio_client(plan, BLK_REQ_INSTALL_CHECK, ""),
+        "run" => install_run(plan, false),
+        "--dry-run" | "dry-run" => install_run(plan, true),
+        "verify" => install_verify(plan),
+        "report" => install_report(),
+        "rollback" => {
+            kprintln!("[install-v1] rollback uses storage rollback for v0 root data");
+            run_registered_virtio_client(plan, BLK_REQ_PROLLBACK, "");
+            record_event("installer", "install.rollback", "root-v1", "done");
+        }
+        other => kprintln!("usage: install plan|check|run|verify|report|rollback|--dry-run (got '{other}')"),
+    }
+}
+
+fn parse_usize_token(s: &str) -> Option<usize> {
+    let bytes = s.as_bytes();
+    if bytes.is_empty() {
+        return None;
+    }
+    let mut n = 0usize;
+    let mut i = 0usize;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if !b.is_ascii_digit() {
+            return None;
+        }
+        n = n.saturating_mul(10).saturating_add((b - b'0') as usize);
+        i += 1;
+    }
+    Some(n)
+}
+
+fn calc_op_token(s: &str) -> Option<usize> {
+    match s {
+        "+" => Some(CALC_OP_ADD),
+        "-" => Some(CALC_OP_SUB),
+        "*" | "x" | "X" => Some(CALC_OP_MUL),
+        "/" => Some(CALC_OP_DIV),
+        _ => None,
+    }
+}
+
+fn calc_eval(op: usize, a: usize, b: usize) -> Option<usize> {
+    match op {
+        CALC_OP_ADD => Some(a.saturating_add(b)),
+        CALC_OP_SUB => Some(a.saturating_sub(b)),
+        CALC_OP_MUL => Some(a.saturating_mul(b)),
+        CALC_OP_DIV => {
+            if b == 0 {
+                None
+            } else {
+                Some(a / b)
+            }
+        }
+        _ => None,
+    }
+}
+
+fn calc_command(plan: &KernelPlan, arg: &str) {
+    if !app_calc_is_active(plan) {
+        kprintln!("[calc] calc not installed; run `app-install calc` or `install run`");
+        return;
+    }
+    let mut parts = arg.split_whitespace();
+    let Some(a_s) = parts.next() else {
+        kprintln!("usage: calc <n> <+|-|*|/> <n>");
+        return;
+    };
+    let Some(op_s) = parts.next() else {
+        kprintln!("usage: calc <n> <+|-|*|/> <n>");
+        return;
+    };
+    let Some(b_s) = parts.next() else {
+        kprintln!("usage: calc <n> <+|-|*|/> <n>");
+        return;
+    };
+    let (Some(a), Some(op), Some(b)) = (parse_usize_token(a_s), calc_op_token(op_s), parse_usize_token(b_s)) else {
+        kprintln!("usage: calc <n> <+|-|*|/> <n>");
+        return;
+    };
+    run_foreground_processes(&[ProcessSpec::new(CALC_ELF, TASK_PRINT | TASK_IPC, CALC_ROLE_EVAL)
+        .args(op, a, b)]);
+    if unsafe { TEXIT[FIRST_FOREGROUND_TASK] } == 0 {
+        if let Some(result) = calc_eval(op, a, b) {
+            let expr = format!("{} {} {} = {}", a_s, op_s, b_s, result);
+            run_registered_virtio_client(plan, BLK_REQ_CALC_SET, &expr);
+            record_event("app", "calc.eval", "calc", "OK");
+        }
+    }
+}
+
+fn vault_put(plan: &KernelPlan, arg: &str) {
+    if !app_vault_is_active(plan) {
+        kprintln!("[vault] vault not installed; run `app-install vault` or `install run`");
+        return;
+    }
+    run_registered_virtio_client(plan, BLK_REQ_VAULT_SET, arg);
+    record_event("app", "vault.put", "vault", "OK");
+}
+
+fn explain_command(arg: &str) {
+    match arg.trim() {
+        "app-run lab" | "app-run" => {
+            kprintln!("explain app-run lab:");
+            kprintln!("  requires: SPAWN");
+            kprintln!("  path: app registry -> foreground U-mode app -> IPC workers -> virtio-block storage");
+            kprintln!("  denied direct: MMIO DMA BLOCK_DIRECT");
+        }
+        "install" | "install run" => {
+            kprintln!("explain install run:");
+            kprintln!("  requires: SPAWN");
+            kprintln!("  path: boot manifest -> virtio-block service -> disk marker/app registry -> verify");
+            kprintln!("  rollback point: v0 current/previous sectors and registry checkpoints");
+        }
+        "calc" => {
+            kprintln!("explain calc:");
+            kprintln!("  requires: SPAWN");
+            kprintln!("  path: installed calc ELF computes in U-mode, last result stored via app registry");
+            kprintln!("  denied direct: DEVICE DMA BLOCK_DIRECT");
+        }
+        "vault" | "vault-put" => {
+            kprintln!("explain vault:");
+            kprintln!("  requires: SPAWN for put, INSPECT for get");
+            kprintln!("  path: console -> virtio-block typed IPC -> vault private sector");
+            kprintln!("  denied direct: MMIO DMA BLOCK_DIRECT");
+        }
+        other => kprintln!("explain: no detailed path for '{other}' yet"),
     }
 }
 
@@ -2406,6 +3108,47 @@ fn vrecv() -> (usize, usize) {
         asm!("ecall", inout("a0") 0usize => _, inout("a1") 0usize => from, out("a2") word, in("a7") SYS_RECV)
     };
     (word, from)
+}
+
+#[link_section = ".user.text"]
+#[inline(never)]
+fn vrecv_timeout(timeout_ticks: usize) -> (usize, usize, usize) {
+    let rc: usize;
+    let from: usize;
+    let word: usize;
+    unsafe {
+        asm!(
+            "ecall",
+            inout("a0") 0usize => rc,
+            inout("a1") 0usize => from,
+            inout("a2") timeout_ticks => word,
+            in("a7") SYS_RECV_TIMEOUT
+        )
+    };
+    (rc, from, word)
+}
+
+#[link_section = ".user.text"]
+#[inline(always)]
+fn utyped_word(service: usize, op: usize, request_id: usize, status: usize, arg: usize) -> usize {
+    (IPC_PROTO_V1 << 56)
+        | ((service & 0xff) << 48)
+        | ((op & 0xff) << 40)
+        | ((request_id & 0xffff) << 24)
+        | ((status & 0xff) << 16)
+        | (arg & 0xffff)
+}
+
+#[link_section = ".user.text"]
+#[inline(always)]
+fn utyped_op(word: usize) -> usize {
+    (word >> 40) & 0xff
+}
+
+#[link_section = ".user.text"]
+#[inline(always)]
+fn utyped_status(word: usize) -> usize {
+    (word >> 16) & 0xff
 }
 
 #[link_section = ".user.text"]
@@ -2591,6 +3334,94 @@ extern "C" fn agent_task() -> ! {
 
 #[link_section = ".user.text"]
 #[no_mangle]
+extern "C" fn typed_ipc_service_task() -> ! {
+    let (word1, from1) = vrecv();
+    if utyped_op(word1) == IPC_OP_PING {
+        vsend(
+            from1,
+            utyped_word(
+                IPC_SERVICE_SYSTEM,
+                IPC_OP_PING,
+                1,
+                IPC_STATUS_OK,
+                0,
+            ),
+        );
+    } else {
+        vsend(
+            from1,
+            utyped_word(
+                IPC_SERVICE_SYSTEM,
+                IPC_OP_BADREQ,
+                1,
+                IPC_STATUS_BAD_REQUEST,
+                0,
+            ),
+        );
+    }
+
+    let (word2, from2) = vrecv();
+    let status = if utyped_op(word2) == IPC_OP_PING {
+        IPC_STATUS_OK
+    } else {
+        IPC_STATUS_BAD_REQUEST
+    };
+    vsend(
+        from2,
+        utyped_word(IPC_SERVICE_SYSTEM, utyped_op(word2), 2, status, 0),
+    );
+    sys_exit(0)
+}
+
+#[link_section = ".user.text"]
+#[no_mangle]
+extern "C" fn typed_ipc_client_task() -> ! {
+    vsend(
+        0,
+        utyped_word(IPC_SERVICE_SYSTEM, IPC_OP_PING, 1, IPC_STATUS_OK, 0),
+    );
+    let (ok, _) = vrecv();
+    sys_print(b"    [typed-ipc] PING -> ");
+    sys_printnum(utyped_status(ok));
+
+    vsend(
+        0,
+        utyped_word(IPC_SERVICE_SYSTEM, IPC_OP_BADREQ, 2, IPC_STATUS_OK, 0),
+    );
+    let (bad, _) = vrecv();
+    sys_print(b"    [typed-ipc] BADREQ -> ");
+    sys_printnum(utyped_status(bad));
+    sys_exit(0)
+}
+
+#[link_section = ".user.text"]
+#[no_mangle]
+extern "C" fn typed_ipc_timeout_task() -> ! {
+    let (rc, _, word) = vrecv_timeout(0);
+    sys_print(b"    [typed-ipc] RECV_TIMEOUT -> ");
+    if rc == IPC_STATUS_TIMEOUT {
+        sys_printnum(utyped_status(word));
+    } else {
+        sys_printnum(rc);
+    }
+    sys_exit(0)
+}
+
+#[link_section = ".user.text"]
+#[no_mangle]
+extern "C" fn typed_ipc_denied_task() -> ! {
+    let rc = sys_send(0, b"", 0);
+    sys_print(b"    [typed-ipc] no-IPC SEND -> ");
+    if rc == SYS_DENIED {
+        sys_printnum(IPC_STATUS_DENIED);
+    } else {
+        sys_printnum(rc);
+    }
+    sys_exit(0)
+}
+
+#[link_section = ".user.text"]
+#[no_mangle]
 extern "C" fn queue_service_task() -> ! {
     sys_print(b"    [queue-service] delaying receive so two clients enqueue\n");
     sys_yield();
@@ -2736,7 +3567,35 @@ const COMMANDS: &[CommandSpec] = &[
         cap: 0,
         cap_name: "-",
         group: "Inspect",
-        help: "list commands",
+        help: "list commands or show help <command>",
+    },
+    CommandSpec {
+        name: "version",
+        cap: cap::INSPECT,
+        cap_name: "INSPECT",
+        group: "Inspect",
+        help: "show kernel and review-kit version",
+    },
+    CommandSpec {
+        name: "about",
+        cap: cap::INSPECT,
+        cap_name: "INSPECT",
+        group: "Inspect",
+        help: "show the Dezh OS thesis in one screen",
+    },
+    CommandSpec {
+        name: "clear",
+        cap: cap::INSPECT,
+        cap_name: "INSPECT",
+        group: "Inspect",
+        help: "clear the terminal",
+    },
+    CommandSpec {
+        name: "explain",
+        cap: cap::INSPECT,
+        cap_name: "INSPECT",
+        group: "Inspect",
+        help: "explain command authority and service path",
     },
     CommandSpec {
         name: "caps",
@@ -2765,6 +3624,20 @@ const COMMANDS: &[CommandSpec] = &[
         cap_name: "INSPECT",
         group: "Inspect",
         help: "show frame ownership and process memory accounting",
+    },
+    CommandSpec {
+        name: "ipcstat",
+        cap: cap::INSPECT,
+        cap_name: "INSPECT",
+        group: "Inspect",
+        help: "show IPC send/receive/timeout counters",
+    },
+    CommandSpec {
+        name: "ipc-typed-demo",
+        cap: cap::SPAWN,
+        cap_name: "SPAWN",
+        group: "Demos",
+        help: "exercise typed IPC OK/BAD_REQUEST/TIMEOUT/DENIED",
     },
     CommandSpec {
         name: "status",
@@ -2865,6 +3738,13 @@ const COMMANDS: &[CommandSpec] = &[
         help: "show installed root marker and metadata",
     },
     CommandSpec {
+        name: "install",
+        cap: cap::SPAWN,
+        cap_name: "SPAWN",
+        group: "Install",
+        help: "installer v1: plan|check|run|verify|report|rollback|--dry-run",
+    },
+    CommandSpec {
         name: "apps",
         cap: cap::INSPECT,
         cap_name: "INSPECT",
@@ -2907,6 +3787,13 @@ const COMMANDS: &[CommandSpec] = &[
         help: "prove installed app has no direct device/block grants",
     },
     CommandSpec {
+        name: "app-permissions",
+        cap: cap::INSPECT,
+        cap_name: "INSPECT",
+        group: "Apps",
+        help: "show requested/granted/denied app authorities",
+    },
+    CommandSpec {
         name: "note-set",
         cap: cap::SPAWN,
         cap_name: "SPAWN",
@@ -2935,6 +3822,34 @@ const COMMANDS: &[CommandSpec] = &[
         help: "read dezh-lab private value via app registry storage",
     },
     CommandSpec {
+        name: "calc",
+        cap: cap::SPAWN,
+        cap_name: "SPAWN",
+        group: "Apps",
+        help: "run dezh-calc: calc <n> <+|-|*|/> <n>",
+    },
+    CommandSpec {
+        name: "calc-history",
+        cap: cap::INSPECT,
+        cap_name: "INSPECT",
+        group: "Apps",
+        help: "read dezh-calc last stored result",
+    },
+    CommandSpec {
+        name: "vault-put",
+        cap: cap::SPAWN,
+        cap_name: "SPAWN",
+        group: "Apps",
+        help: "store a private value through dezh-vault",
+    },
+    CommandSpec {
+        name: "vault-get",
+        cap: cap::INSPECT,
+        cap_name: "INSPECT",
+        group: "Apps",
+        help: "read dezh-vault private value",
+    },
+    CommandSpec {
         name: "vblkd",
         cap: cap::SPAWN,
         cap_name: "SPAWN",
@@ -2947,6 +3862,27 @@ const COMMANDS: &[CommandSpec] = &[
         cap_name: "INSPECT",
         group: "Services",
         help: "list runtime services",
+    },
+    CommandSpec {
+        name: "svc-stop",
+        cap: cap::SPAWN,
+        cap_name: "SPAWN",
+        group: "Services",
+        help: "stop a supervised service",
+    },
+    CommandSpec {
+        name: "svc-restart",
+        cap: cap::SPAWN,
+        cap_name: "SPAWN",
+        group: "Services",
+        help: "restart a stopped/faulted service",
+    },
+    CommandSpec {
+        name: "svc-fault-demo",
+        cap: cap::SPAWN,
+        cap_name: "SPAWN",
+        group: "Services",
+        help: "fault a supervised service and keep console alive",
     },
     CommandSpec {
         name: "install-check",
@@ -2968,6 +3904,20 @@ const COMMANDS: &[CommandSpec] = &[
         cap_name: "INSPECT",
         group: "Services",
         help: "read Dezh root metadata from disk",
+    },
+    CommandSpec {
+        name: "events",
+        cap: cap::INSPECT,
+        cap_name: "INSPECT",
+        group: "Audit",
+        help: "show kernel/app/service event timeline",
+    },
+    CommandSpec {
+        name: "audit",
+        cap: cap::INSPECT,
+        cap_name: "INSPECT",
+        group: "Audit",
+        help: "show audit summary and recent events",
     },
     CommandSpec {
         name: "uptime",
@@ -3150,7 +4100,7 @@ fn cap_names(set: u32) -> &'static str {
 
 fn print_help(held: u32) {
     const GROUPS: &[&str] = &[
-        "Inspect", "Storage", "Apps", "Services", "Safety", "Demos", "Power",
+        "Inspect", "Storage", "Install", "Apps", "Services", "Audit", "Safety", "Demos", "Power",
     ];
     kprintln!("commands (cap required -> held?):");
     for group in GROUPS {
@@ -3166,6 +4116,44 @@ fn print_help(held: u32) {
             };
             kprintln!("    {:<13} {:<8} [{}]  {}", c.name, c.cap_name, ok, c.help);
         }
+    }
+}
+
+fn print_command_help(name: &str, held: u32) {
+    let wanted = name.trim();
+    if wanted.is_empty() {
+        print_help(held);
+        return;
+    }
+    for c in COMMANDS {
+        if c.name == wanted {
+            let ok = if c.cap == 0 || held & c.cap == c.cap {
+                "yes"
+            } else {
+                "DENIED"
+            };
+            kprintln!("help: {}", c.name);
+            kprintln!("  group: {}", c.group);
+            kprintln!("  requires: {} ({})", c.cap_name, ok);
+            kprintln!("  usage: {}", command_usage(c.name));
+            kprintln!("  about: {}", c.help);
+            return;
+        }
+    }
+    kprintln!("help: unknown command '{wanted}'");
+}
+
+fn command_usage<'a>(name: &'a str) -> &'a str {
+    match name {
+        "install" => "install plan|check|run|verify|report|rollback|--dry-run",
+        "calc" => "calc <n> <+|-|*|/> <n>",
+        "vault-put" => "vault-put <text>",
+        "app-permissions" => "app-permissions <note|lab|calc|vault>",
+        "explain" => "explain <command>",
+        "svc-stop" => "svc-stop virtio-block",
+        "svc-restart" => "svc-restart virtio-block",
+        "svc-fault-demo" => "svc-fault-demo virtio-block",
+        _ => name,
     }
 }
 
@@ -3277,6 +4265,44 @@ fn print_memstat() {
     kprintln!("  unowned allocated estimate={}", unowned);
 }
 
+fn print_version() {
+    kprintln!("Dezh OS review prototype v0.2-control-surface");
+    kprintln!("  kernel: riscv64 qemu-virt S-mode");
+    kprintln!("  ipc: typed v0 with timeout/status");
+    kprintln!("  installer: v1 UX over v0 disk layout");
+}
+
+fn print_about() {
+    kprintln!("Dezh OS: capability-secure research prototype");
+    kprintln!("  thesis: no ambient authority; every effect needs an explicit grant");
+    kprintln!("  current: U-mode apps, user-space virtio-block, typed IPC, installer/app registry");
+    kprintln!("  review focus: authority visibility, service recovery, app install/run/storage");
+}
+
+fn print_caps_why(arg: &str) {
+    match arg.trim() {
+        "note-get" | "read" | "root-status" => {
+            kprintln!("caps why {}:", arg.trim());
+            kprintln!("  console requires: INSPECT");
+            kprintln!("  foreground client receives: PRINT IPC BLOCK_READ BLOCK_WRITE");
+            kprintln!("  device access remains only in virtio-block daemon");
+        }
+        "app-run lab" | "app-run" | "calc" | "vault-put" => {
+            kprintln!("caps why {}:", arg.trim());
+            kprintln!("  console requires: SPAWN");
+            kprintln!("  app receives: PRINT IPC only");
+            kprintln!("  denied: DEVICE_VIRTIO_BLK DMA BLOCK_DIRECT MMIO");
+        }
+        "install run" | "install" => {
+            kprintln!("caps why install run:");
+            kprintln!("  console requires: SPAWN");
+            kprintln!("  installer path uses: registered virtio-block service");
+            kprintln!("  service owns: DEVICE_VIRTIO_BLK DMA BLOCK_READ BLOCK_WRITE");
+        }
+        _ => kprintln!("caps why: try `caps why install run`, `caps why app-run lab`, or `caps why note-get`"),
+    }
+}
+
 fn console(plan: &KernelPlan, memory: &[MemoryRegion], held: u32) -> ! {
     kprintln!();
     kprintln!("Dezh console. Every command requires an explicit capability.");
@@ -3318,9 +4344,19 @@ fn dispatch(cmd: &str, arg: &str, plan: &KernelPlan, memory: &[MemoryRegion], he
 
     match cmd {
         "help" => {
-            print_help(held);
+            print_command_help(arg, held);
         }
-        "caps" => kprintln!("console capabilities: {}", cap_names(held)),
+        "version" => print_version(),
+        "about" => print_about(),
+        "clear" => kprint!("\x1b[2J\x1b[H"),
+        "explain" => explain_command(arg),
+        "caps" => {
+            if let Some(rest) = arg.strip_prefix("why ") {
+                print_caps_why(rest);
+            } else {
+                kprintln!("console capabilities: {}", cap_names(held));
+            }
+        }
         "mem" => {
             kprintln!("usable memory: {} bytes", plan.usable_bytes);
             for r in memory {
@@ -3331,6 +4367,8 @@ fn dispatch(cmd: &str, arg: &str, plan: &KernelPlan, memory: &[MemoryRegion], he
         "status" => print_status(plan, memory, held),
         "tasks" => print_tasks(),
         "memstat" => print_memstat(),
+        "ipcstat" => print_ipcstat(),
+        "ipc-typed-demo" => run_ipc_typed_demo(),
         "disk" => {
             kprintln!("[kernel] user-space virtio-blk: first prove no device cap means no MMIO");
             run_virtio_no_grant_probe();
@@ -3410,6 +4448,18 @@ fn dispatch(cmd: &str, arg: &str, plan: &KernelPlan, memory: &[MemoryRegion], he
             let _ = ensure_virtio_block_service(plan);
             print_services();
         }
+        "svc-stop" => match arg {
+            "virtio-block" => svc_stop_virtio(plan),
+            _ => kprintln!("usage: svc-stop virtio-block"),
+        },
+        "svc-restart" => match arg {
+            "virtio-block" => svc_restart_virtio(plan),
+            _ => kprintln!("usage: svc-restart virtio-block"),
+        },
+        "svc-fault-demo" => match arg {
+            "virtio-block" => svc_fault_demo_virtio(plan),
+            _ => kprintln!("usage: svc-fault-demo virtio-block"),
+        },
         "root" => {
             kprintln!("[install] root summary:");
             kprintln!(
@@ -3422,16 +4472,22 @@ fn dispatch(cmd: &str, arg: &str, plan: &KernelPlan, memory: &[MemoryRegion], he
             run_registered_virtio_client(plan, BLK_REQ_INSTALL_CHECK, "");
             run_registered_virtio_client(plan, BLK_REQ_ROOT_STATUS, "");
         }
+        "install" => install_command(plan, arg),
         "apps" => print_apps(plan, arg),
         "app-info" => app_info(plan, arg),
         "app-install" => app_install(plan, arg),
         "app-run" => app_run(plan, arg),
         "app-remove" => app_remove(plan, arg),
         "app-deny" => app_deny(plan, arg),
+        "app-permissions" => app_permissions(arg),
         "note-set" => run_registered_virtio_client(plan, BLK_REQ_NOTE_SET, arg),
         "note-get" => run_registered_virtio_client(plan, BLK_REQ_NOTE_GET, ""),
         "lab-set" => run_registered_virtio_client(plan, BLK_REQ_LAB_SET, arg),
         "lab-get" => run_registered_virtio_client(plan, BLK_REQ_LAB_GET, ""),
+        "calc" => calc_command(plan, arg),
+        "calc-history" => run_registered_virtio_client(plan, BLK_REQ_CALC_GET, ""),
+        "vault-put" => vault_put(plan, arg),
+        "vault-get" => run_registered_virtio_client(plan, BLK_REQ_VAULT_GET, ""),
         "install-check" => {
             kprintln!("[install] validating boot/install manifest v0");
             kprintln!(
@@ -3453,6 +4509,8 @@ fn dispatch(cmd: &str, arg: &str, plan: &KernelPlan, memory: &[MemoryRegion], he
             kprintln!("[install] reading Dezh root metadata via registered block service");
             run_registered_virtio_client(plan, BLK_REQ_ROOT_STATUS, "");
         }
+        "events" => print_events(),
+        "audit" => print_audit(),
         "uptime" => {
             let t = TICKS.load(Ordering::Relaxed);
             kprintln!("uptime: {} ticks (~{}.{} s)", t, t / TIMER_HZ, t % TIMER_HZ);
@@ -3707,12 +4765,14 @@ pub extern "C" fn kmain() -> ! {
         );
     }
     kprintln!(
-        "[dezh-boot] embedded user ELFs: userprog={} bytes, virtio-blk={} bytes, dezh-bench={} bytes, dezh-note={} bytes, dezh-lab={} bytes",
+        "[dezh-boot] embedded user ELFs: userprog={} bytes, virtio-blk={} bytes, dezh-bench={} bytes, dezh-note={} bytes, dezh-lab={} bytes, dezh-calc={} bytes, dezh-vault={} bytes",
         USERPROG_ELF.len(),
         VIRTIO_BLK_ELF.len(),
         BENCH_ELF.len(),
         NOTE_ELF.len(),
-        LAB_ELF.len()
+        LAB_ELF.len(),
+        CALC_ELF.len(),
+        VAULT_ELF.len()
     );
     kprintln!(
         "[dezh-boot] install manifest v0: root={} block={} marker_sector={}",

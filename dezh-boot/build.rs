@@ -16,6 +16,8 @@ fn main() {
     build_user_elf(&manifest, "bench-app", "dezh-bench");
     build_user_elf(&manifest, "note-app", "dezh-note");
     build_user_elf(&manifest, "lab-app", "dezh-lab");
+    build_user_elf(&manifest, "calc-app", "dezh-calc");
+    build_user_elf(&manifest, "vault-app", "dezh-vault");
 }
 
 fn build_user_elf(manifest: &PathBuf, dir: &str, bin: &str) {
