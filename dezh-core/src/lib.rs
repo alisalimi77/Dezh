@@ -8,4 +8,6 @@
 
 #![no_std]
 
+pub mod b64;
+pub mod dzp;
 pub mod ir;

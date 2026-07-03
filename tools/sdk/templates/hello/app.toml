@@ -1,0 +1,7 @@
+# Your first Dezh app. Everything the kernel grants it is listed in `caps`;
+# anything not listed is denied at run time — there is no ambient authority.
+name = "hello"
+version = "0.1.0"
+kind = "dezh-ir"
+entry = "hello.dzs"
+caps = ["print"]

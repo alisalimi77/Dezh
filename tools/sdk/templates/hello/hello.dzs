@@ -1,0 +1,14 @@
+; hello.dzs — your first Dezh app, in Dezh-IR assembly.
+; It stores a string in the app's private linear memory, prints it, then
+; computes 6 * 7 and prints the number. Both prints need the "print"
+; capability from app.toml; without it the kernel denies the host call.
+
+    string 0 "hello from a .dzp package!"
+    prints 0 26
+
+    push 6
+    push 7
+    mul
+    hostcall print_num
+
+    halt

@@ -18,6 +18,8 @@
 
 extern crate alloc;
 
+mod pkg;
+
 // The RISC-V implementation of the shared Dezh-core Host: capability check +
 // the side effect (kernel console). The Dezh-IR engine lives in dezh-core and
 // is identical across ISAs.
@@ -3745,6 +3747,41 @@ const COMMANDS: &[CommandSpec] = &[
         help: "installer v1: plan|check|run|verify|report|rollback|--dry-run",
     },
     CommandSpec {
+        name: "pkg-recv",
+        cap: cap::SPAWN,
+        cap_name: "SPAWN",
+        group: "Packages",
+        help: "receive a .dzp package over the UART (base64 lines, '.' ends)",
+    },
+    CommandSpec {
+        name: "pkg-list",
+        cap: cap::INSPECT,
+        cap_name: "INSPECT",
+        group: "Packages",
+        help: "list packages installed via pkg-recv",
+    },
+    CommandSpec {
+        name: "pkg-info",
+        cap: cap::INSPECT,
+        cap_name: "INSPECT",
+        group: "Packages",
+        help: "show a package's manifest grants (granted/denied)",
+    },
+    CommandSpec {
+        name: "pkg-run",
+        cap: cap::SPAWN,
+        cap_name: "SPAWN",
+        group: "Packages",
+        help: "run an installed package with exactly its installed grants",
+    },
+    CommandSpec {
+        name: "pkg-remove",
+        cap: cap::SPAWN,
+        cap_name: "SPAWN",
+        group: "Packages",
+        help: "remove an installed package (its grants go with it)",
+    },
+    CommandSpec {
         name: "apps",
         cap: cap::INSPECT,
         cap_name: "INSPECT",
@@ -4473,6 +4510,11 @@ fn dispatch(cmd: &str, arg: &str, plan: &KernelPlan, memory: &[MemoryRegion], he
             run_registered_virtio_client(plan, BLK_REQ_ROOT_STATUS, "");
         }
         "install" => install_command(plan, arg),
+        "pkg-recv" => pkg::pkg_recv(),
+        "pkg-list" => pkg::pkg_list(),
+        "pkg-info" => pkg::pkg_info(arg),
+        "pkg-run" => pkg::pkg_run(plan, arg),
+        "pkg-remove" => pkg::pkg_remove(arg),
         "apps" => print_apps(plan, arg),
         "app-info" => app_info(plan, arg),
         "app-install" => app_install(plan, arg),
