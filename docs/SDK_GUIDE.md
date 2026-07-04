@@ -68,8 +68,8 @@ This boots Dezh in QEMU, streams the package over the UART through the
 capability-gated console (`pkg-recv`), and runs it:
 
 ```
-[pkg] installed 'hello' 0.1.0 kind=dezh-ir payload=536 bytes
-[pkg] grants recorded at install time: print (kernel-enforced at run time)
+[pkg] installed 'hello' 0.1.0 kind=dezh-ir payload=536 bytes persistent_slot=0 state=Active
+[pkg] grants recorded at install time: print (kernel-enforced at run time; persisted on disk)
 --- pkg-run hello ---
   [ir] hello from a .dzp package!
   [ir] print -> 42
@@ -77,6 +77,9 @@ capability-gated console (`pkg-recv`), and runs it:
 
 At install the kernel: checks a CRC-32, statically verifies the bytecode
 (malformed programs never become runnable), and records the manifest grants.
+The package is committed transactionally to the disk-backed package store
+through the user-space `virtio-block` service, so `pkg-list` and `pkg-run` still
+work after reboot when the same disk image is used.
 
 ## 4. See the denial (2 minutes)
 
@@ -94,9 +97,21 @@ not in the program. That is the Dezh thesis in one demo.
 Boot interactively (`pwsh dezh-boot/scripts/console-test.ps1` or the QEMU
 one-liner in `dezh-boot/README.md`) and try:
 
-- `pkg-list` — installed packages and their grants
-- `pkg-info hello` — GRANTED vs DENIED for one package
+- `pkg-list` — package slots, state, checksums, and grants
+- `pkg-info hello` — state, GRANTED vs DENIED, blob range, runnable reason
+- `pkg-store` — registry checksum, journal status, slot counts, blob range
+- `pkg-journal` — active package transaction, if any
+- `pkg-recover` — explicit recovery/quarantine for interrupted transactions
+- `pkg-verify hello` — verify registry entry and persisted blob
+- `pkg-update hello` — upload a new `.dzp` for an Active package; new caps
+  are denied unless `--allow-new-caps` is explicit
+- `pkg-rollback hello` — restore the verified previous checkpoint, if present
+- `pkg-versions hello` — show active and previous checkpoint metadata
+- `pkg-review hello` — inspect caps, pin state, previous delta, and policy
+- `pkg-pin hello` / `pkg-unpin hello` — block or allow surprise lifecycle changes
 - `pkg-remove hello` — grants are revoked with the package
+- `pkg-gc` / `pkg-gc run` — plan or execute explicit physical cleanup for
+  logically removed package blobs
 - `audit` — install/run/deny events are recorded
 
 ## Capability vocabulary (v1)
@@ -123,8 +138,24 @@ W4 workstream.
 
 ## Honest limits (v1)
 
-- Package registry is in RAM: installs don't survive reboot yet (W6).
-- Payload arena is 128 KiB, 8 packages max; remove doesn't compact.
+- Package registry persists on the QEMU disk image; use `--persistent-disk`
+  with `tools/sdk/install_pkg.py` when you want to keep it across tool runs.
+- Install/remove is journaled in sectors 32..39. Interrupted installs are
+  rolled back or quarantined; interrupted removes complete as logical remove.
+- Updates are explicit and checkpointed: each slot has an Active blob,
+  a Previous blob for one verified rollback, and a Stage blob for promotion.
+- New capabilities during update require `pkg-update <name> --allow-new-caps`;
+  silent permission expansion is denied.
+- Pins block update/rollback until `pkg-unpin` or an explicit rollback force.
+- The v0 store has 8 package slots, each capped at 32 KiB of raw `.dzp` data.
+- `pkg-remove` is logical: grants are revoked immediately, but bytes are not
+  physically wiped until an explicit `pkg-gc run`.
+- `pkg-gc run` is the explicit physical cleanup path for `Removed` slots. It
+  refuses to run while a transaction journal is active/corrupt and never touches
+  `Active`, `Corrupt`, or `Quarantined` slots.
+- `pkg-fault` exists for deterministic QEMU recovery tests; it is not an app
+  API and does not grant extra authority.
+- Runtime payload cache is rebuilt lazily from disk after boot.
 - Dezh-IR linear memory is 256 bytes, programs ≤ 4 KiB — demo-scale on
   purpose; it keeps the verifier and engine small enough to review.
 - The reproducible test for everything on this page:

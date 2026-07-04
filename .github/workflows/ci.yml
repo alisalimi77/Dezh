@@ -65,6 +65,12 @@ jobs:
           --kernel dezh-boot/target/riscv64gc-unknown-none-elf/debug/dezh-boot
           --qemu qemu-system-riscv64
 
+      - name: Run SDK package install acceptance
+        run: >
+          python3 tools/ci/sdk_test.py
+          --kernel dezh-boot/target/riscv64gc-unknown-none-elf/debug/dezh-boot
+          --qemu qemu-system-riscv64
+
       - name: Build x86_64 kernel
         working-directory: dezh-boot-x86
         run: cargo build --locked

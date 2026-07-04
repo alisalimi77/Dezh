@@ -60,6 +60,13 @@ const REQ_APP_REQUIRE_VAULT: usize = 31;
 const REQ_APP_REMOVE_VAULT: usize = 32;
 const REQ_VAULT_SET: usize = 33;
 const REQ_VAULT_GET: usize = 34;
+const REQ_PKG_STORE_INIT: usize = 35;
+const REQ_PKG_REGISTRY_READ: usize = 36;
+const REQ_PKG_REGISTRY_WRITE: usize = 37;
+const REQ_PKG_BLOB_READ: usize = 38;
+const REQ_PKG_BLOB_WRITE: usize = 39;
+const REQ_PKG_JOURNAL_READ: usize = 40;
+const REQ_PKG_JOURNAL_WRITE: usize = 41;
 
 const IPC_PROTO_V1: usize = 0xd1;
 const IPC_SERVICE_VIRTIO_BLOCK: usize = 1;
@@ -120,6 +127,13 @@ const NOTE_PRIVATE_ROOT_SECTOR: u64 = 16;
 const LAB_PRIVATE_ROOT_SECTOR: u64 = 17;
 const CALC_PRIVATE_ROOT_SECTOR: u64 = 18;
 const VAULT_PRIVATE_ROOT_SECTOR: u64 = 19;
+const PKG_STORE_MARKER_SECTOR: u64 = 24;
+const PKG_REGISTRY_FIRST_SECTOR: u64 = 25;
+const PKG_REGISTRY_LAST_SECTOR: u64 = 31;
+const PKG_JOURNAL_FIRST_SECTOR: u64 = 32;
+const PKG_JOURNAL_LAST_SECTOR: u64 = 39;
+const PKG_BLOB_FIRST_SECTOR: u64 = 64;
+const PKG_BLOB_LAST_SECTOR: u64 = 1599;
 const VIRTQ_DESC_F_NEXT: u16 = 1;
 const VIRTQ_DESC_F_WRITE: u16 = 2;
 
@@ -615,6 +629,65 @@ fn daemon(dma_base: usize) -> ! {
             sys_print(b"  [virtio-blk-daemon] root-status: metadata read status=");
             sys_printnum(st as usize);
             send_status(from, word, status_from_io(st));
+        } else if op == REQ_PKG_STORE_INIT {
+            set_data(
+                b"DEZHPKGS v0 slots=8 registry=25..31 blob=64..575 slot_sectors=64",
+            );
+            let st = rw(dma_base, PKG_STORE_MARKER_SECTOR, true);
+            sys_print(b"  [virtio-blk-daemon] pkg-store-init status=");
+            sys_printnum(st as usize);
+            send_status(from, word, status_from_io(st));
+        } else if op == REQ_PKG_REGISTRY_READ {
+            if sector < PKG_REGISTRY_FIRST_SECTOR || sector > PKG_REGISTRY_LAST_SECTOR {
+                sys_print(b"  [virtio-blk-daemon] pkg-registry-read denied: sector out of range\n");
+                send_status(from, word, IPC_STATUS_DENIED);
+            } else {
+                let st = rw(dma_base, sector, false);
+                send_status(from, word, status_from_io(st));
+            }
+        } else if op == REQ_PKG_REGISTRY_WRITE {
+            if sector < PKG_REGISTRY_FIRST_SECTOR || sector > PKG_REGISTRY_LAST_SECTOR {
+                sys_print(b"  [virtio-blk-daemon] pkg-registry-write denied: sector out of range\n");
+                send_status(from, word, IPC_STATUS_DENIED);
+            } else {
+                copy_input(SECTOR_SIZE);
+                let st = rw(dma_base, sector, true);
+                send_status(from, word, status_from_io(st));
+            }
+        } else if op == REQ_PKG_BLOB_READ {
+            if sector < PKG_BLOB_FIRST_SECTOR || sector > PKG_BLOB_LAST_SECTOR {
+                sys_print(b"  [virtio-blk-daemon] pkg-blob-read denied: sector out of range\n");
+                send_status(from, word, IPC_STATUS_DENIED);
+            } else {
+                let st = rw(dma_base, sector, false);
+                send_status(from, word, status_from_io(st));
+            }
+        } else if op == REQ_PKG_BLOB_WRITE {
+            if sector < PKG_BLOB_FIRST_SECTOR || sector > PKG_BLOB_LAST_SECTOR {
+                sys_print(b"  [virtio-blk-daemon] pkg-blob-write denied: sector out of range\n");
+                send_status(from, word, IPC_STATUS_DENIED);
+            } else {
+                copy_input(SECTOR_SIZE);
+                let st = rw(dma_base, sector, true);
+                send_status(from, word, status_from_io(st));
+            }
+        } else if op == REQ_PKG_JOURNAL_READ {
+            if sector < PKG_JOURNAL_FIRST_SECTOR || sector > PKG_JOURNAL_LAST_SECTOR {
+                sys_print(b"  [virtio-blk-daemon] pkg-journal-read denied: sector out of range\n");
+                send_status(from, word, IPC_STATUS_DENIED);
+            } else {
+                let st = rw(dma_base, sector, false);
+                send_status(from, word, status_from_io(st));
+            }
+        } else if op == REQ_PKG_JOURNAL_WRITE {
+            if sector < PKG_JOURNAL_FIRST_SECTOR || sector > PKG_JOURNAL_LAST_SECTOR {
+                sys_print(b"  [virtio-blk-daemon] pkg-journal-write denied: sector out of range\n");
+                send_status(from, word, IPC_STATUS_DENIED);
+            } else {
+                copy_input(SECTOR_SIZE);
+                let st = rw(dma_base, sector, true);
+                send_status(from, word, status_from_io(st));
+            }
         } else if op == REQ_APP_AVAILABLE {
             sys_print(
                 b"  \x1b[36m[available] note\x1b[0m version=0.1.0 caps=PRINT,IPC storage=PrivateRoot\n",
@@ -1069,6 +1142,14 @@ fn client_request(daemon: usize, input_len: usize, req: usize) -> ! {
         || req == REQ_LAB_SET
         || req == REQ_CALC_SET
         || req == REQ_VAULT_SET
+    {
+        input_len
+    } else if req == REQ_PKG_REGISTRY_READ
+        || req == REQ_PKG_REGISTRY_WRITE
+        || req == REQ_PKG_BLOB_READ
+        || req == REQ_PKG_BLOB_WRITE
+        || req == REQ_PKG_JOURNAL_READ
+        || req == REQ_PKG_JOURNAL_WRITE
     {
         input_len
     } else {

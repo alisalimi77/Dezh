@@ -857,6 +857,7 @@ const VIRTIO_MMIO_STRIDE: usize = 0x1000;
 const VIRTIO_MMIO_COUNT: usize = 8;
 const VIRTIO_DMA_VA: usize = 0x5100_0000;
 const VIRTIO_DMA_SIZE: usize = 16 * 1024;
+const VIRTIO_DATA_OFF: usize = 8_192 + 16;
 const VIRTIO_INPUT_OFF: usize = 12_288;
 
 #[repr(align(4096))]
@@ -1377,13 +1378,8 @@ unsafe fn expire_recv_timeouts() {
                 FRAMES[i][F_SEPC] += 4;
                 FRAMES[i][F_A0] = IPC_STATUS_TIMEOUT;
                 FRAMES[i][F_A1] = usize::MAX;
-                FRAMES[i][F_A2] = typed_word(
-                    IPC_SERVICE_SYSTEM,
-                    IPC_OP_TIMEOUT,
-                    0,
-                    IPC_STATUS_TIMEOUT,
-                    0,
-                );
+                FRAMES[i][F_A2] =
+                    typed_word(IPC_SERVICE_SYSTEM, IPC_OP_TIMEOUT, 0, IPC_STATUS_TIMEOUT, 0);
                 TSTATE[i] = TaskState::Ready;
                 IPC_STATS.timeouts += 1;
             }
@@ -1728,7 +1724,9 @@ extern "C" fn utrap_handler(frame_ptr: *mut usize) -> *const usize {
                 }
                 SYS_RECV_TIMEOUT => {
                     if caps & TASK_IPC == 0 {
-                        kprintln!("  [kernel] DENIED recv-timeout: task {cur} holds no IPC capability");
+                        kprintln!(
+                            "  [kernel] DENIED recv-timeout: task {cur} holds no IPC capability"
+                        );
                         frame[F_A0] = SYS_DENIED;
                         return frame_ptr;
                     }
@@ -2177,6 +2175,13 @@ const BLK_REQ_APP_REQUIRE_VAULT: usize = 31;
 const BLK_REQ_APP_REMOVE_VAULT: usize = 32;
 const BLK_REQ_VAULT_SET: usize = 33;
 const BLK_REQ_VAULT_GET: usize = 34;
+const BLK_REQ_PKG_STORE_INIT: usize = 35;
+const BLK_REQ_PKG_REGISTRY_READ: usize = 36;
+const BLK_REQ_PKG_REGISTRY_WRITE: usize = 37;
+const BLK_REQ_PKG_BLOB_READ: usize = 38;
+const BLK_REQ_PKG_BLOB_WRITE: usize = 39;
+const BLK_REQ_PKG_JOURNAL_READ: usize = 40;
+const BLK_REQ_PKG_JOURNAL_WRITE: usize = 41;
 const IPC_PROTO_V1: usize = 0xd1;
 const IPC_SERVICE_SYSTEM: usize = 0;
 const IPC_STATUS_OK: usize = 0;
@@ -2278,7 +2283,11 @@ fn print_events() {
     unsafe {
         kprintln!("events:");
         kprintln!("  TICK   ACTOR      ACTION          TARGET          RESULT");
-        let start = if EVENT_COUNT == EVENT_CAP { EVENT_NEXT } else { 0 };
+        let start = if EVENT_COUNT == EVENT_CAP {
+            EVENT_NEXT
+        } else {
+            0
+        };
         let mut n = 0usize;
         while n < EVENT_COUNT {
             let idx = (start + n) % EVENT_CAP;
@@ -2302,13 +2311,17 @@ fn print_events() {
 fn print_audit() {
     kprintln!("audit summary:");
     kprintln!("  model: no ambient authority; important effects are event-recorded");
-    kprintln!("  tracked: install, app install/run/remove, service stop/restart/fault, denial demos");
+    kprintln!(
+        "  tracked: install, app install/run/remove, service stop/restart/fault, denial demos"
+    );
     print_events();
 }
 
 fn run_ipc_typed_demo() {
     if virtio_service_is_running() {
-        kprintln!("[typed-ipc] skipped: run before starting services to avoid disturbing daemon slot 0");
+        kprintln!(
+            "[typed-ipc] skipped: run before starting services to avoid disturbing daemon slot 0"
+        );
         print_ipcstat();
         return;
     }
@@ -2450,6 +2463,23 @@ fn prepare_virtio_input(text: &str) -> usize {
     n
 }
 
+fn prepare_virtio_input_bytes(bytes: &[u8]) {
+    let n = bytes.len().min(512);
+    unsafe {
+        let base = core::ptr::addr_of_mut!(VIRTIO_DMA) as *mut u8;
+        core::ptr::write_bytes(base.add(VIRTIO_INPUT_OFF), 0, 512);
+        core::ptr::copy_nonoverlapping(bytes.as_ptr(), base.add(VIRTIO_INPUT_OFF), n);
+    }
+}
+
+pub(crate) fn read_virtio_output_sector(out: &mut [u8]) {
+    let n = out.len().min(512);
+    unsafe {
+        let base = core::ptr::addr_of!(VIRTIO_DMA) as *const u8;
+        core::ptr::copy_nonoverlapping(base.add(VIRTIO_DATA_OFF), out.as_mut_ptr(), n);
+    }
+}
+
 fn run_virtio_no_grant_probe() {
     run_foreground_processes(&[ProcessSpec::new(
         VIRTIO_BLK_ELF,
@@ -2489,6 +2519,29 @@ fn run_registered_virtio_client_status(plan: &KernelPlan, req: usize, input: &st
     run_foreground_processes(&[
         ProcessSpec::new(VIRTIO_BLK_ELF, client_caps, BLK_OP_CLIENT_REQ)
             .args(daemon, input_len, req)
+            .virtio_dma(),
+    ]);
+    refresh_virtio_service_state();
+    unsafe { TEXIT[FIRST_FOREGROUND_TASK] }
+}
+
+pub(crate) fn run_registered_virtio_sector_status(
+    plan: &KernelPlan,
+    req: usize,
+    sector: usize,
+    input: Option<&[u8]>,
+) -> usize {
+    let Some(daemon) = ensure_virtio_block_service(plan) else {
+        kprintln!("[services] virtio-block unavailable; command failed cleanly");
+        return SYS_DENIED;
+    };
+    if let Some(bytes) = input {
+        prepare_virtio_input_bytes(bytes);
+    }
+    let client_caps = TASK_PRINT | TASK_IPC | TASK_BLOCK_READ | TASK_BLOCK_WRITE;
+    run_foreground_processes(&[
+        ProcessSpec::new(VIRTIO_BLK_ELF, client_caps, BLK_OP_CLIENT_REQ)
+            .args(daemon, sector, req)
             .virtio_dma(),
     ]);
     refresh_virtio_service_state();
@@ -2753,9 +2806,12 @@ fn app_deny(plan: &KernelPlan, arg: &str) {
         }
         "vault" => {
             kprintln!("[app-deny] vault has no direct block grant when launched without IPC");
-            run_foreground_processes(&[
-                ProcessSpec::new(VAULT_ELF, TASK_PRINT, VAULT_ROLE_DENY_BLOCK).args(daemon, 0, 0)
-            ]);
+            run_foreground_processes(&[ProcessSpec::new(
+                VAULT_ELF,
+                TASK_PRINT,
+                VAULT_ROLE_DENY_BLOCK,
+            )
+            .args(daemon, 0, 0)]);
             kprintln!("[app-deny] vault has no MMIO/device grant");
             run_foreground_processes(&[ProcessSpec::new(
                 VAULT_ELF,
@@ -2802,7 +2858,13 @@ fn progress(stage: usize, total: usize, label: &str, status: &str) {
         i += 1;
     }
     let s = core::str::from_utf8(&bar).unwrap_or("--------------------");
-    kprintln!("[{}] {:>3}%  {:<28} {}", s, stage * 100 / total, label, status);
+    kprintln!(
+        "[{}] {:>3}%  {:<28} {}",
+        s,
+        stage * 100 / total,
+        label,
+        status
+    );
 }
 
 fn install_verify(plan: &KernelPlan) {
@@ -2869,7 +2931,9 @@ fn install_command(plan: &KernelPlan, arg: &str) {
             run_registered_virtio_client(plan, BLK_REQ_PROLLBACK, "");
             record_event("installer", "install.rollback", "root-v1", "done");
         }
-        other => kprintln!("usage: install plan|check|run|verify|report|rollback|--dry-run (got '{other}')"),
+        other => kprintln!(
+            "usage: install plan|check|run|verify|report|rollback|--dry-run (got '{other}')"
+        ),
     }
 }
 
@@ -2935,12 +2999,17 @@ fn calc_command(plan: &KernelPlan, arg: &str) {
         kprintln!("usage: calc <n> <+|-|*|/> <n>");
         return;
     };
-    let (Some(a), Some(op), Some(b)) = (parse_usize_token(a_s), calc_op_token(op_s), parse_usize_token(b_s)) else {
+    let (Some(a), Some(op), Some(b)) = (
+        parse_usize_token(a_s),
+        calc_op_token(op_s),
+        parse_usize_token(b_s),
+    ) else {
         kprintln!("usage: calc <n> <+|-|*|/> <n>");
         return;
     };
-    run_foreground_processes(&[ProcessSpec::new(CALC_ELF, TASK_PRINT | TASK_IPC, CALC_ROLE_EVAL)
-        .args(op, a, b)]);
+    run_foreground_processes(&[
+        ProcessSpec::new(CALC_ELF, TASK_PRINT | TASK_IPC, CALC_ROLE_EVAL).args(op, a, b),
+    ]);
     if unsafe { TEXIT[FIRST_FOREGROUND_TASK] } == 0 {
         if let Some(result) = calc_eval(op, a, b) {
             let expr = format!("{} {} {} = {}", a_s, op_s, b_s, result);
@@ -3341,13 +3410,7 @@ extern "C" fn typed_ipc_service_task() -> ! {
     if utyped_op(word1) == IPC_OP_PING {
         vsend(
             from1,
-            utyped_word(
-                IPC_SERVICE_SYSTEM,
-                IPC_OP_PING,
-                1,
-                IPC_STATUS_OK,
-                0,
-            ),
+            utyped_word(IPC_SERVICE_SYSTEM, IPC_OP_PING, 1, IPC_STATUS_OK, 0),
         );
     } else {
         vsend(
@@ -3782,6 +3845,111 @@ const COMMANDS: &[CommandSpec] = &[
         help: "remove an installed package (its grants go with it)",
     },
     CommandSpec {
+        name: "pkg-store",
+        cap: cap::INSPECT,
+        cap_name: "INSPECT",
+        group: "Packages",
+        help: "inspect persistent package-store slots and blob range",
+    },
+    CommandSpec {
+        name: "pkg-journal",
+        cap: cap::INSPECT,
+        cap_name: "INSPECT",
+        group: "Packages",
+        help: "inspect the package transaction journal",
+    },
+    CommandSpec {
+        name: "pkg-recover",
+        cap: cap::SPAWN,
+        cap_name: "SPAWN",
+        group: "Packages",
+        help: "recover or quarantine an interrupted package transaction",
+    },
+    CommandSpec {
+        name: "pkg-verify",
+        cap: cap::INSPECT,
+        cap_name: "INSPECT",
+        group: "Packages",
+        help: "verify one package's registry entry and persisted blob",
+    },
+    CommandSpec {
+        name: "pkg-fault",
+        cap: cap::SPAWN,
+        cap_name: "SPAWN",
+        group: "Packages",
+        help: "inject a package transaction fault for reboot recovery tests",
+    },
+    CommandSpec {
+        name: "pkg-gc",
+        cap: cap::SPAWN,
+        cap_name: "SPAWN",
+        group: "Packages",
+        help: "explicitly wipe blobs for logically removed package slots",
+    },
+    CommandSpec {
+        name: "pkg-update",
+        cap: cap::SPAWN,
+        cap_name: "SPAWN",
+        group: "Packages",
+        help: "upload and transactionally update an Active package",
+    },
+    CommandSpec {
+        name: "pkg-rollback",
+        cap: cap::SPAWN,
+        cap_name: "SPAWN",
+        group: "Packages",
+        help: "restore a verified previous package checkpoint",
+    },
+    CommandSpec {
+        name: "pkg-versions",
+        cap: cap::INSPECT,
+        cap_name: "INSPECT",
+        group: "Packages",
+        help: "show active and previous package versions",
+    },
+    CommandSpec {
+        name: "pkg-review",
+        cap: cap::INSPECT,
+        cap_name: "INSPECT",
+        group: "Packages",
+        help: "review package caps, pin state, and lifecycle policy",
+    },
+    CommandSpec {
+        name: "pkg-pin",
+        cap: cap::SPAWN,
+        cap_name: "SPAWN",
+        group: "Packages",
+        help: "pin a package against surprise update/rollback",
+    },
+    CommandSpec {
+        name: "pkg-unpin",
+        cap: cap::SPAWN,
+        cap_name: "SPAWN",
+        group: "Packages",
+        help: "remove a package pin after explicit review",
+    },
+    CommandSpec {
+        name: "pkg-retire",
+        cap: cap::SPAWN,
+        cap_name: "SPAWN",
+        group: "Packages",
+        help: "logically retire a package; physical cleanup remains explicit",
+    },
+    CommandSpec {
+        name: "pkg-lifecycle",
+        cap: cap::INSPECT,
+        cap_name: "INSPECT",
+        group: "Packages",
+        help: "summarize package lifecycle counts and policy",
+    },
+    CommandSpec {
+        name: "pkg-audit",
+        cap: cap::INSPECT,
+        cap_name: "INSPECT",
+        group: "Packages",
+        help: "show where package lifecycle audit evidence is recorded",
+    },
+    CommandSpec {
         name: "apps",
         cap: cap::INSPECT,
         cap_name: "INSPECT",
@@ -4137,7 +4305,8 @@ fn cap_names(set: u32) -> &'static str {
 
 fn print_help(held: u32) {
     const GROUPS: &[&str] = &[
-        "Inspect", "Storage", "Install", "Apps", "Services", "Audit", "Safety", "Demos", "Power",
+        "Inspect", "Storage", "Install", "Packages", "Apps", "Services", "Audit", "Safety",
+        "Demos", "Power",
     ];
     kprintln!("commands (cap required -> held?):");
     for group in GROUPS {
@@ -4183,6 +4352,26 @@ fn print_command_help(name: &str, held: u32) {
 fn command_usage<'a>(name: &'a str) -> &'a str {
     match name {
         "install" => "install plan|check|run|verify|report|rollback|--dry-run",
+        "pkg-info" => "pkg-info <name>",
+        "pkg-run" => "pkg-run <name>",
+        "pkg-remove" => "pkg-remove <name>",
+        "pkg-store" => "pkg-store",
+        "pkg-journal" => "pkg-journal",
+        "pkg-recover" => "pkg-recover",
+        "pkg-verify" => "pkg-verify <name>",
+        "pkg-fault" => {
+            "pkg-fault <install-after-blob|install-pending-registry|remove-pending|corrupt-journal>"
+        }
+        "pkg-gc" => "pkg-gc [plan|run]",
+        "pkg-update" => "pkg-update <name> [--allow-new-caps]",
+        "pkg-rollback" => "pkg-rollback <name> [--force]",
+        "pkg-versions" => "pkg-versions <name>",
+        "pkg-review" => "pkg-review <name>",
+        "pkg-pin" => "pkg-pin <name>",
+        "pkg-unpin" => "pkg-unpin <name>",
+        "pkg-retire" => "pkg-retire <name>",
+        "pkg-lifecycle" => "pkg-lifecycle",
+        "pkg-audit" => "pkg-audit <name>",
         "calc" => "calc <n> <+|-|*|/> <n>",
         "vault-put" => "vault-put <text>",
         "app-permissions" => "app-permissions <note|lab|calc|vault>",
@@ -4336,7 +4525,9 @@ fn print_caps_why(arg: &str) {
             kprintln!("  installer path uses: registered virtio-block service");
             kprintln!("  service owns: DEVICE_VIRTIO_BLK DMA BLOCK_READ BLOCK_WRITE");
         }
-        _ => kprintln!("caps why: try `caps why install run`, `caps why app-run lab`, or `caps why note-get`"),
+        _ => kprintln!(
+            "caps why: try `caps why install run`, `caps why app-run lab`, or `caps why note-get`"
+        ),
     }
 }
 
@@ -4510,11 +4701,26 @@ fn dispatch(cmd: &str, arg: &str, plan: &KernelPlan, memory: &[MemoryRegion], he
             run_registered_virtio_client(plan, BLK_REQ_ROOT_STATUS, "");
         }
         "install" => install_command(plan, arg),
-        "pkg-recv" => pkg::pkg_recv(),
-        "pkg-list" => pkg::pkg_list(),
-        "pkg-info" => pkg::pkg_info(arg),
+        "pkg-recv" => pkg::pkg_recv(plan),
+        "pkg-list" => pkg::pkg_list(plan),
+        "pkg-info" => pkg::pkg_info(plan, arg),
         "pkg-run" => pkg::pkg_run(plan, arg),
-        "pkg-remove" => pkg::pkg_remove(arg),
+        "pkg-remove" => pkg::pkg_remove(plan, arg),
+        "pkg-store" => pkg::pkg_store(plan),
+        "pkg-journal" => pkg::pkg_journal(plan),
+        "pkg-recover" => pkg::pkg_recover(plan),
+        "pkg-verify" => pkg::pkg_verify(plan, arg),
+        "pkg-fault" => pkg::pkg_fault(plan, arg),
+        "pkg-gc" => pkg::pkg_gc(plan, arg),
+        "pkg-update" => pkg::pkg_update(plan, arg),
+        "pkg-rollback" => pkg::pkg_rollback(plan, arg),
+        "pkg-versions" => pkg::pkg_versions(plan, arg),
+        "pkg-review" => pkg::pkg_review(plan, arg),
+        "pkg-pin" => pkg::pkg_pin(plan, arg, true),
+        "pkg-unpin" => pkg::pkg_pin(plan, arg, false),
+        "pkg-retire" => pkg::pkg_retire(plan, arg),
+        "pkg-lifecycle" => pkg::pkg_lifecycle(plan),
+        "pkg-audit" => pkg::pkg_audit(plan, arg),
         "apps" => print_apps(plan, arg),
         "app-info" => app_info(plan, arg),
         "app-install" => app_install(plan, arg),

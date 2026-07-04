@@ -27,7 +27,7 @@ DEFAULT_KERNEL = (
     REPO / "dezh-boot" / "target" / "riscv64gc-unknown-none-elf" / "debug" / "dezh-boot"
 )
 
-CHUNK_RAW_BYTES = 60  # 60 raw -> 80 base64 chars, well under the console line cap
+CHUNK_RAW_BYTES = 30  # 30 raw -> 40 base64 chars; conservative for QEMU UART pipes
 
 
 class QemuConsole:
@@ -82,10 +82,15 @@ class QemuConsole:
                 self.proc.kill()
 
 
-def upload_package(console: QemuConsole, package: Path) -> None:
+def upload_package(
+    console: QemuConsole,
+    package: Path,
+    command: str = "pkg-recv",
+    success: str = "[pkg] installed",
+) -> None:
     data = package.read_bytes()
-    mark = console.send_line("pkg-recv")
-    console.wait_for("[pkg-recv] ready", since=mark)
+    mark = console.send_line(command)
+    console.wait_for(f"[{command.split()[0]}] ready", since=mark)
     sent = 0
     for i in range(0, len(data), CHUNK_RAW_BYTES):
         chunk = base64.b64encode(data[i : i + CHUNK_RAW_BYTES]).decode("ascii")
@@ -95,9 +100,9 @@ def upload_package(console: QemuConsole, package: Path) -> None:
     mark = console.send_line(".")
     end = console.wait_for("dezh> ", since=mark)
     window = console.text()[mark:end]
-    if "[pkg] installed" not in window:
-        raise RuntimeError(f"install rejected:\n{window}")
-    print(f"install-pkg: installed {package.name} ({len(data)} bytes)")
+    if success not in window:
+        raise RuntimeError(f"package command rejected:\n{window}")
+    print(f"install-pkg: {command} accepted {package.name} ({len(data)} bytes)")
 
 
 def main() -> int:
@@ -115,6 +120,11 @@ def main() -> int:
     )
     parser.add_argument("--transcript", action="store_true", help="print the full transcript")
     parser.add_argument("--timeout", type=float, default=60.0)
+    parser.add_argument(
+        "--persistent-disk",
+        type=Path,
+        help="use this raw disk image instead of a temporary one; create it if missing",
+    )
     args = parser.parse_args()
 
     if not args.kernel.exists():
@@ -129,9 +139,18 @@ def main() -> int:
             print(f"install-pkg: no such package {package}", file=sys.stderr)
             return 2
 
-    disk = tempfile.NamedTemporaryFile(prefix="dezh-disk-", suffix=".img", delete=False)
-    disk.truncate(2 * 1024 * 1024)
-    disk.close()
+    delete_disk = args.persistent_disk is None
+    if args.persistent_disk is not None:
+        args.persistent_disk.parent.mkdir(parents=True, exist_ok=True)
+        if not args.persistent_disk.exists():
+            with args.persistent_disk.open("wb") as fh:
+                fh.truncate(2 * 1024 * 1024)
+        disk_name = str(args.persistent_disk)
+    else:
+        disk = tempfile.NamedTemporaryFile(prefix="dezh-disk-", suffix=".img", delete=False)
+        disk.truncate(2 * 1024 * 1024)
+        disk.close()
+        disk_name = disk.name
 
     console = QemuConsole(
         [
@@ -140,7 +159,7 @@ def main() -> int:
             "-nographic",
             "-bios", "default",
             "-kernel", str(args.kernel),
-            "-drive", f"file={disk.name},format=raw,if=none,id=dezhdisk",
+            "-drive", f"file={disk_name},format=raw,if=none,id=dezhdisk",
             "-device", "virtio-blk-device,drive=dezhdisk",
         ],
         timeout=args.timeout,
@@ -172,7 +191,8 @@ def main() -> int:
         return 1
     finally:
         console.stop()
-        Path(disk.name).unlink(missing_ok=True)
+        if delete_disk:
+            Path(disk_name).unlink(missing_ok=True)
 
     if args.transcript:
         print(console.text())
