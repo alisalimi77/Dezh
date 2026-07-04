@@ -1,63 +1,94 @@
 # Dezh OS
 
-Dezh OS is a capability-secure operating-system research prototype. Its core
-rule is simple: no program, service, driver, or app starts with ambient
-authority. Every effect requires an explicit capability or grant.
+[![CI](https://github.com/alisalimi77/Dezh/actions/workflows/ci.yml/badge.svg)](https://github.com/alisalimi77/Dezh/actions/workflows/ci.yml)
 
-The current bare-metal prototype boots on QEMU RISC-V, validates a boot
-contract, starts a capability-scoped console, runs isolated U-mode processes,
-launches a long-lived user-space virtio-block driver, installs small apps
-through a disk-backed registry, and exercises typed IPC plus service
-supervision.
+**Repository description:** Intent-native, capability-secure OS research prototype with user-space drivers, typed IPC, transactional package lifecycle, and reboot-safe QEMU demos.
 
-This repository is not a production operating system. It is a working research
-artifact intended for technical review.
+Dezh OS is a bare-metal operating-system research prototype. Its design rule is
+deliberately strict:
+
+> No program, app, service, package, driver, or recovery path starts with
+> ambient authority. Every effect must be backed by an explicit capability,
+> grant, namespace, service route, or transaction.
+
+The current prototype boots on QEMU RISC-V, validates a boot contract, runs
+isolated U-mode processes, starts a long-lived user-space `virtio-block`
+driver, exercises typed IPC, installs SDK-built `.dzp` packages onto a real
+disk image, and validates package update/rollback/recovery across reboot.
+
+This is not a production operating system. It is a working research artifact
+intended for technical review.
+
+## Why Dezh Exists
+
+Many systems treat files, processes, packages, services, or users as the main
+security boundary. Dezh is exploring a tighter model:
+
+- **Intent-scoped authority:** grant the narrow effect, not broad ambient access.
+- **Effect accountability:** important state changes should be inspectable,
+  recoverable, and tied to an explicit actor and route.
+- **Service-mediated persistence:** storage flows through a user-space service,
+  not a hidden kernel block path.
+- **No silent lifecycle changes:** package updates, new capabilities, rollback,
+  remove, and physical cleanup are explicit.
+
+The long-term thesis is:
+
+**Dezh is an intent-native, effect-accountable OS prototype.**
 
 ## What Works Today
 
 - Bare-metal RISC-V boot on QEMU `virt` in S-mode through OpenSBI.
-- Sv39 process isolation with U-mode page faults contained to the faulting task.
-- Explicit task capabilities for print, time, IPC, device, and block access.
+- x86_64 smoke path for the shared Dezh IR runtime.
+- Sv39 U-mode process isolation and contained page faults.
+- Capability-gated syscalls for print, time, IPC, device, and block access.
 - User-space `virtio-block` daemon with explicit MMIO and DMA grants.
-- Typed IPC v0 with status codes, request IDs, timeout support, and counters.
+- Typed IPC v0 with status codes, request ids, timeouts, and counters.
 - Boot-managed service registry with stop, restart, and controlled fault demo.
-- Disk-backed install/root marker and app registry v0.
-- Installable demo apps: `note` and `lab`.
-- Storage path through the registered user-space block service, not a hidden
-  kernel block driver.
-- x86_64 boot smoke that validates the shared Dezh IR path.
+- Reboot-safe package store for SDK-built `.dzp` apps.
+- Transactional package install/remove/update/rollback with journal recovery.
+- Package pin/unpin, review, explicit GC, quarantine, and cap-escalation review.
+- Embedded demo apps: `note`, `lab`, `calc`, and `vault`.
+- No-grant MMIO proof: a task without device grant faults without killing the console.
 
-## Architecture Thesis
+## System Shape
 
-Dezh explores an OS design where authority is never inherited by default. The
-kernel owns only the confinement boundary, address-space setup, syscall gates,
-IPC, and service supervision. Device access and persistent storage are delegated
-to user-space services through explicit grants.
+```mermaid
+flowchart LR
+    Console["Capability-scoped console"] --> Client["Foreground client task"]
+    Client -->|typed IPC| VBlk["U-mode virtio-block daemon"]
+    VBlk -->|explicit MMIO + DMA grants| Disk["QEMU raw disk image"]
 
-The current prototype focuses on these pillars:
+    Kernel["Small kernel boundary"] --> Console
+    Kernel --> Client
+    Kernel --> VBlk
+    Kernel --> Registry["Service registry"]
+    Registry --> VBlk
 
-- **No ambient authority:** effects require explicit caps.
-- **User-space drivers:** virtio-block runs as a separate U-mode process.
-- **Typed IPC:** services reply with structured status rather than raw scalar
-  success/failure conventions.
-- **Service supervision:** critical daemons can stop, fault, and restart without
-  killing the console.
-- **Transactional install path:** app installation is registry-backed and
-  service-mediated.
-- **Rollback-oriented storage:** the v0 root path keeps current and previous
-  durable values.
+    SDK["SDK .dzp package"] --> Pkg["Transactional package store"]
+    Pkg -->|service-mediated sectors| VBlk
+    Pkg --> App["U-mode app / Dezh-IR app"]
+```
+
+More diagrams: [docs/ARCHITECTURE_DIAGRAMS.md](docs/ARCHITECTURE_DIAGRAMS.md)
 
 ## Quick Review Path
 
 Prerequisites:
 
-- Rust stable with targets:
-  - `wasm32-unknown-unknown`
-  - `riscv64gc-unknown-none-elf`
-  - `x86_64-unknown-none`
+- Rust stable
+- Python 3.10+
 - QEMU:
   - `qemu-system-riscv64`
   - `qemu-system-x86_64`
+
+Install Rust targets:
+
+```sh
+rustup target add wasm32-unknown-unknown
+rustup target add riscv64gc-unknown-none-elf
+rustup target add x86_64-unknown-none
+```
 
 Run host tests:
 
@@ -83,10 +114,12 @@ python tools/ci/qemu_smoke.py riscv64 \
   --qemu qemu-system-riscv64
 ```
 
-Run the external-review demo and write a transcript:
+Run the SDK package lifecycle acceptance test:
 
 ```sh
-python tools/demo/run_review_demo.py   --qemu-riscv qemu-system-riscv64   --transcript docs/demo-transcript-riscv64.md
+python tools/ci/sdk_test.py \
+  --kernel dezh-boot/target/riscv64gc-unknown-none-elf/debug/dezh-boot \
+  --qemu qemu-system-riscv64
 ```
 
 Run the public hygiene scan:
@@ -102,62 +135,99 @@ Inside the RISC-V console:
 ```text
 version
 about
+status
+services
+tasks
 ipc-typed-demo
 ipcstat
-services
-install --dry-run
 install run
 apps installed
-app-permissions lab
 app-run lab
 calc 7 + 5
-calc-history
 vault-put demo-secret
 vault-get
-app-deny vault
-svc-stop virtio-block
-read
-svc-restart virtio-block
-write recovered
-read
-svc-fault-demo virtio-block
-read
-svc-restart virtio-block
+pkg-list
+pkg-store
+pkg-review hello
+pkg-versions hello
+pkg-gc
 bench-all
 halt
 ```
 
-These commands demonstrate typed IPC, service-mediated app storage, app launch,
-multi-app installation, no-grant denial, clean service unavailability, explicit
-restart, service fault recovery, and a small terminal control surface for
-reviewing runtime state.
+The SDK acceptance test covers the deeper package lifecycle:
+
+- install `.dzp`
+- reboot and run again
+- deny undeclared capability
+- transactional remove
+- recover interrupted journal states
+- quarantine suspicious state
+- reject corrupt journal until explicit recovery
+- update package
+- deny silent cap escalation
+- allow cap escalation only with an explicit flag
+- rollback to previous checkpoint
+- pin/unpin lifecycle changes
+- explicit physical cleanup with `pkg-gc run`
+
+## Repository Map
+
+See [docs/REPO_STRUCTURE.md](docs/REPO_STRUCTURE.md) for the full map.
+
+High-level layout:
+
+| Path | Purpose |
+| --- | --- |
+| `dezh-boot/` | RISC-V bare-metal kernel, console, services, package store, demo apps |
+| `dezh-boot/virtio-blk/` | User-space virtio-block daemon ELF |
+| `dezh-boot-x86/` | x86_64 smoke target |
+| `dezh-core/` | Shared `.dzp`, base64, and Dezh-IR support |
+| `dezh-kernel/` | Boot contract and kernel plan validation |
+| `dezh-cairn/` | Host-side persistent object/ref prototype |
+| `dezh-ir/` | Shared intermediate representation contracts |
+| `tools/ci/` | QEMU smoke and SDK lifecycle acceptance |
+| `tools/sdk/` | `.dzp` package builder and installer |
+| `tools/demo/` | Review/demo transcript runners |
+| `tools/review/` | Public review package and hygiene tooling |
+| `docs/` | Architecture, security model, roadmap, diagrams, review docs |
 
 ## Documentation
 
-- [Whitepaper](docs/WHITEPAPER.md)
 - [Architecture](docs/ARCHITECTURE.md)
+- [Architecture diagrams](docs/ARCHITECTURE_DIAGRAMS.md)
 - [Security model](docs/SECURITY_MODEL.md)
-- [Demo script](docs/DEMO_SCRIPT.md)
+- [Strategic direction](docs/STRATEGIC_DIRECTION.md)
+- [SDK guide](docs/SDK_GUIDE.md)
 - [Reviewer guide](docs/REVIEWER_GUIDE.md)
+- [Demo script](docs/DEMO_SCRIPT.md)
+- [Whitepaper](docs/WHITEPAPER.md)
 - [Roadmap](docs/ROADMAP.md)
 - [Architecture decisions](docs/DECISIONS.md)
-- [Outreach templates](docs/OUTREACH.md)
+- [Repo structure](docs/REPO_STRUCTURE.md)
 
 ## Current Limitations
 
-- RISC-V is the primary bare-metal target; x86_64 currently has a smaller smoke
-  path.
-- The block driver uses virtio-mmio legacy mode in QEMU.
-- DMA isolation is modeled through page-table discipline and fixed grants; a
-  real IOMMU path is future work.
-- App bundles are embedded in the kernel image for v0.
-- Registry hashes are deterministic v0 markers, not production cryptographic
-  package signatures.
-- The installer initializes a simple disk layout; it is not a full production
-  boot media installer yet.
+- RISC-V QEMU is the primary bare-metal target today.
+- x86_64 currently validates a smaller smoke path.
+- The block driver uses QEMU legacy virtio-mmio.
+- DMA isolation is modeled through page-table discipline and fixed grants; real
+  IOMMU integration is future work.
+- Package checksums are deterministic v0 checks, not production signatures.
+- App bundles and package limits are intentionally small for reviewability.
+- The installer initializes a prototype disk layout; it is not a production boot
+  media installer yet.
+- Formal verification, side-channel hardening, production networking, graphics,
+  and real hardware bring-up are out of scope for the current prototype.
 
-## Review Goal
+## Project Status
 
-The goal of this repository state is technical feedback: architecture review,
-security-model critique, demo reproducibility, and discussion of use cases such
-as secure devices, cloud sandboxes, agent runtimes, and service-isolated systems.
+Dezh is ready for architectural review as a research prototype. The most useful
+feedback areas are:
+
+- capability and authority model clarity
+- whether the user-space driver boundary is in the right place
+- typed IPC/service contract shape
+- package lifecycle and recovery semantics
+- how to turn intent/effect accountability into a stronger OS primitive
+- gaps before a serious external review package

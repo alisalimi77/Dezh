@@ -1,4 +1,23 @@
-# Dezh OS Architecture v0
+# Dezh Architecture
+
+Dezh is a bare-metal OS research prototype focused on explicit authority,
+service-mediated effects, and recoverable lifecycle operations.
+
+For visual diagrams, see [ARCHITECTURE_DIAGRAMS.md](ARCHITECTURE_DIAGRAMS.md).
+
+## Design Center
+
+The current prototype is built around four rules:
+
+1. No ambient authority by default.
+2. Device and storage access are service-mediated.
+3. Persistent lifecycle changes are transactional and recoverable.
+4. Runtime state should be inspectable by reviewers from the console and tests.
+
+The strategic direction is to make **intent** and **effect** first-class OS
+concepts. The current implementation is not fully intent-native yet, but the
+package, service, IPC, and storage work is deliberately moving toward that
+shape.
 
 ## Boot Flow
 
@@ -6,22 +25,25 @@
 2. The kernel validates the boot contract from `dezh-kernel`.
 3. The kernel installs trap handling, timer support, and Sv39 paging.
 4. A capability-scoped console starts over UART.
-5. Services are declared from the boot plan and materialized in the runtime
-   service registry.
+5. Services are declared from the boot plan and materialized in the service
+   registry.
+6. Long-lived services such as `virtio-block` are started explicitly or lazily
+   from the registry.
 
 ## Kernel Responsibilities
 
-The kernel is intentionally small in scope:
+The kernel owns the confinement boundary:
 
-- page-table and address-space setup
+- address-space construction
 - trap and syscall handling
 - task scheduling
 - IPC queues and typed receive timeout support
 - service registry state
 - explicit process launch grants
+- frame ownership and reclaim
 - fault containment for U-mode tasks
 
-The kernel does not perform the current block I/O path directly.
+The kernel does not implement the current block I/O path directly.
 
 ## Process Model
 
@@ -39,7 +61,7 @@ they stop, fault, or are explicitly restarted.
 
 ## Capability Model
 
-Task capability bits currently include:
+Task capability bits currently cover:
 
 - print
 - time
@@ -49,27 +71,32 @@ Task capability bits currently include:
 - block write
 
 The important property is attenuation: a task can only transfer capabilities it
-already holds.
+already holds. Manifest-declared package capabilities are separately translated
+into runtime grants.
 
 ## IPC
 
 The base IPC syscall sends a small payload, a scalar word, and an attenuated
-capability grant. The typed service path packs a v0 envelope into the scalar
-word:
+capability grant. Service paths pack a typed v0 envelope into the scalar word:
 
 ```text
 proto | service_id | op | request_id | status | arg
 ```
 
-Existing demos can still use raw scalar messages. Storage, installer, and app
-service paths use typed replies.
+Storage, installer, app, and package paths use typed replies. Legacy demos can
+still use raw scalar messages.
 
 ## User-Space Block Driver
 
-The `virtio-block` daemon is a separate U-mode ELF. It alone receives the
-virtio-mmio page and DMA window grants. Clients do not receive MMIO access. A
-no-grant process touching the MMIO address faults and is killed without killing
-the console.
+The `virtio-block` daemon is a separate U-mode ELF. It alone receives:
+
+- the virtio MMIO page grant
+- the DMA window grant
+- IPC authority
+- block read/write authority
+
+Foreground clients do not receive MMIO authority. A no-grant process touching
+the MMIO address faults and is killed without killing the console.
 
 The daemon handles:
 
@@ -77,7 +104,8 @@ The daemon handles:
 - block write/read
 - root install marker and metadata
 - Cairn-style current/previous value operations
-- app registry operations
+- embedded app registry operations
+- package registry, journal, and blob sectors
 - note/lab/calc/vault private storage
 - stop and controlled fault demo
 
@@ -96,30 +124,39 @@ The service registry tracks:
 - last started tick
 - fault reason
 
-The `virtio-block` service is intentionally not auto-restarted after manual stop
-or fault. `svc-restart virtio-block` is explicit to keep review behavior
+Manual stop and controlled fault are not hidden by automatic restart. Review
+commands use explicit `svc-restart` so service recovery remains visible and
 deterministic.
 
-## App Registry
+## Package Store
 
-The v0 app registry is disk-backed and service-mediated. App commands resolve
-the registered block service, launch foreground clients, and rely on typed IPC
-status. The app binaries are embedded in the image for this prototype.
+The SDK builds `.dzp` packages. The OS stores them through the user-space block
+service, not through a kernel block path.
+
+Current package features:
+
+- persistent registry on disk
+- transaction journal
+- active, previous, and stage blob areas
+- install/remove/update/rollback
+- recovery and quarantine
+- pin/unpin
+- cap-escalation review
+- explicit physical cleanup through `pkg-gc run`
+
+Only `Active` packages are runnable. `Removed`, `Corrupt`, `Pending*`, and
+`Quarantined` packages do not run.
+
+## Embedded Apps
 
 The current embedded app set is intentionally mixed:
 
-- `note`: a small persistent text app.
-- `lab`: a UI-like multi-task app that launches cooperating workers and writes
-  completion state through the service path.
-- `calc`: an installed calculator app that computes in U-mode and stores the
-  last result through its private registry sector.
-- `vault`: a private-value app used to exercise app storage and direct-device
-  denial.
+- `note`: persistent text app
+- `lab`: UI-like multi-task app with cooperating workers
+- `calc`: calculator app with stored last result
+- `vault`: private-value app used to exercise storage and device-denial paths
 
-The console exposes review-oriented control-surface commands such as `install
-run`, `apps installed`, `app-permissions`, `events`, `audit`, `calc`, and
-`vault-get` so reviewers can inspect state transitions instead of reading only
-boot logs.
+These are review demos, not a production app ecosystem.
 
 ## Storage Path
 
@@ -130,5 +167,27 @@ console command -> foreground client -> typed IPC -> virtio-block daemon
                -> granted MMIO/DMA -> disk image
 ```
 
-This is the core review path for proving that storage does not silently fall
-back to a kernel block driver.
+This path is central to the project. It proves that storage does not silently
+fall back to a kernel block driver.
+
+## Review Surface
+
+Useful review commands:
+
+- `services`
+- `tasks`
+- `ipcstat`
+- `ipc-typed-demo`
+- `pkg-store`
+- `pkg-journal`
+- `pkg-review <name>`
+- `pkg-versions <name>`
+- `pkg-gc`
+- `bench-all`
+
+Useful review tools:
+
+- `tools/ci/qemu_smoke.py`
+- `tools/ci/sdk_test.py`
+- `tools/review/scan_public.py`
+- `tools/demo/run_review_demo.py`
