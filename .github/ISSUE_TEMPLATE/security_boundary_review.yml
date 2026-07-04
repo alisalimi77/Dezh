@@ -1,0 +1,37 @@
+name: Security Boundary Review
+description: Ask for review of a capability, isolation, package, IPC, or service boundary.
+title: "security-boundary: "
+labels: ["security-review"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Do not disclose exploitable vulnerabilities here. Use SECURITY.md for private reports.
+  - type: textarea
+    id: boundary
+    attributes:
+      label: Boundary
+      description: Which boundary should be reviewed?
+    validations:
+      required: true
+  - type: textarea
+    id: intended
+    attributes:
+      label: Intended Invariant
+      description: What should never happen?
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Current Evidence
+      description: Link to code, docs, tests, or transcript.
+    validations:
+      required: true
+  - type: textarea
+    id: questions
+    attributes:
+      label: Review Questions
+      description: What should reviewers focus on?
+    validations:
+      required: true

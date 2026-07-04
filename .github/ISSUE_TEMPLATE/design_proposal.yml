@@ -1,0 +1,40 @@
+name: Design Proposal
+description: Propose an architectural change.
+title: "design: "
+labels: ["design"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What capability, lifecycle, IPC, service, or package problem does this solve?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposal
+      description: Describe the design.
+    validations:
+      required: true
+  - type: textarea
+    id: authority
+    attributes:
+      label: Authority Model
+      description: Which capabilities, grants, namespaces, or service routes are introduced or changed?
+    validations:
+      required: true
+  - type: textarea
+    id: failure
+    attributes:
+      label: Failure Model
+      description: How does the design fail cleanly? What is denied, rolled back, quarantined, or faulted?
+    validations:
+      required: true
+  - type: textarea
+    id: tests
+    attributes:
+      label: Acceptance Tests
+      description: List concrete tests or transcripts that would prove the design.
+    validations:
+      required: true

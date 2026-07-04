@@ -128,6 +128,12 @@ Run the public hygiene scan:
 python tools/review/scan_public.py
 ```
 
+Run the consolidated review suite:
+
+```sh
+python tools/review/run_full_review.py --quick
+```
+
 ## Console Commands Worth Reviewing
 
 Inside the RISC-V console:
@@ -194,6 +200,9 @@ High-level layout:
 
 ## Documentation
 
+- [Documentation index](docs/INDEX.md)
+- [Getting started](docs/GETTING_STARTED.md)
+- [Build and run](docs/BUILD_AND_RUN.md)
 - [Architecture](docs/ARCHITECTURE.md)
 - [Architecture diagrams](docs/ARCHITECTURE_DIAGRAMS.md)
 - [Security model](docs/SECURITY_MODEL.md)
@@ -205,6 +214,16 @@ High-level layout:
 - [Roadmap](docs/ROADMAP.md)
 - [Architecture decisions](docs/DECISIONS.md)
 - [Repo structure](docs/REPO_STRUCTURE.md)
+- [FAQ](docs/FAQ.md)
+- [Release notes](docs/RELEASE_NOTES.md)
+
+## Governance
+
+- [License](LICENSE)
+- [Security policy](SECURITY.md)
+- [Contributing](CONTRIBUTING.md)
+- [Code of conduct](CODE_OF_CONDUCT.md)
+- [Changelog](CHANGELOG.md)
 
 ## Current Limitations
 

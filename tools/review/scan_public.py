@@ -12,6 +12,13 @@ ROOT = Path(__file__).resolve().parents[2]
 
 PUBLIC_PATHS = [
     ROOT / "README.md",
+    ROOT / "LICENSE",
+    ROOT / "NOTICE",
+    ROOT / "SECURITY.md",
+    ROOT / "CONTRIBUTING.md",
+    ROOT / "CODE_OF_CONDUCT.md",
+    ROOT / "CHANGELOG.md",
+    ROOT / ".github",
     ROOT / "docs",
     ROOT / "tools" / "demo",
     ROOT / "tools" / "review",
@@ -45,6 +52,10 @@ def iter_files() -> list[Path]:
             files.append(path)
         elif path.is_dir():
             for child in path.rglob("*"):
+                if "__pycache__" in child.parts:
+                    continue
+                if child.suffix in {".pyc", ".pyo"}:
+                    continue
                 if child.is_file():
                     files.append(child)
     return sorted(files)
