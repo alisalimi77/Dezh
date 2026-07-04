@@ -51,6 +51,18 @@ Every claim follows D015: measured, honestly scoped, no bare superlatives.
 - `cairn-demo` console flow proving F2 end to end.
 - Acceptance: F2 transcript reproducible by the demo runner.
 
+Status (2026-07-04): core landed. Commit-log store on sectors 1600..1855
+(superblock + append-only commit records carrying parent ref, FNV-1a object
+hash, actor task id, and a reversibility flag — the D020 effect-ledger seed).
+Namespace access is enforced by kernel task-capability bits 8..15: the kernel
+attests the sender's caps on every IPC recv and the storage daemon checks the
+requested namespace's bit, with an explainable denial message. Console:
+`cairn-commit/get/log/rollback/verify/status` + `cairn-demo`; rollback moves
+the head ref and keeps history. Covered by CI smoke (including a second-boot
+persistence phase) and the review demo runner. Remaining for W2 close-out:
+grant an installed `.dzp` app its own namespace bit automatically from the
+manifest (`cairn-write` -> own-namespace cap), which is also the W3 on-ramp.
+
 #### W3 — Agent containment demo (differentiator F1; ties W1+W2 together)
 
 - Agent app (Dezh-IR payload) with a narrow cairn namespace grant.

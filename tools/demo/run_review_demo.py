@@ -149,6 +149,17 @@ def command_plan(mode: str) -> list[tuple[str, str | list[str]]]:
         ("svc-fault-demo virtio-block", "svc-fault-demo virtio-block request_status=0 state=Faulted"),
         ("read", "virtio-block unavailable; command failed cleanly"),
         ("svc-restart virtio-block", "svc-restart virtio-block state=Running"),
+        # Flagship F2: Cairn v1 commit log, rollback, and namespace denial.
+        (
+            "cairn-demo",
+            [
+                "[cairn-demo] 4/6 rollback one step restores the previous commit",
+                "[cairn] DENIED: ns=note requires capability CAIRN_NS_0",
+                "[cairn-demo] PASS",
+            ],
+        ),
+        ("cairn-log note", "reversible=yes"),
+        ("cairn-status", "ns=note cap=CAIRN_NS_0"),
     ]
     if mode == "full":
         base.extend(

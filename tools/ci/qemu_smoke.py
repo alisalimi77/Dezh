@@ -200,11 +200,33 @@ def run_riscv64(qemu: str, kernel: Path) -> None:
             ("bread", "test sector = \"DEZH-DAEMON-BLOCK-OK"),
             ("write hello-interactive", "cairn set via registered daemon status=0"),
             ("read", "cairn current = \"hello-interactive"),
-            ("history", "previous value is used by rollback"),
+            ("history", "for the full commit history use `cairn-log <ns>` (Cairn v1)"),
             ("pset ci-value", "cairn set via registered daemon status=0"),
             ("pget", "cairn current = \"ci-value"),
             ("pset bad-edit", "cairn set via registered daemon status=0"),
             ("prollback", "rollback restored current = \"ci-value"),
+            # --- Cairn v1 (W2 / flagship F2): commit log + namespace caps ---
+            ("cairn-status", "ns=note cap=CAIRN_NS_0"),
+            ("cairn-commit note ci-note-v1", "cairn-commit status=0"),
+            ("cairn-commit note ci-note-v2", "commit ns=note slot="),
+            ("cairn-get note", "cairn value = \"ci-note-v2"),
+            ("cairn-log note", "reversible=yes"),
+            ("cairn-commit note ci-bad-write", "cairn-commit status=0"),
+            ("cairn-get note", "cairn value = \"ci-bad-write"),
+            ("cairn-rollback note 1", "history preserved: rollback moves the ref"),
+            ("cairn-get note", "cairn value = \"ci-note-v2"),
+            ("cairn-verify note", "hash MATCH"),
+            ("cairn-commit vault ci-vault-secret", "commit ns=vault"),
+            (
+                "cairn-demo",
+                [
+                    "[cairn-demo] 5/6 cross-namespace access must be DENIED",
+                    "[cairn] DENIED: ns=note requires capability CAIRN_NS_0",
+                    "DENIED by storage service (kernel-attested caps)",
+                    "[cairn-demo] PASS",
+                ],
+            ),
+            ("events", "cairn.demo"),
             ("deny", "Pol denial demo skipped here to keep running services alive"),
             (
                 "bench-all",
@@ -241,6 +263,48 @@ def run_riscv64(qemu: str, kernel: Path) -> None:
         exit_code = session.proc.wait(timeout=10)
         if exit_code != 0:
             raise AssertionError(f"QEMU exited with {exit_code}, expected 0")
+    finally:
+        transcript = session.text()
+        print(transcript)
+        session.stop()
+
+    # Second boot on the SAME disk: Cairn v1 state must survive a reboot
+    # (F2 acceptance: rollback-restored value + hash verify after power cycle).
+    session = QemuSession(
+        [
+            qemu,
+            "-machine",
+            "virt",
+            "-nographic",
+            "-bios",
+            "default",
+            "-kernel",
+            str(kernel),
+            "-drive",
+            f"file={disk_path},format=raw,if=none,id=dezhdisk",
+            "-device",
+            "virtio-blk-device,drive=dezhdisk",
+        ],
+        timeout=60,
+    )
+    try:
+        session.wait_for("Dezh console. Every command requires an explicit capability.")
+        session.wait_for("dezh> ")
+        reboot_commands = [
+            ("cairn-get note", "cairn value = \"note-v2"),
+            ("cairn-get vault", "cairn value = \"ci-vault-secret"),
+            ("cairn-verify note", "hash MATCH"),
+            ("cairn-log note", "reversible=yes"),
+            ("halt", "halting."),
+        ]
+        for command, expected in reboot_commands:
+            start = session.send_line(command)
+            session.wait_for(expected, since=start)
+            if command != "halt":
+                session.wait_for("dezh> ", since=start)
+        exit_code = session.proc.wait(timeout=10)
+        if exit_code != 0:
+            raise AssertionError(f"QEMU (reboot) exited with {exit_code}, expected 0")
     finally:
         transcript = session.text()
         print(transcript)

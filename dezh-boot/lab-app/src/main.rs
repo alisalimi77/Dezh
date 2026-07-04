@@ -72,6 +72,7 @@ fn sys_recv() -> (usize, usize) {
             inout("a0") 0usize => _,
             inout("a1") 0usize => from,
             out("a2") word,
+            lateout("a3") _,
             in("a7") SYS_RECV)
     };
     (word, from)

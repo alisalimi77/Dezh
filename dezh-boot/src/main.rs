@@ -1288,6 +1288,7 @@ struct IpcMessage {
     from: usize,
     len: usize,
     grant: usize,
+    sender_caps: usize, // kernel-attested caps the sender held at send time
     word: usize, // a register-passed scalar (used by the value-IPC / Cairn demo)
     buf: [u8; 64],
 }
@@ -1296,6 +1297,7 @@ const EMPTY_IPC_MESSAGE: IpcMessage = IpcMessage {
     from: 0,
     len: 0,
     grant: 0,
+    sender_caps: 0,
     word: 0,
     buf: [0; 64],
 };
@@ -1358,6 +1360,9 @@ unsafe fn recv_message_into(task: usize, frame: &mut [usize]) -> bool {
     frame[F_A0] = n;
     frame[F_A1] = msg.from;
     frame[F_A2] = msg.word;
+    // Services check the SENDER's authority (not their own) against this
+    // kernel-attested value; a client cannot forge it from user space.
+    frame[F_A3] = msg.sender_caps;
     IPC_STATS.receives += 1;
     true
 }
@@ -1691,6 +1696,7 @@ extern "C" fn utrap_handler(frame_ptr: *mut usize) -> *const usize {
                     msg.len = len;
                     msg.from = cur;
                     msg.grant = granted;
+                    msg.sender_caps = caps;
                     msg.word = frame[F_A4]; // register-passed scalar (value-IPC)
                     MBOX[to].tail = (tail + 1) % MAILBOX_DEPTH;
                     MBOX[to].count += 1;
@@ -2182,6 +2188,30 @@ const BLK_REQ_PKG_BLOB_READ: usize = 38;
 const BLK_REQ_PKG_BLOB_WRITE: usize = 39;
 const BLK_REQ_PKG_JOURNAL_READ: usize = 40;
 const BLK_REQ_PKG_JOURNAL_WRITE: usize = 41;
+// 42 (CAIRN_INIT) is daemon-internal: the store lazy-formats on first use.
+const BLK_REQ_CAIRN_COMMIT: usize = 43;
+const BLK_REQ_CAIRN_GET: usize = 44;
+const BLK_REQ_CAIRN_LOG: usize = 45;
+const BLK_REQ_CAIRN_ROLLBACK: usize = 46;
+const BLK_REQ_CAIRN_VERIFY: usize = 47;
+const BLK_REQ_CAIRN_STATUS: usize = 48;
+// Task-capability bits 8..15 gate Cairn v1 namespaces 0..7 (kernel-attested on
+// every IPC recv; the storage daemon checks the requested namespace's bit).
+const TASK_CAIRN_NS_BASE: usize = 8;
+const CAIRN_NS_NAMES: [&str; 5] = ["note", "lab", "calc", "vault", "agent"];
+
+fn cairn_ns_id(name: &str) -> Option<usize> {
+    CAIRN_NS_NAMES.iter().position(|n| *n == name)
+}
+
+const fn task_ns_cap(ns: usize) -> usize {
+    1 << (TASK_CAIRN_NS_BASE + ns)
+}
+
+/// Pack a Cairn request for the virtio-blk client: base op | ns << 8 | steps << 12.
+fn cairn_req(base: usize, ns: usize, steps: usize) -> usize {
+    base | (ns << 8) | (steps.min(0xfff) << 12)
+}
 const IPC_PROTO_V1: usize = 0xd1;
 const IPC_SERVICE_SYSTEM: usize = 0;
 const IPC_STATUS_OK: usize = 0;
@@ -2506,6 +2536,31 @@ fn run_registered_virtio_client(plan: &KernelPlan, req: usize, input: &str) {
     refresh_virtio_service_state();
 }
 
+/// Like `run_registered_virtio_client_status`, but the client is spawned with
+/// `extra_caps` on top of the base client set. Used for Cairn namespace caps:
+/// the console (operator) decides which namespace authority the client holds,
+/// and the kernel attests exactly that to the storage daemon.
+fn run_registered_virtio_client_ns(
+    plan: &KernelPlan,
+    req: usize,
+    input: &str,
+    extra_caps: usize,
+) -> usize {
+    let Some(daemon) = ensure_virtio_block_service(plan) else {
+        kprintln!("[services] virtio-block unavailable; command failed cleanly");
+        return SYS_DENIED;
+    };
+    let input_len = prepare_virtio_input(input);
+    let client_caps = TASK_PRINT | TASK_IPC | TASK_BLOCK_READ | TASK_BLOCK_WRITE | extra_caps;
+    run_foreground_processes(&[
+        ProcessSpec::new(VIRTIO_BLK_ELF, client_caps, BLK_OP_CLIENT_REQ)
+            .args(daemon, input_len, req)
+            .virtio_dma(),
+    ]);
+    refresh_virtio_service_state();
+    unsafe { TEXIT[FIRST_FOREGROUND_TASK] }
+}
+
 fn run_registered_virtio_client_status(plan: &KernelPlan, req: usize, input: &str) -> usize {
     let Some(daemon) = ensure_virtio_block_service(plan) else {
         kprintln!("[services] virtio-block unavailable; command failed cleanly");
@@ -2561,6 +2616,159 @@ fn run_virtio_blk_daemon_demo(plan: &KernelPlan) {
             .virtio_dma(),
     ]);
     refresh_virtio_service_state();
+}
+
+// --- Cairn v1 console front-end -------------------------------------------------
+
+fn cairn_parse_ns<'a>(arg: &'a str) -> Option<(usize, &'a str)> {
+    let (ns_name, rest) = match arg.split_once(' ') {
+        Some((n, r)) => (n, r.trim()),
+        None => (arg, ""),
+    };
+    match cairn_ns_id(ns_name) {
+        Some(ns) => Some((ns, rest)),
+        None => {
+            kprintln!("unknown namespace '{ns_name}' (known: note lab calc vault agent)");
+            None
+        }
+    }
+}
+
+fn cairn_cmd_commit(plan: &KernelPlan, arg: &str) {
+    let Some((ns, text)) = cairn_parse_ns(arg) else {
+        return;
+    };
+    if text.is_empty() {
+        kprintln!("usage: cairn-commit <ns> <text>");
+        return;
+    }
+    let st = run_registered_virtio_client_ns(
+        plan,
+        cairn_req(BLK_REQ_CAIRN_COMMIT, ns, 0),
+        text,
+        task_ns_cap(ns),
+    );
+    record_event(
+        "console",
+        "cairn.commit",
+        CAIRN_NS_NAMES[ns],
+        if st == 0 { "ok" } else { "fail" },
+    );
+}
+
+fn cairn_cmd_simple(plan: &KernelPlan, base: usize, arg: &str) {
+    let Some((ns, _)) = cairn_parse_ns(arg) else {
+        return;
+    };
+    let _ = run_registered_virtio_client_ns(plan, cairn_req(base, ns, 0), "", task_ns_cap(ns));
+}
+
+fn cairn_cmd_rollback(plan: &KernelPlan, arg: &str) {
+    let Some((ns, rest)) = cairn_parse_ns(arg) else {
+        return;
+    };
+    let steps = rest.parse::<usize>().unwrap_or(1).max(1);
+    let st = run_registered_virtio_client_ns(
+        plan,
+        cairn_req(BLK_REQ_CAIRN_ROLLBACK, ns, steps),
+        "",
+        task_ns_cap(ns),
+    );
+    record_event(
+        "console",
+        "cairn.rollback",
+        CAIRN_NS_NAMES[ns],
+        if st == 0 { "ok" } else { "fail" },
+    );
+}
+
+/// F2 flagship flow: versioned commits, log, a bad write, rollback, integrity
+/// verify, and a cross-namespace denial backed by kernel-attested caps.
+fn run_cairn_demo(plan: &KernelPlan) {
+    const NOTE: usize = 0;
+    const VAULT: usize = 3;
+    kprintln!("[cairn-demo] F2: versioned app state, capability-gated namespaces, rollback");
+    kprintln!("[cairn-demo] 1/6 two commits into ns=note (each is an object + ref move)");
+    let s1 = run_registered_virtio_client_ns(
+        plan,
+        cairn_req(BLK_REQ_CAIRN_COMMIT, NOTE, 0),
+        "note-v1",
+        task_ns_cap(NOTE),
+    );
+    let s2 = run_registered_virtio_client_ns(
+        plan,
+        cairn_req(BLK_REQ_CAIRN_COMMIT, NOTE, 0),
+        "note-v2",
+        task_ns_cap(NOTE),
+    );
+    kprintln!("[cairn-demo] 2/6 commit log for ns=note (newest first)");
+    let _ = run_registered_virtio_client_ns(
+        plan,
+        cairn_req(BLK_REQ_CAIRN_LOG, NOTE, 0),
+        "",
+        task_ns_cap(NOTE),
+    );
+    kprintln!("[cairn-demo] 3/6 a bad write lands");
+    let s3 = run_registered_virtio_client_ns(
+        plan,
+        cairn_req(BLK_REQ_CAIRN_COMMIT, NOTE, 0),
+        "corrupted-write",
+        task_ns_cap(NOTE),
+    );
+    let _ = run_registered_virtio_client_ns(
+        plan,
+        cairn_req(BLK_REQ_CAIRN_GET, NOTE, 0),
+        "",
+        task_ns_cap(NOTE),
+    );
+    kprintln!("[cairn-demo] 4/6 rollback one step restores the previous commit");
+    let s4 = run_registered_virtio_client_ns(
+        plan,
+        cairn_req(BLK_REQ_CAIRN_ROLLBACK, NOTE, 1),
+        "",
+        task_ns_cap(NOTE),
+    );
+    let _ = run_registered_virtio_client_ns(
+        plan,
+        cairn_req(BLK_REQ_CAIRN_GET, NOTE, 0),
+        "",
+        task_ns_cap(NOTE),
+    );
+    let s5 = run_registered_virtio_client_ns(
+        plan,
+        cairn_req(BLK_REQ_CAIRN_VERIFY, NOTE, 0),
+        "",
+        task_ns_cap(NOTE),
+    );
+    kprintln!("[cairn-demo] 5/6 cross-namespace access must be DENIED");
+    kprintln!("[cairn-demo]     client holds CAIRN_NS_vault only and requests ns=note");
+    let s6 = run_registered_virtio_client_ns(
+        plan,
+        cairn_req(BLK_REQ_CAIRN_GET, NOTE, 0),
+        "",
+        task_ns_cap(VAULT),
+    );
+    kprintln!("[cairn-demo] 6/6 store status");
+    let _ = run_registered_virtio_client_ns(plan, BLK_REQ_CAIRN_STATUS, "", 0);
+    let pass = s1 == 0 && s2 == 0 && s3 == 0 && s4 == 0 && s5 == 0 && s6 == 1;
+    record_event(
+        "console",
+        "cairn.demo",
+        "ns:note",
+        if pass { "pass" } else { "fail" },
+    );
+    if pass {
+        kprintln!(
+            "[cairn-demo] PASS: commit/log/rollback/verify OK and cross-namespace DENIED"
+        );
+        kprintln!(
+            "[cairn-demo] state is on disk: after reboot, `cairn-get note` still answers"
+        );
+    } else {
+        kprintln!(
+            "[cairn-demo] FAIL: statuses commit={s1},{s2},{s3} rollback={s4} verify={s5} denied={s6} (expected 0,0,0,0,0,1)"
+        );
+    }
 }
 
 fn run_bench_os() {
@@ -3176,7 +3384,7 @@ fn vrecv() -> (usize, usize) {
     let word: usize;
     let from: usize;
     unsafe {
-        asm!("ecall", inout("a0") 0usize => _, inout("a1") 0usize => from, out("a2") word, in("a7") SYS_RECV)
+        asm!("ecall", inout("a0") 0usize => _, inout("a1") 0usize => from, out("a2") word, lateout("a3") _, in("a7") SYS_RECV)
     };
     (word, from)
 }
@@ -3193,6 +3401,7 @@ fn vrecv_timeout(timeout_ticks: usize) -> (usize, usize, usize) {
             inout("a0") 0usize => rc,
             inout("a1") 0usize => from,
             inout("a2") timeout_ticks => word,
+            lateout("a3") _,
             in("a7") SYS_RECV_TIMEOUT
         )
     };
@@ -3365,7 +3574,9 @@ fn sys_send(to: usize, s: &[u8], grant: usize) -> usize {
 #[inline(never)]
 fn sys_recv(buf: &mut [u8]) -> usize {
     let mut a0 = buf.as_mut_ptr() as usize;
-    unsafe { asm!("ecall", inout("a0") a0, in("a1") buf.len(), in("a7") SYS_RECV) };
+    unsafe {
+        asm!("ecall", inout("a0") a0, in("a1") buf.len(), lateout("a2") _, lateout("a3") _, in("a7") SYS_RECV)
+    };
     a0 // bytes received
 }
 
@@ -3794,6 +4005,55 @@ const COMMANDS: &[CommandSpec] = &[
         cap_name: "INSPECT",
         group: "Storage",
         help: "show v0 current/previous Cairn sector status",
+    },
+    CommandSpec {
+        name: "cairn-status",
+        cap: cap::INSPECT,
+        cap_name: "INSPECT",
+        group: "Storage",
+        help: "Cairn v1: show namespaces, head refs, and commit slots",
+    },
+    CommandSpec {
+        name: "cairn-commit",
+        cap: cap::SPAWN,
+        cap_name: "SPAWN",
+        group: "Storage",
+        help: "Cairn v1: commit a value <ns> <text> (namespace-capability gated)",
+    },
+    CommandSpec {
+        name: "cairn-get",
+        cap: cap::INSPECT,
+        cap_name: "INSPECT",
+        group: "Storage",
+        help: "Cairn v1: read the head value of <ns>",
+    },
+    CommandSpec {
+        name: "cairn-log",
+        cap: cap::INSPECT,
+        cap_name: "INSPECT",
+        group: "Storage",
+        help: "Cairn v1: show the commit chain of <ns> (newest first)",
+    },
+    CommandSpec {
+        name: "cairn-rollback",
+        cap: cap::SPAWN,
+        cap_name: "SPAWN",
+        group: "Storage",
+        help: "Cairn v1: move the <ns> head ref back [n] commits (history kept)",
+    },
+    CommandSpec {
+        name: "cairn-verify",
+        cap: cap::INSPECT,
+        cap_name: "INSPECT",
+        group: "Storage",
+        help: "Cairn v1: re-hash the head object of <ns> against its commit record",
+    },
+    CommandSpec {
+        name: "cairn-demo",
+        cap: cap::SPAWN,
+        cap_name: "SPAWN",
+        group: "Demos",
+        help: "F2 flagship: commits, log, bad write, rollback, verify, namespace denial",
     },
     CommandSpec {
         name: "root",
@@ -4615,8 +4875,17 @@ fn dispatch(cmd: &str, arg: &str, plan: &KernelPlan, memory: &[MemoryRegion], he
             kprintln!("[storage] Cairn v0 keeps current sector 2 and previous sector 3");
             kprintln!("[storage] current value:");
             run_registered_virtio_client(plan, BLK_REQ_PGET, "");
-            kprintln!("[storage] previous value is used by rollback; full commit history is future Cairn work");
+            kprintln!("[storage] for the full commit history use `cairn-log <ns>` (Cairn v1)");
         }
+        "cairn-status" => {
+            let _ = run_registered_virtio_client_ns(plan, BLK_REQ_CAIRN_STATUS, "", 0);
+        }
+        "cairn-commit" => cairn_cmd_commit(plan, arg),
+        "cairn-get" => cairn_cmd_simple(plan, BLK_REQ_CAIRN_GET, arg),
+        "cairn-log" => cairn_cmd_simple(plan, BLK_REQ_CAIRN_LOG, arg),
+        "cairn-verify" => cairn_cmd_simple(plan, BLK_REQ_CAIRN_VERIFY, arg),
+        "cairn-rollback" => cairn_cmd_rollback(plan, arg),
+        "cairn-demo" => run_cairn_demo(plan),
         "vblkd" => {
             kprintln!("[kernel] exercising registered virtio-blk daemon with IPC client");
             kprintln!("[kernel] daemon gets DEVICE+DMA+IPC; client gets IPC+DMA only (no MMIO)");

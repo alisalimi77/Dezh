@@ -48,6 +48,12 @@ daemon receives explicit MMIO and DMA grants; clients communicate with it over
 typed IPC. The service registry supports start, stop, controlled fault, and
 explicit restart.
 
+Cairn v1 runs inside that daemon: an on-disk commit-log store (superblock +
+append-only commit records with parent refs and object hashes) with named
+namespaces gated by kernel-attested per-namespace capability bits. Rollback
+moves a namespace's head ref back along the parent chain without erasing
+history, survives reboot, and denials name the missing capability.
+
 The app registry v0 supports embedded app bundles, install/remove state,
 private app storage sectors, and no-grant denial demos. This is sufficient for
 reviewing the authority model, not a production package ecosystem.
