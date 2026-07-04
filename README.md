@@ -134,6 +134,10 @@ Run the consolidated review suite:
 python tools/review/run_full_review.py --quick
 ```
 
+Release tags build public review artifacts and a GitHub Container Registry
+review environment. See [release process](docs/RELEASE_PROCESS.md) and
+[packages and releases](docs/PACKAGES_AND_RELEASES.md).
+
 ## Console Commands Worth Reviewing
 
 Inside the RISC-V console:
@@ -216,6 +220,8 @@ High-level layout:
 - [Repo structure](docs/REPO_STRUCTURE.md)
 - [FAQ](docs/FAQ.md)
 - [Release notes](docs/RELEASE_NOTES.md)
+- [Release process](docs/RELEASE_PROCESS.md)
+- [Packages and releases](docs/PACKAGES_AND_RELEASES.md)
 
 ## Governance
 

@@ -1,0 +1,9 @@
+.git
+target
+dist
+graphify-out
+**/target
+**/__pycache__
+**/*.pyc
+*.img
+dezh-boot/dezh-disk.img

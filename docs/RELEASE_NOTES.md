@@ -37,6 +37,10 @@ Full validation:
 python tools/review/run_full_review.py --full
 ```
 
+Expected release artifacts are described in
+[Release Process](RELEASE_PROCESS.md). GitHub Packages usage is described in
+[Packages And Releases](PACKAGES_AND_RELEASES.md).
+
 ## Known Limitations
 
 - QEMU is the primary validation environment.

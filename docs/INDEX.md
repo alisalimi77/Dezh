@@ -40,6 +40,10 @@ This page is the primary navigation point for Dezh OS public review.
 - [Outreach](OUTREACH.md): public-review outreach templates.
 - [FAQ](FAQ.md): direct answers for reviewers.
 - [Release Notes](RELEASE_NOTES.md): current review-candidate summary.
+- [Release Process](RELEASE_PROCESS.md): how review releases are tagged,
+  validated, and published.
+- [Packages And Releases](PACKAGES_AND_RELEASES.md): how GitHub Releases,
+  GitHub Packages, and Dezh `.dzp` packages differ.
 
 ## Governance
 

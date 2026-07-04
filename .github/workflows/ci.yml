@@ -35,6 +35,17 @@ jobs:
       - name: Run public review hygiene scan
         run: python3 tools/review/scan_public.py
 
+      - name: Compile Python review tooling
+        run: >
+          python3 -m py_compile
+          tools/review/run_full_review.py
+          tools/review/build_release_artifacts.py
+          tools/review/scan_public.py
+          tools/review/make_review_package.py
+          tools/demo/run_review_demo.py
+          tools/ci/qemu_smoke.py
+          tools/ci/sdk_test.py
+
   bare-metal:
     name: Bare-metal builds and QEMU smoke tests
     runs-on: ubuntu-latest
@@ -87,3 +98,6 @@ jobs:
           python3 tools/ci/qemu_smoke.py x86_64
           --kernel dezh-boot-x86/target/x86_64-unknown-none/debug/dezh-boot-x86
           --qemu qemu-system-x86_64
+
+      - name: Build review release artifacts
+        run: python3 tools/review/build_release_artifacts.py --tag ci
