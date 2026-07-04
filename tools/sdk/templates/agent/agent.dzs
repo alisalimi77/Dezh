@@ -1,0 +1,33 @@
+; agent.dzs — the F1 agent-containment demo payload.
+;
+; The agent does real work inside its grant: it commits a good note to its
+; own Cairn namespace, then commits a BAD one (an agent gone wrong), then
+; reads the head back. Every host call is capability-gated by the kernel.
+; The operator undoes the damage from the console with:
+;     cairn-rollback agent 1
+; which moves the namespace head ref back one commit (history is kept).
+
+    string 0 "agent online, caps checked by kernel"
+    prints 0 36
+
+    ; durable commit #1: the good note
+    string 40 "agent-note-good"
+    push 40
+    push 15
+    hostcall cairn_put
+
+    ; durable commit #2: the bad write (simulated misbehaviour)
+    string 80 "agent-note-BAD"
+    push 80
+    push 14
+    hostcall cairn_put
+
+    ; read the namespace head back and print it (will show the BAD value)
+    push 128
+    push 64
+    hostcall cairn_get
+    push 128
+    swap
+    hostcall print_str
+
+    halt

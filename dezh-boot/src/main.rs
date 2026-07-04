@@ -23,10 +23,14 @@ mod pkg;
 // The RISC-V implementation of the shared Dezh-core Host: capability check +
 // the side effect (kernel console). The Dezh-IR engine lives in dezh-core and
 // is identical across ISAs.
-struct KHost {
+struct KHost<'a> {
     caps: u32,
+    /// Where cairn hostcalls land: (boot plan, Cairn v1 namespace id). The
+    /// store is reached through the user-space virtio-block daemon over IPC
+    /// with the namespace capability — no kernel-side block I/O path.
+    cairn: Option<(&'a KernelPlan, usize)>,
 }
-impl dezh_core::ir::Host for KHost {
+impl dezh_core::ir::Host for KHost<'_> {
     fn can(&self, cap: u32) -> bool {
         self.caps & cap != 0
     }
@@ -36,11 +40,35 @@ impl dezh_core::ir::Host for KHost {
     fn print_str(&mut self, s: &[u8]) {
         kprintln!("  [ir] {}", core::str::from_utf8(s).unwrap_or("<non-utf8>"));
     }
-    fn cairn_put(&mut self, _data: &[u8]) -> bool {
-        false
+    fn cairn_put(&mut self, data: &[u8]) -> bool {
+        let Some((plan, ns)) = self.cairn else {
+            kprintln!("  [ir] cairn_put: no namespace bound (app name has no Cairn namespace)");
+            return false;
+        };
+        prepare_virtio_input_bytes(data);
+        run_virtio_client_ns_raw(
+            plan,
+            cairn_req(BLK_REQ_CAIRN_COMMIT, ns, 0),
+            data.len(),
+            task_ns_cap(ns),
+        ) == 0
     }
-    fn cairn_get(&mut self, _buf: &mut [u8]) -> Option<usize> {
-        None
+    fn cairn_get(&mut self, buf: &mut [u8]) -> Option<usize> {
+        let (plan, ns) = self.cairn?;
+        let st = run_virtio_client_ns_raw(plan, cairn_req(BLK_REQ_CAIRN_GET, ns, 0), 0, task_ns_cap(ns));
+        if st != 0 {
+            return None;
+        }
+        let mut sector = [0u8; 512];
+        read_virtio_output_sector(&mut sector);
+        // Cairn values are zero-terminated in the shared window (len <= 448).
+        let n = sector
+            .iter()
+            .position(|&b| b == 0)
+            .unwrap_or(448)
+            .min(buf.len());
+        buf[..n].copy_from_slice(&sector[..n]);
+        Some(n)
     }
 }
 
@@ -2546,11 +2574,22 @@ fn run_registered_virtio_client_ns(
     input: &str,
     extra_caps: usize,
 ) -> usize {
+    let input_len = prepare_virtio_input(input);
+    run_virtio_client_ns_raw(plan, req, input_len, extra_caps)
+}
+
+/// Lowest-level Cairn client launch: the DMA input window is already prepared
+/// by the caller (string or raw bytes).
+fn run_virtio_client_ns_raw(
+    plan: &KernelPlan,
+    req: usize,
+    input_len: usize,
+    extra_caps: usize,
+) -> usize {
     let Some(daemon) = ensure_virtio_block_service(plan) else {
         kprintln!("[services] virtio-block unavailable; command failed cleanly");
         return SYS_DENIED;
     };
-    let input_len = prepare_virtio_input(input);
     let client_caps = TASK_PRINT | TASK_IPC | TASK_BLOCK_READ | TASK_BLOCK_WRITE | extra_caps;
     run_foreground_processes(&[
         ProcessSpec::new(VIRTIO_BLK_ELF, client_caps, BLK_OP_CLIENT_REQ)
@@ -4903,12 +4942,16 @@ fn dispatch(cmd: &str, arg: &str, plan: &KernelPlan, memory: &[MemoryRegion], he
                 kprintln!("  prog 1 (loop: sum 1..=5, then print) WITH the PRINT capability:");
                 let mut h = KHost {
                     caps: ir::CAP_PRINT,
+                    cairn: None,
                 };
                 if let Err(t) = ir::run(sum, &mut h) {
                     kprintln!("  [ir] TRAP: {}", t.msg());
                 }
                 kprintln!("  prog 1 again WITHOUT the PRINT capability:");
-                let mut h = KHost { caps: 0 };
+                let mut h = KHost {
+                    caps: 0,
+                    cairn: None,
+                };
                 if let Err(t) = ir::run(sum, &mut h) {
                     kprintln!("  [ir] TRAP: {}", t.msg());
                 }
@@ -4916,8 +4959,10 @@ fn dispatch(cmd: &str, arg: &str, plan: &KernelPlan, memory: &[MemoryRegion], he
             let mut buf2 = [0u8; 512];
             let cairn = ir::demo_cairn(&mut buf2);
             kprintln!("  prog 2 (write to Cairn, then read it back) with WRITE+READ+PRINT:");
+            kprintln!("  (durable: lands in Cairn v1 ns=agent via the user-space storage daemon)");
             let mut h = KHost {
                 caps: ir::CAP_WRITE | ir::CAP_READ | ir::CAP_PRINT,
+                cairn: cairn_ns_id("agent").map(|ns| (plan, ns)),
             };
             if let Err(t) = ir::run(cairn, &mut h) {
                 kprintln!("  [ir] TRAP: {}", t.msg());

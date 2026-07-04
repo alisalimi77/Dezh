@@ -51,17 +51,18 @@ Every claim follows D015: measured, honestly scoped, no bare superlatives.
 - `cairn-demo` console flow proving F2 end to end.
 - Acceptance: F2 transcript reproducible by the demo runner.
 
-Status (2026-07-04): core landed. Commit-log store on sectors 1600..1855
+Status (2026-07-04): DONE. Commit-log store on sectors 1600..1855
 (superblock + append-only commit records carrying parent ref, FNV-1a object
 hash, actor task id, and a reversibility flag — the D020 effect-ledger seed).
 Namespace access is enforced by kernel task-capability bits 8..15: the kernel
 attests the sender's caps on every IPC recv and the storage daemon checks the
 requested namespace's bit, with an explainable denial message. Console:
 `cairn-commit/get/log/rollback/verify/status` + `cairn-demo`; rollback moves
-the head ref and keeps history. Covered by CI smoke (including a second-boot
-persistence phase) and the review demo runner. Remaining for W2 close-out:
-grant an installed `.dzp` app its own namespace bit automatically from the
-manifest (`cairn-write` -> own-namespace cap), which is also the W3 on-ramp.
+the head ref and keeps history. Manifest wiring: a `cairn-read`/`cairn-write`
+grant maps to the app's OWN namespace only (matched by app name); IR apps
+reach the store through the kernel Host routed over IPC to the user-space
+daemon (no kernel block I/O path). Covered by CI smoke (including a
+second-boot persistence phase) and the review demo runner.
 
 #### W3 — Agent containment demo (differentiator F1; ties W1+W2 together)
 
@@ -70,6 +71,17 @@ manifest (`cairn-write` -> own-namespace cap), which is also the W3 on-ramp.
   over IPC (`granted = requested & sender_caps`), rollback of its writes.
 - Publish alongside the capability-vs-syscall mediation benchmark.
 - Acceptance: F1 transcript reproducible by the demo runner.
+
+Status (2026-07-04): first full pass DONE via `tools/demo/run_agent_demo.py`
+(in CI): SDK-built out-of-tree `agent` app uploaded over the UART, installed
+with manifest-scoped grants (own namespace only), does durable in-grant
+commits then a bad write; the operator undoes the damage with a one-step
+rollback (hash-verified, history kept); a no-capability `spy` app is DENIED
+by the kernel; attenuated delegation shown over IPC; state re-checked after
+reboot. Transcript: `docs/demo-transcript-agent-f1.md`. Found and fixed a
+latent W1 bug on the way: the storage daemon truncated every sector write to
+511 bytes, corrupting any package larger than two sectors. Remaining polish:
+fold the mediation benchmark numbers into the published F1 material.
 
 #### W4 — Pol: run a real foreign binary (differentiator F4)
 

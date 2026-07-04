@@ -71,6 +71,13 @@ jobs:
           --kernel dezh-boot/target/riscv64gc-unknown-none-elf/debug/dezh-boot
           --qemu qemu-system-riscv64
 
+      - name: Run F1 agent-containment demo
+        run: >
+          python3 tools/demo/run_agent_demo.py
+          --kernel dezh-boot/target/riscv64gc-unknown-none-elf/debug/dezh-boot
+          --qemu qemu-system-riscv64
+          --transcript /tmp/demo-transcript-agent-f1.md
+
       - name: Build x86_64 kernel
         working-directory: dezh-boot-x86
         run: cargo build --locked

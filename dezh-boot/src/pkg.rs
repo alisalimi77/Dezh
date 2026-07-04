@@ -1345,7 +1345,7 @@ fn ir_caps_from(mcaps: u32) -> u32 {
     c
 }
 
-fn task_caps_from(mcaps: u32) -> usize {
+fn task_caps_from(mcaps: u32, name: &str) -> usize {
     let mut c = 0usize;
     if mcaps & MCAP_PRINT != 0 {
         c |= crate::TASK_PRINT;
@@ -1356,7 +1356,28 @@ fn task_caps_from(mcaps: u32) -> usize {
     if mcaps & MCAP_UPTIME != 0 {
         c |= crate::TASK_TIME;
     }
+    // A manifest cairn grant maps to the app's OWN namespace bit only — an app
+    // can never name another app's namespace in its manifest.
+    if mcaps & (MCAP_CAIRN_READ | MCAP_CAIRN_WRITE) != 0 {
+        if let Some(ns) = crate::cairn_ns_id(name) {
+            c |= crate::task_ns_cap(ns);
+        }
+    }
     c
+}
+
+/// The Cairn v1 namespace an installed app may use: its own, by name.
+fn app_cairn_ns(mcaps: u32, name: &str) -> Option<usize> {
+    if mcaps & (MCAP_CAIRN_READ | MCAP_CAIRN_WRITE) == 0 {
+        return None;
+    }
+    let ns = crate::cairn_ns_id(name);
+    if ns.is_none() {
+        kprintln!(
+            "[pkg-run] note: '{name}' requests cairn caps but has no v1 namespace (fixed table: note/lab/calc/vault/agent)"
+        );
+    }
+    ns
 }
 
 pub(crate) fn pkg_run(plan: &KernelPlan, arg: &str) {
@@ -1394,6 +1415,7 @@ pub(crate) fn pkg_run(plan: &KernelPlan, arg: &str) {
         dzp::KIND_DEZH_IR => {
             let mut host = crate::KHost {
                 caps: ir_caps_from(entry.mcaps),
+                cairn: app_cairn_ns(entry.mcaps, entry.name()).map(|ns| (plan, ns)),
             };
             match ir::run(entry.payload(), &mut host) {
                 Ok(()) => kprintln!("[pkg-run] '{}' finished", entry.name()),
@@ -1416,7 +1438,7 @@ pub(crate) fn pkg_run(plan: &KernelPlan, arg: &str) {
             kprintln!("[pkg-run] launching as U-mode process (own address space)");
             crate::run_foreground_processes(&[crate::ProcessSpec::new(
                 entry.payload(),
-                task_caps_from(entry.mcaps),
+                task_caps_from(entry.mcaps, entry.name()),
                 0,
             )]);
             kprintln!("[pkg-run] '{}' exited; back in the console", entry.name());

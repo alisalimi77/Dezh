@@ -218,6 +218,15 @@ def run_riscv64(qemu: str, kernel: Path) -> None:
             ("cairn-verify note", "hash MATCH"),
             ("cairn-commit vault ci-vault-secret", "commit ns=vault"),
             (
+                "agent",
+                [
+                    "[ir] print -> 15",
+                    "missing required capability for this host call",
+                    "[cairn] commit ns=agent",
+                    "[ir] ir-wrote-this-durably",
+                ],
+            ),
+            (
                 "cairn-demo",
                 [
                     "[cairn-demo] 5/6 cross-namespace access must be DENIED",

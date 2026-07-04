@@ -1,0 +1,9 @@
+# A minimal untrusted "agent" app (flagship demo F1). Its whole authority is
+# this caps list: print, plus read/write of its OWN Cairn namespace (ns=agent,
+# matched by app name — a manifest can never name another app's namespace).
+# Everything else is denied by the kernel at run time.
+name = "agent"
+version = "0.1.0"
+kind = "dezh-ir"
+entry = "agent.dzs"
+caps = ["print", "cairn-read", "cairn-write"]

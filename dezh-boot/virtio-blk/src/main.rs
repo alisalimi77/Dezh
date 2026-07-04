@@ -387,7 +387,10 @@ fn data_contains(needle: &[u8]) -> bool {
 fn copy_input(len: usize) {
     unsafe {
         core::ptr::write_bytes(data_ptr(), 0, SECTOR_SIZE);
-        let n = len.min(SECTOR_SIZE - 1);
+        // Full sector: blob writes carry 512 payload bytes. String users
+        // (Cairn values, notes) pass len <= 511 themselves, so termination
+        // stays intact for them.
+        let n = len.min(SECTOR_SIZE);
         core::ptr::copy_nonoverlapping((DMA_VA + INPUT_OFF) as *const u8, data_ptr(), n);
     }
 }
