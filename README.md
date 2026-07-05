@@ -163,7 +163,9 @@ python tools/review/run_full_review.py --quick
 ```
 
 Release tags build public review artifacts and a GitHub Container Registry
-review environment. See [release process](docs/RELEASE_PROCESS.md) and
+review environment at `ghcr.io/alisalimi77/dezh-review-env:<tag>`. This is a
+GitHub Packages/GHCR image, not a Docker Hub image. See
+[release process](docs/RELEASE_PROCESS.md) and
 [packages and releases](docs/PACKAGES_AND_RELEASES.md).
 
 ## Console Commands Worth Reviewing

@@ -27,8 +27,22 @@ GitHub Packages is used for the review environment container image:
 ghcr.io/alisalimi77/dezh-review-env:<tag>
 ```
 
+This is **not** a Docker Hub image. Dezh publishes the review environment to
+GitHub Container Registry (GHCR), which is the container backend shown under
+GitHub's Packages section.
+
+Pull it with:
+
+```sh
+docker pull ghcr.io/alisalimi77/dezh-review-env:v0.1-review
+```
+
 The image is not the OS. It is the build-and-review environment: Rust targets,
 Python, and QEMU.
+
+If the package does not appear publicly on the repository sidebar, the GHCR
+package visibility may need to be changed to public in GitHub's package
+settings. The release workflow still publishes to GHCR, not Docker Hub.
 
 ## Dezh `.dzp` Packages
 

@@ -78,6 +78,9 @@ ghcr.io/alisalimi77/dezh-review-env:<tag>
 ghcr.io/alisalimi77/dezh-review-env:latest
 ```
 
+These are GitHub Container Registry images, not Docker Hub images. They appear
+under GitHub Packages when the package visibility is public.
+
 This image contains Rust, Python, QEMU, and the Rust targets needed for review.
 
 ## Release Discipline
