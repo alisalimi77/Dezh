@@ -26,6 +26,9 @@ transactional package lifecycle.
 - rust
 - systems-programming
 - sandboxing
+- agent-sandbox
+- ai-agents
+- rollback
 
 ## Website
 

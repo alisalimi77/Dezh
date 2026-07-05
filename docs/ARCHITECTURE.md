@@ -69,10 +69,13 @@ Task capability bits currently cover:
 - virtio-block device
 - block read
 - block write
+- Cairn namespaces 0..7 (bits 8..15): one bit per named storage namespace
 
 The important property is attenuation: a task can only transfer capabilities it
 already holds. Manifest-declared package capabilities are separately translated
-into runtime grants.
+into runtime grants; a manifest `cairn-read`/`cairn-write` grant maps to the
+app's **own** namespace bit only (matched by app name) — a manifest can never
+name another app's namespace.
 
 ## IPC
 
@@ -85,6 +88,13 @@ proto | service_id | op | request_id | status | arg
 
 Storage, installer, app, and package paths use typed replies. Legacy demos can
 still use raw scalar messages.
+
+**Kernel-attested sender capabilities:** on every send, the kernel records the
+sender's capability set in the message; on receive, the service gets that set
+alongside the payload. A service therefore checks the *sender's* authority
+against values a client cannot forge from user space. This is how the storage
+daemon enforces per-namespace access, and why its denials can name the exact
+missing capability (`why-denied` direction from the strategic plan).
 
 ## User-Space Block Driver
 
@@ -103,11 +113,38 @@ The daemon handles:
 - disk probe
 - block write/read
 - root install marker and metadata
-- Cairn-style current/previous value operations
+- Cairn v0 current/previous value operations (legacy demo path)
+- Cairn v1 commit-log store with per-namespace capability checks
 - embedded app registry operations
 - package registry, journal, and blob sectors
 - note/lab/calc/vault private storage
 - stop and controlled fault demo
+
+## Cairn v1 (Commit-Log Store)
+
+Cairn v1 lives inside the storage daemon on sectors 1600..1855:
+
+- a superblock holding the namespace table (`note`, `lab`, `calc`, `vault`,
+  `agent`) with each namespace's head ref and commit count;
+- append-only commit records, each carrying: parent ref, FNV-1a hash of the
+  value object, actor task id, a reversibility flag, and the inline value.
+
+Semantics:
+
+- **Commit** appends a record and moves the namespace head ref.
+- **Rollback N** walks the parent chain and moves the ref back; history is
+  never erased, and the state survives reboot.
+- **Verify** re-hashes the head object against its commit record.
+- **Access** requires the namespace's capability bit, checked against the
+  kernel-attested sender capability set; denials name the missing capability.
+
+The commit record fields (actor, reversibility class, provenance chain) are
+the seed of the effect ledger described in
+[STRATEGIC_DIRECTION.md](STRATEGIC_DIRECTION.md) (decision D020).
+
+Dezh-IR apps reach the store through the kernel's IR host, which routes
+`cairn_put`/`cairn_get` host calls over typed IPC to the daemon with the app's
+own namespace capability — there is no kernel-side block I/O shortcut.
 
 ## Service Registry
 
@@ -183,6 +220,8 @@ Useful review commands:
 - `pkg-review <name>`
 - `pkg-versions <name>`
 - `pkg-gc`
+- `cairn-demo` / `cairn-log <ns>` / `cairn-rollback <ns> [n]` / `cairn-verify <ns>`
+- `agent`
 - `bench-all`
 
 Useful review tools:
@@ -191,3 +230,4 @@ Useful review tools:
 - `tools/ci/sdk_test.py`
 - `tools/review/scan_public.py`
 - `tools/demo/run_review_demo.py`
+- `tools/demo/run_agent_demo.py` (F1 agent-containment transcript)

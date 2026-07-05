@@ -43,8 +43,12 @@ jobs:
           tools/review/scan_public.py
           tools/review/make_review_package.py
           tools/demo/run_review_demo.py
+          tools/demo/run_agent_demo.py
           tools/ci/qemu_smoke.py
           tools/ci/sdk_test.py
+          tools/sdk/build_pkg.py
+          tools/sdk/install_pkg.py
+          tools/sdk/dzas.py
 
   bare-metal:
     name: Bare-metal builds and QEMU smoke tests

@@ -101,20 +101,22 @@ Lifecycle rules:
 - Pins block update and rollback until explicit review.
 - GC never touches `Active`, `Corrupt`, or `Quarantined` slots.
 
-## Package Store Disk Layout
+## Disk Layout
 
 ```mermaid
 flowchart LR
-    S0["sector 0\ninstall marker"] --> S2["sector 2\nCairn current"]
-    S2 --> S3["sector 3\nCairn previous"]
+    S0["sector 0\ninstall marker"] --> S2["sector 2\nCairn v0 current"]
+    S2 --> S3["sector 3\nCairn v0 previous"]
     S3 --> S4["sector 4\nroot metadata"]
     S4 --> S5["sectors 5..7\napp registry v0"]
     S5 --> S24["sector 24\npackage marker"]
     S24 --> S25["sectors 25..31\npackage registry"]
     S25 --> S32["sectors 32..39\npackage journal"]
-    S32 --> S64["sectors 64..\nactive package blobs"]
-    S64 --> P["previous blobs"]
-    P --> ST["stage blobs"]
+    S32 --> S64["sectors 64..575\nactive package blobs"]
+    S64 --> P["sectors 576..1087\nprevious blobs"]
+    P --> ST["sectors 1088..1599\nstage blobs"]
+    ST --> C1["sector 1600\nCairn v1 superblock"]
+    C1 --> C2["sectors 1601..1855\nCairn v1 commit log"]
 ```
 
 The package store is intentionally small and inspectable in v0:
@@ -123,6 +125,65 @@ The package store is intentionally small and inspectable in v0:
 - 32 KiB per slot
 - active, previous, and stage blob areas
 - journaled recovery before package execution
+
+## Cairn v1 Commit Log
+
+Each namespace is a ref into an append-only chain of commit records. Rollback
+moves the ref; nothing is erased.
+
+```mermaid
+flowchart RL
+    subgraph Super["Superblock (sector 1600)"]
+        NSnote["ns=note head"]
+        NSvault["ns=vault head"]
+        Next["next free slot"]
+    end
+
+    C2["commit slot 2\nvalue: bad-write\nparent: 1\nhash + actor"] --> C1["commit slot 1\nvalue: note-v2\nparent: 0\nhash + actor"]
+    C1 --> C0["commit slot 0\nvalue: note-v1\nparent: none\nhash + actor"]
+
+    NSnote -. before rollback .-> C2
+    NSnote == after rollback 1 ==> C1
+```
+
+Commit record fields — parent ref, object hash (FNV-1a), actor task id, and a
+reversibility flag — are the on-disk seed of the effect ledger direction in
+[STRATEGIC_DIRECTION.md](STRATEGIC_DIRECTION.md) (D020).
+
+## Namespace Capability Attestation (F1/F2 core mechanic)
+
+The storage daemon never trusts what a client *says*; it checks what the
+kernel *attests* the sender holds.
+
+```mermaid
+sequenceDiagram
+    participant A as Agent app (holds ns=agent bit)
+    participant K as Kernel (SYS_SEND / SYS_RECV)
+    participant D as Storage daemon
+
+    A->>K: send commit request (ns=note)
+    Note over K: kernel records sender's<br/>capability set in the message
+    K->>D: deliver request + attested sender caps
+    Note over D: check bit for ns=note<br/>in attested caps
+    D-->>A: DENIED: ns=note requires CAIRN_NS_0,<br/>sender holds caps=0x...
+
+    A->>K: send commit request (ns=agent)
+    K->>D: deliver request + attested sender caps
+    D-->>A: OK: commit slot N, parent P, hash H
+```
+
+## Multi-ISA Execution (F3 direction)
+
+The same Dezh-IR bytecode runs on every Dezh kernel; only the thin host
+bindings differ per ISA.
+
+```mermaid
+flowchart TB
+    Source[".dzs source (SDK assembler)"] --> IR["Dezh-IR bytecode\n(verified, capability-gated)"]
+    IR --> Engine["dezh-core engine\n(one shared no_std crate)"]
+    Engine --> RV["RISC-V kernel host\nprint → UART, cairn → storage daemon"]
+    Engine --> X86["x86_64 kernel host\nprint → COM1"]
+```
 
 ## Authority And Denial
 

@@ -1,8 +1,14 @@
 # Dezh OS
 
 [![CI](https://github.com/alisalimi77/Dezh/actions/workflows/ci.yml/badge.svg)](https://github.com/alisalimi77/Dezh/actions/workflows/ci.yml)
+[![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
+[![Arch: RISC-V](https://img.shields.io/badge/arch-RISC--V-283272.svg)](dezh-boot/)
+[![Arch: x86_64](https://img.shields.io/badge/arch-x86__64-546e7a.svg)](dezh-boot-x86/)
+[![Made with Rust](https://img.shields.io/badge/made%20with-Rust-b7410e.svg)](Cargo.toml)
 
-**Repository description:** Intent-native, capability-secure OS research prototype with user-space drivers, typed IPC, transactional package lifecycle, and reboot-safe QEMU demos.
+**Intent-native, capability-secure OS research prototype** — user-space drivers,
+typed IPC, a rollbackable commit-log store, transactional package lifecycle,
+and reboot-safe QEMU demos.
 
 Dezh OS is a bare-metal operating-system research prototype. Its design rule is
 deliberately strict:
@@ -48,8 +54,30 @@ The long-term thesis is:
 - Reboot-safe package store for SDK-built `.dzp` apps.
 - Transactional package install/remove/update/rollback with journal recovery.
 - Package pin/unpin, review, explicit GC, quarantine, and cap-escalation review.
+- Cairn v1: an on-disk commit-log store with per-app namespaces. Every commit
+  records its parent ref, object hash, and actor; rollback moves a ref without
+  erasing history and survives reboot.
+- Kernel-attested capability checks in services: the kernel records the
+  sender's capabilities on every IPC message, so the storage service enforces
+  namespace access against values a client cannot forge — and denials name the
+  missing capability.
+- Agent containment: an SDK-built agent app runs with manifest-scoped grants
+  (its own namespace only), its bad write is undone by a one-step rollback,
+  and a no-capability app is denied by the kernel.
 - Embedded demo apps: `note`, `lab`, `calc`, and `vault`.
 - No-grant MMIO proof: a task without device grant faults without killing the console.
+
+## Flagship Demos
+
+One reproducible demo per differentiator (see the [roadmap](docs/ROADMAP.md)
+for scope and honest wording rules):
+
+| # | Differentiator | Status | Proof |
+| --- | --- | --- | --- |
+| F1 | Agent containment: narrow grants, kernel denial, attenuated delegation, rollback of an agent's damage | **Reproducible today** (in CI) | [`tools/demo/run_agent_demo.py`](tools/demo/run_agent_demo.py) → [transcript](docs/demo-transcript-agent-f1.md) |
+| F2 | Cairn storage: versioned commits, capability-gated namespaces, rollback across reboot | **Reproducible today** (in CI) | `cairn-demo` console flow, exercised by [`tools/ci/qemu_smoke.py`](tools/ci/qemu_smoke.py) incl. a second-boot persistence phase |
+| F3 | Multi-ISA apps: the same Dezh-IR program on RISC-V and x86_64 kernels | Partial: same IR program runs on both kernels; byte-identical `.dzp` on x86 is in progress | x86 smoke in CI |
+| F4 | Pol compatibility: unmodified static Linux binary, capability-gated | Planned (Linux ABI subset demo exists for embedded payloads) | `linux` console demo |
 
 ## System Shape
 
@@ -161,9 +189,19 @@ pkg-store
 pkg-review hello
 pkg-versions hello
 pkg-gc
+cairn-demo
+cairn-commit note hello
+cairn-log note
+cairn-rollback note 1
+cairn-verify note
+agent
 bench-all
 halt
 ```
+
+`cairn-demo` walks the full F2 flow: two commits, the log, a bad write, a
+one-step rollback, an integrity re-hash, and a cross-namespace request that
+the storage service denies based on kernel-attested sender capabilities.
 
 The SDK acceptance test covers the deeper package lifecycle:
 
@@ -181,6 +219,20 @@ The SDK acceptance test covers the deeper package lifecycle:
 - pin/unpin lifecycle changes
 - explicit physical cleanup with `pkg-gc run`
 
+## Measured Claims
+
+Dezh makes no bare "faster than X" claims. What has been measured so far
+(method and caveats in [dezh-boot/BENCH.md](dezh-boot/BENCH.md)):
+
+- A Dezh capability check costs **~0.98 ns** (native host build, i7-13650HX).
+  The Linux `getpid` syscall floor on the same CPU is **~49 ns** (WSL2 glibc
+  wrapper) — mediating an action by capability check is roughly **50× cheaper**
+  than mediating it by syscall on this machine. This backs the architecture
+  argument; it is a microbenchmark, not a whole-system claim.
+- The Dezh kernel `ecall` round-trip measures ~1 µs **under QEMU emulation**,
+  which is not comparable to native numbers and is reported only for
+  completeness.
+
 ## Repository Map
 
 See [docs/REPO_STRUCTURE.md](docs/REPO_STRUCTURE.md) for the full map.
@@ -197,8 +249,8 @@ High-level layout:
 | `dezh-cairn/` | Host-side persistent object/ref prototype |
 | `dezh-ir/` | Shared intermediate representation contracts |
 | `tools/ci/` | QEMU smoke and SDK lifecycle acceptance |
-| `tools/sdk/` | `.dzp` package builder and installer |
-| `tools/demo/` | Review/demo transcript runners |
+| `tools/sdk/` | `.dzp` package builder, installer, and app templates (`hello`, `agent`) |
+| `tools/demo/` | Review/demo transcript runners (incl. the F1 agent demo) |
 | `tools/review/` | Public review package and hygiene tooling |
 | `docs/` | Architecture, security model, roadmap, diagrams, review docs |
 
