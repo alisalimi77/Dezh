@@ -8,5 +8,8 @@ dist/
 # virtio-blk disk image (runtime artifact)
 dezh-boot/dezh-disk.img
 *.img
+
+# bootable ISO images (build artifacts of tools/x86/build-iso.sh)
+*.iso
 __pycache__/
 *.pyc

@@ -26,6 +26,26 @@ global_asm!(
     .asciz "Xen"
     .long _start
 
+/* Multiboot2 header: lets a standard bootloader (GRUB) load this same kernel
+   from a bootable ISO — the "install it like a real OS" path (VirtualBox /
+   VMware), which the QEMU `-kernel` PVH note above does not provide. arch=0
+   (i386) means GRUB hands off in 32-bit protected mode, exactly like PVH, so
+   the trampoline below is shared by both boot paths. GRUB uses the ELF entry
+   (_start); we read no boot-info, so PVH's and Multiboot2's differing register
+   handoff does not matter. */
+.section .multiboot_header, "a"
+.align 8
+mb2_start:
+    .long 0xE85250D6                                     /* magic */
+    .long 0                                              /* architecture: i386 */
+    .long mb2_end - mb2_start                            /* header length */
+    .long -(0xE85250D6 + 0 + (mb2_end - mb2_start))      /* checksum */
+    /* end tag */
+    .short 0
+    .short 0
+    .long 8
+mb2_end:
+
 .section .bss
 .align 4096
 pml4:  .skip 4096
@@ -142,18 +162,68 @@ fn serial_init() {
     }
 }
 
-fn putb(b: u8) {
+fn serial_putb(b: u8) {
     unsafe {
         while inb(COM1 + 5) & 0x20 == 0 {} // wait for THR empty
         outb(COM1, b);
     }
 }
 
+// --- VGA text mode (0xB8000) -------------------------------------------------
+// A bootloader-loaded kernel on real hardware / VirtualBox has no serial console
+// on screen; it has the VGA text buffer. We mirror every byte to both, so the
+// demo is visible whether the reviewer watches a serial capture (QEMU/CI) or the
+// VM window (VirtualBox). 0xB8000 is inside the first 2 MiB the trampoline
+// identity-maps, so it is reachable in long mode.
+const VGA_BUF: *mut u16 = 0xB8000 as *mut u16;
+const VGA_COLS: usize = 80;
+const VGA_ROWS: usize = 25;
+const VGA_ATTR: u16 = 0x0F00; // white on black
+static mut VGA_POS: usize = 0;
+
+fn vga_clear() {
+    for i in 0..VGA_COLS * VGA_ROWS {
+        unsafe { core::ptr::write_volatile(VGA_BUF.add(i), VGA_ATTR | b' ' as u16) };
+    }
+    unsafe { VGA_POS = 0 };
+}
+
+fn vga_putb(b: u8) {
+    unsafe {
+        let mut pos = VGA_POS;
+        if b == b'\r' {
+            return;
+        } else if b == b'\n' {
+            pos = (pos / VGA_COLS + 1) * VGA_COLS;
+        } else {
+            core::ptr::write_volatile(VGA_BUF.add(pos), VGA_ATTR | b as u16);
+            pos += 1;
+        }
+        if pos >= VGA_COLS * VGA_ROWS {
+            // scroll up one line
+            for i in 0..VGA_COLS * (VGA_ROWS - 1) {
+                let v = core::ptr::read_volatile(VGA_BUF.add(i + VGA_COLS));
+                core::ptr::write_volatile(VGA_BUF.add(i), v);
+            }
+            for i in VGA_COLS * (VGA_ROWS - 1)..VGA_COLS * VGA_ROWS {
+                core::ptr::write_volatile(VGA_BUF.add(i), VGA_ATTR | b' ' as u16);
+            }
+            pos = VGA_COLS * (VGA_ROWS - 1);
+        }
+        VGA_POS = pos;
+    }
+}
+
+fn putb(b: u8) {
+    if b == b'\n' {
+        serial_putb(b'\r');
+    }
+    serial_putb(b);
+    vga_putb(b);
+}
+
 fn print(s: &str) {
     for b in s.bytes() {
-        if b == b'\n' {
-            putb(b'\r');
-        }
         putb(b);
     }
 }
@@ -212,8 +282,9 @@ impl dezh_core::ir::Host for SerialHost {
 pub extern "C" fn kmain() -> ! {
     use dezh_core::ir;
     serial_init();
+    vga_clear();
     print("\n");
-    print("Dezh x86_64 — long mode reached. 64-bit kernel running.\n");
+    print("Dezh x86_64 - long mode reached. 64-bit kernel running.\n");
 
     // Run the SAME Dezh-IR agent program the RISC-V kernel runs — proof that the
     // shared core makes agents portable across ISAs (D003/D016).
