@@ -94,6 +94,16 @@ fold the mediation benchmark numbers into the published F1 material.
 - Acceptance: a binary compiled on stock Ubuntu runs on Dezh,
   capability-gated (no PRINT cap → denied).
 
+Status (2026-07-06): DONE. `dezh-boot/linux-guest` is a genuine static
+riscv64 musl ELF (no Dezh code) issuing the raw Linux syscall ABI via `ecall`;
+the console `linux-elf` command loads it under the Linux personality — `write`
+serviced by Pol with the PRINT cap, denied `-EACCES` without it, unsupported
+`getpid` returns a clean `-ENOSYS`. The very same bytes also run unmodified on
+real riscv64 Linux (verified under `qemu-riscv64-static`). Translation overhead
+is measured by the `bench-pol` command (native vs Pol path, kernel-timed):
+~0–80 ns/call, within noise of the ~780 ns emulated round trip — a fixed,
+near-noise dispatch (BENCH.md, F4). Both legs are in CI smoke.
+
 #### W5 — x86_64 to parity for F3 (largest chunk)
 
 - M2: IDT/exceptions + timer on the x86 kernel.
@@ -103,6 +113,20 @@ fold the mediation benchmark numbers into the published F1 material.
   delivers the "install it like a real OS" feel.
 - Acceptance: F3 — byte-identical package runs on both kernels; x86 ISO
   boots in VirtualBox.
+
+Status (2026-07-06): F3 and the bootable ISO are DONE; M2 is partial. The
+x86_64 kernel installs and runs a real `.dzp` agent package
+(pack → parse → verify → run) — the same architecture-independent format the
+SDK builds and the RISC-V kernel installs. The agent bytecode is pinned
+byte-identical by dezh-core's `demo_sum_bytes_are_pinned` test (in CI), so both
+ISAs provably execute the same bytes. A Multiboot2 header + `tools/x86/build-iso.sh`
+(GRUB `grub-mkrescue`) produce a BIOS ISO that boots in QEMU `-cdrom` **and in
+VirtualBox** (screenshot: docs/assets/dezh-x86-virtualbox.png); output is
+mirrored to the VGA text buffer so it is visible on the VM screen. The QEMU
+`-kernel` PVH path still works for CI. **Deferred (M2):** a full IDT/exception
+handler + timer on x86 — the flagship demos are straight-line and do not need
+it, but until it lands a CPU exception triple-faults the VM. Tracked as an
+honest limitation (W7 / STATUS).
 
 #### W6 — Independence and release packaging
 
