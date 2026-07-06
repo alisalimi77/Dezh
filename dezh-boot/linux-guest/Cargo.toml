@@ -1,0 +1,21 @@
+# A real, unmodified static Linux/RISC-V ELF — built for the standard
+# `riscv64gc-unknown-linux-musl` target triple, with NO Dezh-specific code. It
+# speaks the ordinary Linux riscv64 syscall ABI (write=64, getpid=172,
+# exit_group=94) straight through `ecall`. Dezh's loader runs it in its own
+# address space and the Pol personality layer services its syscalls,
+# capability-gated. The very same bytes also run on real riscv64 Linux.
+[package]
+name = "linux-guest"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[[bin]]
+name = "linux-guest"
+path = "src/main.rs"
+
+[profile.release]
+panic = "abort"
+opt-level = "z"
+
+[workspace]

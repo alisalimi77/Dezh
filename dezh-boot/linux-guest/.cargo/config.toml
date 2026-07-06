@@ -1,0 +1,18 @@
+# Build a genuine static Linux/RISC-V ELF from the Windows host without a C
+# cross-toolchain: target the musl Linux triple, but link with rust-lld and
+# drop the musl CRT startfiles (we provide our own freestanding `_start` and
+# link no libc), so the result is a small, fully static ET_EXEC.
+[build]
+target = "riscv64gc-unknown-linux-musl"
+
+[target.riscv64gc-unknown-linux-musl]
+linker = "rust-lld"
+rustflags = [
+    "-Clinker-flavor=ld.lld",
+    "-Crelocation-model=static",
+    "-Clink-arg=-no-pie",
+    "-Ctarget-feature=+crt-static",
+    "-Clink-self-contained=no",
+    "-Cdefault-linker-libraries=no",
+    "-Clink-arg=-Tlinker.ld",
+]

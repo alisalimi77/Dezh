@@ -18,9 +18,21 @@ fn main() {
     build_user_elf(&manifest, "lab-app", "dezh-lab");
     build_user_elf(&manifest, "calc-app", "dezh-calc");
     build_user_elf(&manifest, "vault-app", "dezh-vault");
+    // A real Linux/RISC-V target ELF (Pol demo, F4) — built for the standard
+    // musl Linux triple, not our bare-metal target.
+    build_user_elf_for(
+        &manifest,
+        "linux-guest",
+        "linux-guest",
+        "riscv64gc-unknown-linux-musl",
+    );
 }
 
 fn build_user_elf(manifest: &PathBuf, dir: &str, bin: &str) {
+    build_user_elf_for(manifest, dir, bin, "riscv64gc-unknown-none-elf");
+}
+
+fn build_user_elf_for(manifest: &PathBuf, dir: &str, bin: &str, target: &str) {
     let prog = manifest.join(dir);
     println!("cargo:rerun-if-changed={}", prog.join("src/main.rs").display());
     println!("cargo:rerun-if-changed={}", prog.join("linker.ld").display());
@@ -40,7 +52,7 @@ fn build_user_elf(manifest: &PathBuf, dir: &str, bin: &str) {
         .unwrap_or_else(|e| panic!("failed to spawn cargo for {dir}: {e}"));
     assert!(status.success(), "{dir} build failed");
 
-    let elf = prog.join(format!("target/riscv64gc-unknown-none-elf/release/{bin}"));
+    let elf = prog.join(format!("target/{target}/release/{bin}"));
     let out = PathBuf::from(env::var("OUT_DIR").unwrap()).join(format!("{bin}.elf"));
     fs::copy(&elf, &out)
         .unwrap_or_else(|e| panic!("copy {} -> {}: {e}", elf.display(), out.display()));

@@ -877,6 +877,9 @@ const NOTE_ELF: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/dezh-note.elf"
 const LAB_ELF: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/dezh-lab.elf"));
 const CALC_ELF: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/dezh-calc.elf"));
 const VAULT_ELF: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/dezh-vault.elf"));
+// An unmodified static Linux/RISC-V ELF, built for `riscv64gc-unknown-linux-musl`.
+// Loaded like any program but run with the Linux personality (Pol, D014/F4).
+const LINUX_GUEST_ELF: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/linux-guest.elf"));
 
 const DEV_UART_VA: usize = 0x5000_0000;
 const DEV_VIRTIO_BLK_VA: usize = 0x5000_0000;
@@ -942,6 +945,12 @@ impl ProcessSpec {
         self.arg1 = arg1;
         self.arg2 = arg2;
         self.arg3 = arg3;
+        self
+    }
+
+    /// Run this ELF under the Linux syscall personality (serviced by Pol).
+    const fn linux(mut self) -> Self {
+        self.personality = PERS_LINUX;
         self
     }
 }
@@ -1611,6 +1620,9 @@ extern "C" fn utrap_handler(frame_ptr: *mut usize) -> *const usize {
                                 }
                                 frame[F_A0] = frame[F_A2]; // bytes written
                             } else {
+                                kprintln!(
+                                    "  [pol/linux] write(fd={fd}) DENIED: task lacks PRINT capability -> -EACCES"
+                                );
                                 frame[F_A0] = LINUX_EACCES;
                             }
                         } else {
@@ -3841,6 +3853,38 @@ extern "C" fn bench_task() -> ! {
     sys_exit(0)
 }
 
+// --- Pol translation-overhead benchmark --------------------------------------
+// Two U-mode tasks doing the SAME zero-work syscall the same number of times:
+// one via the native Dezh `SYS_PRINT` path, one via the Linux `write` ABI routed
+// through the Pol personality layer. Both pass a zero-length buffer, so neither
+// touches the UART; the only difference on the kernel side is the personality
+// branch + Linux-ABI decode. The kernel times each run and reports the delta as
+// the per-syscall translation overhead. (QEMU-emulated; the delta is the honest
+// number for F4 — see BENCH.md.)
+const BENCH_POL_ITERS: usize = 200_000;
+
+#[link_section = ".user.text"]
+#[no_mangle]
+extern "C" fn bench_native_print_task() -> ! {
+    let mut i = 0;
+    while i < BENCH_POL_ITERS {
+        sys_print(b""); // native SYS_PRINT, zero-length: cap-checked, no output
+        i += 1;
+    }
+    sys_exit(0)
+}
+
+#[link_section = ".user.text"]
+#[no_mangle]
+extern "C" fn bench_pol_write_task() -> ! {
+    let mut i = 0;
+    while i < BENCH_POL_ITERS {
+        linux_write(1, b""); // Linux write(2) ABI, zero-length: serviced by Pol
+        i += 1;
+    }
+    linux_exit(0)
+}
+
 #[link_section = ".user.text"]
 #[no_mangle]
 extern "C" fn linux_app() -> ! {
@@ -4494,11 +4538,25 @@ const COMMANDS: &[CommandSpec] = &[
         help: "run a Linux-ABI app via the Pol personality",
     },
     CommandSpec {
+        name: "linux-elf",
+        cap: cap::SPAWN,
+        cap_name: "SPAWN",
+        group: "Demos",
+        help: "load a REAL static Linux/RISC-V ELF (F4); denied without PRINT",
+    },
+    CommandSpec {
         name: "bench",
         cap: cap::SPAWN,
         cap_name: "SPAWN",
         group: "Demos",
         help: "measure ecall round-trip cost (U-mode task)",
+    },
+    CommandSpec {
+        name: "bench-pol",
+        cap: cap::SPAWN,
+        cap_name: "SPAWN",
+        group: "Demos",
+        help: "measure Pol Linux-ABI translation overhead vs the native path (F4)",
     },
     CommandSpec {
         name: "bench-os",
@@ -5119,9 +5177,47 @@ fn dispatch(cmd: &str, arg: &str, plan: &KernelPlan, memory: &[MemoryRegion], he
             run_tasks(&[(linux_app as usize, TASK_PRINT, PERS_LINUX)]);
             kprintln!("[kernel] Linux app done; back in the console");
         }
+        "linux-elf" => {
+            kprintln!(
+                "[kernel] loading a REAL unmodified static Linux/RISC-V ELF ({} bytes,",
+                LINUX_GUEST_ELF.len()
+            );
+            kprintln!("         target=riscv64gc-unknown-linux-musl) into its own address space.");
+            kprintln!("[kernel] --- WITH the print capability: Pol services its syscalls ---");
+            record_event("kernel", "pol.elf.run", "process", "start");
+            run_foreground_processes(&[ProcessSpec::new(LINUX_GUEST_ELF, TASK_PRINT, 0).linux()]);
+            kprintln!("[kernel] --- WITHOUT the print capability: kernel DENIES write ---");
+            run_foreground_processes(&[ProcessSpec::new(LINUX_GUEST_ELF, 0, 0).linux()]);
+            record_event("kernel", "pol.elf.run", "process", "OK");
+            kprintln!("[kernel] the same ELF also runs on real riscv64 Linux; back in the console");
+        }
         "bench" => {
             kprintln!("[kernel] running ecall round-trip microbenchmark (500000 calls)...");
             run_tasks(&[(bench_task as usize, 0, PERS_NATIVE)]);
+            kprintln!("[kernel] benchmark done");
+        }
+        "bench-pol" => {
+            // Same zero-work syscall via two paths: native SYS_PRINT vs the Linux
+            // write(2) ABI routed through Pol. The kernel times both; the delta is
+            // the per-syscall translation overhead (F4, D015). QEMU-emulated.
+            kprintln!(
+                "[kernel] Pol translation microbenchmark ({} calls each): native SYS_PRINT vs Linux write(2)...",
+                BENCH_POL_ITERS
+            );
+            let n = BENCH_POL_ITERS as u64;
+            let t0 = rdtime();
+            run_tasks(&[(bench_native_print_task as usize, TASK_PRINT, PERS_NATIVE)]);
+            let t1 = rdtime();
+            run_tasks(&[(bench_pol_write_task as usize, TASK_PRINT, PERS_LINUX)]);
+            let t2 = rdtime();
+            let native_ns = t1.wrapping_sub(t0).saturating_mul(100) / n;
+            let pol_ns = t2.wrapping_sub(t1).saturating_mul(100) / n;
+            let overhead = pol_ns.saturating_sub(native_ns);
+            kprintln!("  [bench-pol] native SYS_PRINT round-trip:   ~{native_ns} ns/call (QEMU-emulated)");
+            kprintln!("  [bench-pol] Pol Linux write(2) round-trip: ~{pol_ns} ns/call (QEMU-emulated)");
+            kprintln!(
+                "  [bench-pol] Pol translation overhead: ~{overhead} ns/call (delta over native, emulated)"
+            );
             kprintln!("[kernel] benchmark done");
         }
         "bench-os" => run_bench_os(),

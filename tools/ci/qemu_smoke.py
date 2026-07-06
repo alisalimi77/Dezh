@@ -128,6 +128,16 @@ def run_riscv64(qemu: str, kernel: Path) -> None:
             ("ipcq", "FIFO mailbox preserved both client messages"),
             ("queues", "queue demo done; back in the console"),
             ("linux", "unsupported syscall, denied cleanly"),
+            (
+                "linux-elf",
+                [
+                    "loading a REAL unmodified static Linux/RISC-V ELF",
+                    "[linux] hello from an unmodified static riscv64 Linux ELF",
+                    "getpid() -> -ENOSYS: unsupported syscall, denied cleanly",
+                    "write(fd=1) DENIED: task lacks PRINT capability",
+                    "also runs on real riscv64 Linux",
+                ],
+            ),
             ("services", "VirtioBlock state=Running"),
             ("tasks", "service=virtio-block"),
             ("install-check", "install-check: no Dezh root marker yet"),
@@ -237,6 +247,14 @@ def run_riscv64(qemu: str, kernel: Path) -> None:
             ),
             ("events", "cairn.demo"),
             ("deny", "Pol denial demo skipped here to keep running services alive"),
+            (
+                "bench-pol",
+                [
+                    "native SYS_PRINT round-trip:",
+                    "Pol Linux write(2) round-trip:",
+                    "Pol translation overhead:",
+                ],
+            ),
             (
                 "bench-all",
                 [
