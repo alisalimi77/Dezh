@@ -1,0 +1,63 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="420" viewBox="0 0 1280 420" role="img" aria-labelledby="title desc">
+  <title id="title">Dezh OS capability-secure architecture banner</title>
+  <desc id="desc">A clean architecture banner showing the Dezh OS kernel boundary, user-space services, typed IPC, package lifecycle, and service-mediated storage.</desc>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#0b1020"/>
+      <stop offset="0.55" stop-color="#15263a"/>
+      <stop offset="1" stop-color="#10251f"/>
+    </linearGradient>
+    <linearGradient id="line" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#5eead4"/>
+      <stop offset="0.5" stop-color="#93c5fd"/>
+      <stop offset="1" stop-color="#bef264"/>
+    </linearGradient>
+    <filter id="soft" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="12" stdDeviation="18" flood-color="#020617" flood-opacity="0.45"/>
+    </filter>
+    <style>
+      .title { fill: #f8fafc; font: 700 76px Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; letter-spacing: 0; }
+      .tag { fill: #cbd5e1; font: 500 27px Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; letter-spacing: 0; }
+      .small { fill: #94a3b8; font: 500 18px Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; letter-spacing: 0; }
+      .label { fill: #e2e8f0; font: 700 21px Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; letter-spacing: 0; }
+      .note { fill: #b6c4d3; font: 500 16px Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; letter-spacing: 0; }
+      .box { fill: #111827; stroke: #334155; stroke-width: 1.5; rx: 8; filter: url(#soft); }
+      .accent { stroke: url(#line); stroke-width: 4; stroke-linecap: round; fill: none; }
+      .thin { stroke: #64748b; stroke-width: 1.2; stroke-linecap: round; fill: none; opacity: 0.8; }
+    </style>
+  </defs>
+  <rect width="1280" height="420" fill="url(#bg)"/>
+  <path d="M0 343 C160 316 252 372 407 337 C563 301 651 238 808 275 C960 311 1052 368 1280 312 L1280 420 L0 420 Z" fill="#07111f" opacity="0.55"/>
+  <path d="M92 92 H1188" class="accent"/>
+  <text x="92" y="175" class="title">Dezh OS</text>
+  <text x="96" y="225" class="tag">Intent-native capability security for services, storage, and apps</text>
+  <text x="98" y="262" class="small">User-space drivers · Typed IPC · Transactional app lifecycle · Reboot-safe QEMU demos</text>
+
+  <g transform="translate(700 128)">
+    <rect class="box" width="176" height="82"/>
+    <text x="22" y="36" class="label">Kernel</text>
+    <text x="22" y="62" class="note">isolation gates</text>
+  </g>
+  <g transform="translate(938 62)">
+    <rect class="box" width="206" height="82"/>
+    <text x="22" y="36" class="label">U-mode driver</text>
+    <text x="22" y="62" class="note">virtio-block grants</text>
+  </g>
+  <g transform="translate(932 202)">
+    <rect class="box" width="222" height="82"/>
+    <text x="22" y="36" class="label">Package store</text>
+    <text x="22" y="62" class="note">journal + rollback</text>
+  </g>
+  <g transform="translate(686 286)">
+    <rect class="box" width="210" height="82"/>
+    <text x="22" y="36" class="label">Apps</text>
+    <text x="22" y="62" class="note">manifest-scoped caps</text>
+  </g>
+
+  <path d="M876 169 C916 147 914 108 938 102" class="thin"/>
+  <path d="M876 180 C923 198 908 238 932 244" class="thin"/>
+  <path d="M782 210 C785 242 788 269 792 286" class="thin"/>
+  <circle cx="900" cy="153" r="4" fill="#5eead4"/>
+  <circle cx="904" cy="214" r="4" fill="#93c5fd"/>
+  <circle cx="790" cy="256" r="4" fill="#bef264"/>
+</svg>

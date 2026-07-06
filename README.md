@@ -1,29 +1,75 @@
-# Dezh OS
+<p align="center">
+  <img src="docs/assets/dezh-readme-banner.svg" alt="Dezh OS capability-secure architecture banner" width="100%">
+</p>
 
-[![CI](https://github.com/alisalimi77/Dezh/actions/workflows/ci.yml/badge.svg)](https://github.com/alisalimi77/Dezh/actions/workflows/ci.yml)
-[![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
-[![Arch: RISC-V](https://img.shields.io/badge/arch-RISC--V-283272.svg)](dezh-boot/)
-[![Arch: x86_64](https://img.shields.io/badge/arch-x86__64-546e7a.svg)](dezh-boot-x86/)
-[![Made with Rust](https://img.shields.io/badge/made%20with-Rust-b7410e.svg)](Cargo.toml)
+<p align="center">
+  <a href="https://github.com/alisalimi77/Dezh/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/alisalimi77/Dezh/actions/workflows/ci.yml/badge.svg"></a>
+  <a href="LICENSE"><img alt="Apache-2.0" src="https://img.shields.io/badge/license-Apache--2.0-blue.svg"></a>
+  <a href="https://github.com/alisalimi77/Dezh/releases/tag/v0.1-review"><img alt="Review release" src="https://img.shields.io/badge/release-v0.1--review-0f766e.svg"></a>
+  <a href="dezh-boot/"><img alt="RISC-V" src="https://img.shields.io/badge/arch-RISC--V-283272.svg"></a>
+  <a href="dezh-boot-x86/"><img alt="x86_64" src="https://img.shields.io/badge/arch-x86__64-546e7a.svg"></a>
+  <a href="Cargo.toml"><img alt="Rust" src="https://img.shields.io/badge/made%20with-Rust-b7410e.svg"></a>
+</p>
 
-**Intent-native, capability-secure OS research prototype** — user-space drivers,
-typed IPC, a rollbackable commit-log store, transactional package lifecycle,
-and reboot-safe QEMU demos.
+<p align="center">
+  <strong>Intent-native, capability-secure OS prototype</strong><br>
+  User-space drivers · Typed IPC · Rollbackable storage · Transactional apps · Reboot-safe QEMU demos
+</p>
 
-Dezh OS is a bare-metal operating-system research prototype. Its design rule is
-deliberately strict:
+<p align="center">
+  <a href="#quick-review-path">Quick Review</a> ·
+  <a href="#flagship-demos">Flagship Demos</a> ·
+  <a href="docs/ARCHITECTURE.md">Architecture</a> ·
+  <a href="docs/SECURITY_MODEL.md">Security Model</a> ·
+  <a href="docs/RELEASE_PROCESS.md">Release Process</a>
+</p>
+
+Dezh OS is a bare-metal operating-system prototype built around one strict
+rule:
 
 > No program, app, service, package, driver, or recovery path starts with
 > ambient authority. Every effect must be backed by an explicit capability,
 > grant, namespace, service route, or transaction.
 
-The current prototype boots on QEMU RISC-V, validates a boot contract, runs
+The current system boots on QEMU RISC-V, validates a boot contract, runs
 isolated U-mode processes, starts a long-lived user-space `virtio-block`
 driver, exercises typed IPC, installs SDK-built `.dzp` packages onto a real
 disk image, and validates package update/rollback/recovery across reboot.
 
-This is not a production operating system. It is a working research artifact
-intended for technical review.
+Dezh is not production-ready. It is an executable OS prototype prepared for
+architectural and security-model review.
+
+## At A Glance
+
+| Surface | Current evidence |
+| --- | --- |
+| Boot path | RISC-V QEMU bare-metal boot with validated boot contract |
+| Isolation | Sv39 U-mode process isolation with contained page faults |
+| Authority | Capability-gated syscalls, IPC, storage namespaces, and device grants |
+| Driver model | `virtio-block` runs as a U-mode service with explicit MMIO/DMA grants |
+| IPC | Typed request/reply path with status codes, timeouts, and counters |
+| Persistence | Cairn v1 commit log with rollbackable refs and per-app namespaces |
+| Apps | `.dzp` packages with manifest-scoped caps and transactional lifecycle |
+| Review release | [`v0.1-review`](https://github.com/alisalimi77/Dezh/releases/tag/v0.1-review) with kernels, transcript, docs, checksums |
+
+## Review Snapshot
+
+```text
+dezh> services
+VirtioBlock state=Running task=0 restarts=0
+
+dezh> ipc-typed-demo
+[typed-ipc] PASS: OK=OK, BAD_REQUEST=BAD_REQUEST, TIMEOUT=TIMEOUT, DENIED=DENIED
+
+dezh> app-run lab
+Dezh Lab :: installable app system probe
+[lab-ui] PASS: scheduler, IPC, installer launch, and UI path cooperated
+
+dezh> cairn-demo
+[cairn-demo] rollback one step restores the previous commit
+[cairn] DENIED: ns=note requires capability CAIRN_NS_0
+[cairn-demo] PASS
+```
 
 ## Why Dezh Exists
 
@@ -102,6 +148,15 @@ More diagrams: [docs/ARCHITECTURE_DIAGRAMS.md](docs/ARCHITECTURE_DIAGRAMS.md)
 
 ## Quick Review Path
 
+The shortest useful path is:
+
+```sh
+python tools/review/run_full_review.py --quick
+```
+
+That command builds the review surface, runs host checks, boots both QEMU
+targets, and emits a transcript for the RISC-V demo path.
+
 Prerequisites:
 
 - Rust stable
@@ -118,23 +173,16 @@ rustup target add riscv64gc-unknown-none-elf
 rustup target add x86_64-unknown-none
 ```
 
-Run host tests:
+Manual path:
 
-```sh
-cargo test --locked --workspace
-```
+| Step | Command |
+| --- | --- |
+| Host tests | `cargo test --locked --workspace` |
+| RISC-V build | `cd dezh-boot && cargo build --locked` |
+| x86_64 build | `cd dezh-boot-x86 && cargo build --locked` |
+| Hygiene scan | `python tools/review/scan_public.py` |
 
-Build the bare-metal kernels:
-
-```sh
-cd dezh-boot
-cargo build --locked
-cd ../dezh-boot-x86
-cargo build --locked
-cd ..
-```
-
-Run the RISC-V smoke test with a real temporary disk image:
+RISC-V smoke test with a real temporary disk image:
 
 ```sh
 python tools/ci/qemu_smoke.py riscv64 \
@@ -142,24 +190,12 @@ python tools/ci/qemu_smoke.py riscv64 \
   --qemu qemu-system-riscv64
 ```
 
-Run the SDK package lifecycle acceptance test:
+SDK package lifecycle acceptance:
 
 ```sh
 python tools/ci/sdk_test.py \
   --kernel dezh-boot/target/riscv64gc-unknown-none-elf/debug/dezh-boot \
   --qemu qemu-system-riscv64
-```
-
-Run the public hygiene scan:
-
-```sh
-python tools/review/scan_public.py
-```
-
-Run the consolidated review suite:
-
-```sh
-python tools/review/run_full_review.py --quick
 ```
 
 Release tags build public review artifacts and a GitHub Container Registry
@@ -258,32 +294,23 @@ High-level layout:
 
 ## Documentation
 
-- [Documentation index](docs/INDEX.md)
-- [Getting started](docs/GETTING_STARTED.md)
-- [Build and run](docs/BUILD_AND_RUN.md)
-- [Architecture](docs/ARCHITECTURE.md)
-- [Architecture diagrams](docs/ARCHITECTURE_DIAGRAMS.md)
-- [Security model](docs/SECURITY_MODEL.md)
-- [Strategic direction](docs/STRATEGIC_DIRECTION.md)
-- [SDK guide](docs/SDK_GUIDE.md)
-- [Reviewer guide](docs/REVIEWER_GUIDE.md)
-- [Demo script](docs/DEMO_SCRIPT.md)
-- [Whitepaper](docs/WHITEPAPER.md)
-- [Roadmap](docs/ROADMAP.md)
-- [Architecture decisions](docs/DECISIONS.md)
-- [Repo structure](docs/REPO_STRUCTURE.md)
-- [FAQ](docs/FAQ.md)
-- [Release notes](docs/RELEASE_NOTES.md)
-- [Release process](docs/RELEASE_PROCESS.md)
-- [Packages and releases](docs/PACKAGES_AND_RELEASES.md)
+| Start here | Architecture | Review evidence |
+| --- | --- | --- |
+| [Documentation index](docs/INDEX.md) | [Architecture](docs/ARCHITECTURE.md) | [Reviewer guide](docs/REVIEWER_GUIDE.md) |
+| [Getting started](docs/GETTING_STARTED.md) | [Architecture diagrams](docs/ARCHITECTURE_DIAGRAMS.md) | [Demo script](docs/DEMO_SCRIPT.md) |
+| [Build and run](docs/BUILD_AND_RUN.md) | [Security model](docs/SECURITY_MODEL.md) | [Release notes](docs/RELEASE_NOTES.md) |
+| [FAQ](docs/FAQ.md) | [Whitepaper](docs/WHITEPAPER.md) | [Release process](docs/RELEASE_PROCESS.md) |
+| [Repo structure](docs/REPO_STRUCTURE.md) | [Strategic direction](docs/STRATEGIC_DIRECTION.md) | [Packages and releases](docs/PACKAGES_AND_RELEASES.md) |
+| [Changelog](CHANGELOG.md) | [Roadmap](docs/ROADMAP.md) | [Architecture decisions](docs/DECISIONS.md) |
 
 ## Governance
 
-- [License](LICENSE)
-- [Security policy](SECURITY.md)
-- [Contributing](CONTRIBUTING.md)
-- [Code of conduct](CODE_OF_CONDUCT.md)
-- [Changelog](CHANGELOG.md)
+| File | Purpose |
+| --- | --- |
+| [License](LICENSE) | Apache-2.0 licensing |
+| [Security policy](SECURITY.md) | Private vulnerability reporting and supported scope |
+| [Contributing](CONTRIBUTING.md) | Branch, test, design, and review rules |
+| [Code of conduct](CODE_OF_CONDUCT.md) | Expected conduct for public review |
 
 ## Current Limitations
 
@@ -301,8 +328,8 @@ High-level layout:
 
 ## Project Status
 
-Dezh is ready for architectural review as a research prototype. The most useful
-feedback areas are:
+Dezh is ready for architectural review as an executable OS prototype. The most
+useful feedback areas are:
 
 - capability and authority model clarity
 - whether the user-space driver boundary is in the right place
