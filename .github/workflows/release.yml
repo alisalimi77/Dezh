@@ -26,10 +26,12 @@ jobs:
         with:
           targets: wasm32-unknown-unknown,riscv64gc-unknown-none-elf,x86_64-unknown-none
 
-      - name: Install QEMU
+      - name: Install QEMU and ISO tooling
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends qemu-system-misc qemu-system-x86
+          sudo apt-get install -y --no-install-recommends \
+            qemu-system-misc qemu-system-x86 \
+            grub-pc-bin grub2-common xorriso mtools
 
       - name: Cache Cargo
         uses: Swatinem/rust-cache@v2
@@ -71,6 +73,13 @@ jobs:
 
       - name: Build release artifacts
         run: python3 tools/review/build_release_artifacts.py --tag "${{ github.ref_name }}"
+
+      - name: Boot the release x86 ISO in QEMU (validate the artifact)
+        run: >
+          python3 tools/ci/qemu_smoke.py x86_64
+          --iso dist/release/dezh-${{ github.ref_name }}-x86_64.iso
+          --kernel dezh-boot-x86/target/x86_64-unknown-none/debug/dezh-boot-x86
+          --qemu qemu-system-x86_64
 
       - name: Upload workflow artifact
         uses: actions/upload-artifact@v4

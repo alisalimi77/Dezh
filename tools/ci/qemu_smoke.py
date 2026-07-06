@@ -342,7 +342,14 @@ def run_riscv64(qemu: str, kernel: Path) -> None:
             pass
 
 
-def run_x86_64(qemu: str, kernel: Path) -> None:
+def run_x86_64(qemu: str, kernel: Path, iso: Path | None = None) -> None:
+    # Two boot paths, same kernel, same asserted output: the QEMU `-kernel` PVH
+    # note (developer loop) and the GRUB Multiboot2 ISO (`-cdrom`, the path that
+    # also boots VirtualBox/VMware). Running both here keeps them honest.
+    if iso is not None:
+        boot = ["-cdrom", str(iso)]
+    else:
+        boot = ["-kernel", str(kernel)]
     session = QemuSession(
         [
             qemu,
@@ -351,10 +358,9 @@ def run_x86_64(qemu: str, kernel: Path) -> None:
             "-serial",
             "stdio",
             "-no-reboot",
-            "-kernel",
-            str(kernel),
+            *boot,
         ],
-        timeout=20,
+        timeout=30,
     )
     try:
         session.wait_for("Dezh x86_64")
@@ -374,17 +380,26 @@ def main() -> int:
     parser.add_argument("target", choices=["riscv64", "x86_64"])
     parser.add_argument("--kernel", required=True, type=Path)
     parser.add_argument("--qemu", required=True)
+    parser.add_argument(
+        "--iso",
+        type=Path,
+        default=None,
+        help="x86_64 only: boot this GRUB ISO via -cdrom instead of -kernel",
+    )
     args = parser.parse_args()
 
-    if not args.kernel.exists():
+    if args.iso is None and not args.kernel.exists():
         print(f"kernel not found: {args.kernel}", file=sys.stderr)
+        return 2
+    if args.iso is not None and not args.iso.exists():
+        print(f"iso not found: {args.iso}", file=sys.stderr)
         return 2
 
     try:
         if args.target == "riscv64":
             run_riscv64(args.qemu, args.kernel)
         else:
-            run_x86_64(args.qemu, args.kernel)
+            run_x86_64(args.qemu, args.kernel, args.iso)
     except Exception as exc:
         msg = str(exc).replace("%", "%25").replace("\n", "%0A").replace("\r", "%0D")
         print(f"::error title=QEMU smoke failed::{msg}", file=sys.stderr)

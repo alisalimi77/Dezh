@@ -63,6 +63,71 @@ def zip_docs(tag: str) -> Path:
     return archive
 
 
+def build_x86_iso(tag: str) -> Path | None:
+    """Build the bootable x86_64 GRUB ISO (the VirtualBox/VMware artifact).
+
+    Non-fatal if the GRUB tooling is absent (e.g. a Windows host): the release
+    still ships the kernels, and the miss is logged loudly rather than hidden.
+    On the Linux CI runner the tools are installed, so the ISO is produced.
+    """
+    iso = OUT / f"dezh-{tag}-x86_64.iso"
+    script = ROOT / "tools" / "x86" / "build-iso.sh"
+    if shutil.which("grub-mkrescue") is None or shutil.which("bash") is None:
+        print(
+            "WARNING: grub-mkrescue/bash not found; skipping bootable x86 ISO "
+            "(install grub-pc-bin, grub2-common, xorriso, mtools to include it)",
+            file=sys.stderr,
+        )
+        return None
+    try:
+        run(["bash", str(script), str(X86_KERNEL), str(iso)])
+    except subprocess.CalledProcessError as exc:
+        print(f"WARNING: x86 ISO build failed ({exc}); skipping", file=sys.stderr)
+        return None
+    return iso
+
+
+def write_run_instructions(tag: str, have_iso: bool) -> Path:
+    """A copy-paste RUN.txt so a stranger can boot the release with no repo."""
+    riscv = f"dezh-{tag}-riscv64-qemu-kernel.elf"
+    iso = f"dezh-{tag}-x86_64.iso"
+    lines = [
+        "Dezh OS — how to run this release in a VM",
+        "=========================================",
+        "",
+        "RISC-V (QEMU one-liner):",
+        "",
+        f"  qemu-system-riscv64 -machine virt -nographic -bios default -kernel {riscv} \\",
+        "    -drive file=dezh-disk.img,format=raw,if=none,id=hd0 \\",
+        "    -device virtio-blk-device,drive=hd0",
+        "",
+        "  (create the disk once: `qemu-img create -f raw dezh-disk.img 4M`,",
+        "   or run without the two -drive/-device lines to skip persistence.)",
+        "  At the `dezh>` prompt try: caps, linux-elf, cairn-demo, agent, bench-pol, help.",
+        "",
+        "x86_64 in VirtualBox / VMware (bootable ISO):",
+        "",
+        f"  1. New VM, type 'Other/Unknown 64-bit', 128 MB RAM, no disk.",
+        f"  2. Attach {iso} as the optical/CD drive.",
+        "  3. Start the VM. The kernel boots to long mode and runs the .dzp agent",
+        "     on screen (capability-gated: prints 15, then DENIED without the cap).",
+        "",
+        "x86_64 in QEMU (same ISO):",
+        "",
+        f"  qemu-system-x86_64 -cdrom {iso} -serial stdio",
+        "",
+    ]
+    if not have_iso:
+        lines.insert(
+            0,
+            "NOTE: this build did not include the x86 ISO (GRUB tooling absent at "
+            "build time); build it with tools/x86/build-iso.sh.\n",
+        )
+    dest = OUT / "RUN.txt"
+    dest.write_text("\n".join(lines), encoding="utf-8")
+    return dest
+
+
 def build_sdk_packages(tag: str) -> list[Path]:
     packages: list[Path] = []
     templates = [ROOT / "tools" / "sdk" / "templates" / "hello"]
@@ -131,6 +196,11 @@ def main() -> int:
 
     if transcript.exists():
         artifacts.append(transcript)
+
+    iso = build_x86_iso(args.tag)
+    if iso is not None:
+        artifacts.append(iso)
+    artifacts.append(write_run_instructions(args.tag, iso is not None))
 
     artifacts.extend(build_sdk_packages(args.tag))
     artifacts.append(zip_docs(args.tag))
