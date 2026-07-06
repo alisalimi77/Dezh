@@ -91,6 +91,25 @@ pub fn crc32(parts: &[&[u8]]) -> u32 {
     !crc
 }
 
+/// Encode a `.dzp` package into `out`, returning its total length. The inverse
+/// of [`parse`]: writes the header (with a fresh CRC-32 over manifest||payload),
+/// the manifest, then the payload. `out` must hold at least
+/// `HEADER_LEN + manifest.len() + payload.len()` bytes. Alloc-free so the same
+/// code path is usable from the SDK and from `no_std` tooling.
+pub fn pack(kind: u16, manifest: &str, payload: &[u8], out: &mut [u8]) -> usize {
+    let m = manifest.as_bytes();
+    let total = HEADER_LEN + m.len() + payload.len();
+    out[0..4].copy_from_slice(MAGIC);
+    out[4..6].copy_from_slice(&VERSION.to_le_bytes());
+    out[6..8].copy_from_slice(&kind.to_le_bytes());
+    out[8..12].copy_from_slice(&(m.len() as u32).to_le_bytes());
+    out[12..16].copy_from_slice(&(payload.len() as u32).to_le_bytes());
+    out[16..20].copy_from_slice(&crc32(&[m, payload]).to_le_bytes());
+    out[HEADER_LEN..HEADER_LEN + m.len()].copy_from_slice(m);
+    out[HEADER_LEN + m.len()..total].copy_from_slice(payload);
+    total
+}
+
 /// Parse and integrity-check a `.dzp` byte buffer.
 pub fn parse(bytes: &[u8]) -> Result<Package<'_>, DzpError> {
     if bytes.len() < HEADER_LEN {
@@ -196,16 +215,7 @@ mod tests {
     use super::*;
 
     fn build(kind: u16, manifest: &str, payload: &[u8], out: &mut [u8]) -> usize {
-        let m = manifest.as_bytes();
-        out[0..4].copy_from_slice(MAGIC);
-        out[4..6].copy_from_slice(&VERSION.to_le_bytes());
-        out[6..8].copy_from_slice(&kind.to_le_bytes());
-        out[8..12].copy_from_slice(&(m.len() as u32).to_le_bytes());
-        out[12..16].copy_from_slice(&(payload.len() as u32).to_le_bytes());
-        out[16..20].copy_from_slice(&crc32(&[m, payload]).to_le_bytes());
-        out[20..20 + m.len()].copy_from_slice(m);
-        out[20 + m.len()..20 + m.len() + payload.len()].copy_from_slice(payload);
-        20 + m.len() + payload.len()
+        pack(kind, manifest, payload, out)
     }
 
     const MANIFEST: &str = "name = \"hello\"\nversion = \"0.1.0\"\ncaps = [\"print\", \"ipc\"]\n";

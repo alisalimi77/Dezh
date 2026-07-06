@@ -359,7 +359,8 @@ def run_x86_64(qemu: str, kernel: Path) -> None:
     try:
         session.wait_for("Dezh x86_64")
         session.wait_for("long mode reached. 64-bit kernel running.")
-        session.wait_for("Dezh-IR agent (sum 1..=5 with a loop) on x86_64:")
+        session.wait_for("Dezh .dzp agent package (sum 1..=5 with a loop) on x86_64:")
+        session.wait_for(".dzp verified: kind=dezh-ir, name=agent-sum")
         session.wait_for("[ir] => 15")
         session.wait_for("[ir] DENIED: agent holds no PRINT capability")
     finally:

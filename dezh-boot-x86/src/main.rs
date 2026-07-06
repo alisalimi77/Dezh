@@ -286,21 +286,43 @@ pub extern "C" fn kmain() -> ! {
     print("\n");
     print("Dezh x86_64 - long mode reached. 64-bit kernel running.\n");
 
-    // Run the SAME Dezh-IR agent program the RISC-V kernel runs — proof that the
-    // shared core makes agents portable across ISAs (D003/D016).
-    print("Dezh-IR agent (sum 1..=5 with a loop) on x86_64:\n");
-    let mut buf = [0u8; 256];
-    let prog = ir::demo_sum(&mut buf);
-    match ir::verify(prog) {
-        Err(_) => print("  verify failed\n"),
-        Ok(()) => {
-            print("  verified. with PRINT capability:\n");
-            let mut h = SerialHost { cap: true };
-            let _ = ir::run(prog, &mut h);
-            print("  without PRINT capability:\n");
-            let mut h = SerialHost { cap: false };
-            if ir::run(prog, &mut h) == Err(ir::Trap::MissingCapability) {
-                print("  [ir] DENIED: agent holds no PRINT capability\n");
+    // Install and run a real .dzp package (F3, D003/D016): the SAME Dezh-IR bytes
+    // the RISC-V kernel runs, wrapped in the SAME architecture-independent .dzp
+    // format the SDK builds. We pack it, then parse it back exactly as an install
+    // flow would (magic + version + CRC + manifest checks) and run the payload.
+    // The bytes are pinned byte-identical by dezh-core's `demo_sum_bytes_are_pinned`
+    // test, so what installs on one ISA is exactly what runs on the other.
+    use dezh_core::dzp;
+    print("Dezh .dzp agent package (sum 1..=5 with a loop) on x86_64:\n");
+    let mut prog_buf = [0u8; 256];
+    let prog = ir::demo_sum(&mut prog_buf);
+    let manifest = "name = \"agent-sum\"\nversion = \"0.1.0\"\ncaps = [\"print\"]\n";
+    let mut pkg = [0u8; 512];
+    let n = dzp::pack(dzp::KIND_DEZH_IR, manifest, prog, &mut pkg);
+    match dzp::parse(&pkg[..n]) {
+        Err(e) => {
+            print("  .dzp parse failed: ");
+            print(e.msg());
+            print("\n");
+        }
+        Ok(p) => {
+            print("  .dzp verified: kind=");
+            print(dzp::kind_name(p.kind));
+            print(", name=");
+            print(dzp::manifest_str(p.manifest, "name").unwrap_or("?"));
+            print("\n");
+            match ir::verify(p.payload) {
+                Err(_) => print("  IR verify failed\n"),
+                Ok(()) => {
+                    print("  with PRINT capability:\n");
+                    let mut h = SerialHost { cap: true };
+                    let _ = ir::run(p.payload, &mut h);
+                    print("  without PRINT capability:\n");
+                    let mut h = SerialHost { cap: false };
+                    if ir::run(p.payload, &mut h) == Err(ir::Trap::MissingCapability) {
+                        print("  [ir] DENIED: agent holds no PRINT capability\n");
+                    }
+                }
             }
         }
     }

@@ -545,6 +545,43 @@ mod tests {
     }
 
     #[test]
+    fn demo_sum_bytes_are_pinned() {
+        // F3 (multi-ISA, D003/D016): the agent's program bytes are fixed and
+        // architecture-independent. The RISC-V and x86_64 kernels both link this
+        // crate and execute these exact bytes, so pinning them here guarantees
+        // the two ISAs run a byte-identical program. If this ever fails, the
+        // multi-ISA portability claim must be re-verified on both kernels.
+        let mut buf = [0u8; 256];
+        let prog = demo_sum(&mut buf);
+        assert_eq!(prog.len(), 138, "demo_sum length changed");
+        assert_eq!(
+            crate::dzp::crc32(&[prog]),
+            3_584_961_551,
+            "demo_sum bytecode changed - multi-ISA byte-identity broken"
+        );
+    }
+
+    #[test]
+    fn demo_sum_survives_dzp_roundtrip() {
+        // The same bytes wrapped in a .dzp package (the installable unit F3
+        // ships) parse back byte-for-byte and still run to 15 — so what installs
+        // on one ISA is exactly what runs on the other.
+        let mut buf = [0u8; 256];
+        let prog = demo_sum(&mut buf);
+        let manifest = "name = \"agent-sum\"\nversion = \"0.1.0\"\ncaps = [\"print\"]\n";
+        let mut pkg = [0u8; 512];
+        let n = crate::dzp::pack(crate::dzp::KIND_DEZH_IR, manifest, prog, &mut pkg);
+        let parsed = crate::dzp::parse(&pkg[..n]).unwrap();
+        assert_eq!(parsed.payload, prog);
+        let mut h = T {
+            caps: CAP_PRINT,
+            ..Default::default()
+        };
+        run(parsed.payload, &mut h).unwrap();
+        assert_eq!(h.last_num, 15);
+    }
+
+    #[test]
     fn demo_sum_is_15() {
         let mut buf = [0u8; 256];
         let prog = demo_sum(&mut buf);

@@ -32,6 +32,10 @@ jobs:
       - name: Run host workspace tests
         run: cargo test --locked --workspace
 
+      - name: Run dezh-core tests (shared engine; its own workspace)
+        working-directory: dezh-core
+        run: cargo test --locked
+
       - name: Run public review hygiene scan
         run: python3 tools/review/scan_public.py
 
