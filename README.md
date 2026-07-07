@@ -5,7 +5,7 @@
 <p align="center">
   <a href="https://github.com/alisalimi77/Dezh/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/alisalimi77/Dezh/actions/workflows/ci.yml/badge.svg"></a>
   <a href="LICENSE"><img alt="Apache-2.0" src="https://img.shields.io/badge/license-Apache--2.0-blue.svg"></a>
-  <a href="https://github.com/alisalimi77/Dezh/releases/tag/v0.1-review"><img alt="Review release" src="https://img.shields.io/badge/release-v0.1--review-0f766e.svg"></a>
+  <a href="https://github.com/alisalimi77/Dezh/releases/tag/v0.2-review"><img alt="Review release" src="https://img.shields.io/badge/release-v0.2--review-0f766e.svg"></a>
   <a href="dezh-boot/"><img alt="RISC-V" src="https://img.shields.io/badge/arch-RISC--V-283272.svg"></a>
   <a href="dezh-boot-x86/"><img alt="x86_64" src="https://img.shields.io/badge/arch-x86__64-546e7a.svg"></a>
   <a href="Cargo.toml"><img alt="Rust" src="https://img.shields.io/badge/made%20with-Rust-b7410e.svg"></a>
@@ -50,7 +50,7 @@ architectural and security-model review.
 | IPC | Typed request/reply path with status codes, timeouts, and counters |
 | Persistence | Cairn v1 commit log with rollbackable refs and per-app namespaces |
 | Apps | `.dzp` packages with manifest-scoped caps and transactional lifecycle |
-| Review release | [`v0.1-review`](https://github.com/alisalimi77/Dezh/releases/tag/v0.1-review) with kernels, transcript, docs, checksums |
+| Review release | [`v0.2-review`](https://github.com/alisalimi77/Dezh/releases/tag/v0.2-review) with a bootable x86_64 ISO, kernels, `.dzp` package, transcript, docs, checksums |
 
 ## Review Snapshot
 
@@ -91,7 +91,11 @@ The long-term thesis is:
 ## What Works Today
 
 - Bare-metal RISC-V boot on QEMU `virt` in S-mode through OpenSBI.
-- x86_64 smoke path for the shared Dezh IR runtime.
+- x86_64 kernel boots from a GRUB Multiboot2 ISO in QEMU **and VirtualBox**,
+  with a 32-vector exception IDT (faults reported, not silent triple-faults),
+  and runs the byte-identical `.dzp` Dezh-IR package.
+- Pol (Linux personality): a real, unmodified static Linux/RISC-V ELF runs
+  capability-gated; the same bytes also run on real riscv64 Linux.
 - Sv39 U-mode process isolation and contained page faults.
 - Capability-gated syscalls for print, time, IPC, device, and block access.
 - User-space `virtio-block` daemon with explicit MMIO and DMA grants.
@@ -122,8 +126,8 @@ for scope and honest wording rules):
 | --- | --- | --- | --- |
 | F1 | Agent containment: narrow grants, kernel denial, attenuated delegation, rollback of an agent's damage | **Reproducible today** (in CI) | [`tools/demo/run_agent_demo.py`](tools/demo/run_agent_demo.py) → [transcript](docs/demo-transcript-agent-f1.md) |
 | F2 | Cairn storage: versioned commits, capability-gated namespaces, rollback across reboot | **Reproducible today** (in CI) | `cairn-demo` console flow, exercised by [`tools/ci/qemu_smoke.py`](tools/ci/qemu_smoke.py) incl. a second-boot persistence phase |
-| F3 | Multi-ISA apps: the same Dezh-IR program on RISC-V and x86_64 kernels | Partial: same IR program runs on both kernels; byte-identical `.dzp` on x86 is in progress | x86 smoke in CI |
-| F4 | Pol compatibility: unmodified static Linux binary, capability-gated | Planned (Linux ABI subset demo exists for embedded payloads) | `linux` console demo |
+| F3 | Multi-ISA apps: the same Dezh-IR program on RISC-V and x86_64 kernels | **Reproducible today** (in CI) | x86_64 kernel installs and runs the byte-identical `.dzp` agent package; bytes pinned by a `dezh-core` test — [x86 smoke](tools/ci/qemu_smoke.py) |
+| F4 | Pol compatibility: unmodified static Linux binary, capability-gated | **Reproducible today** (in CI) | `linux-elf` runs a real static Linux/RISC-V ELF ([`linux-guest`](dezh-boot/linux-guest/)); the same bytes also run on real riscv64 Linux |
 
 ## System Shape
 
@@ -315,7 +319,10 @@ High-level layout:
 ## Current Limitations
 
 - RISC-V QEMU is the primary bare-metal target today.
-- x86_64 currently validates a smaller smoke path.
+- The x86_64 kernel boots from an ISO and runs Dezh-IR packages, but is still
+  thin: it has an exception IDT but no returnable interrupt path yet (no timer,
+  IRQs, or scheduler on x86). The rich interactive surface — console, scheduler,
+  IPC, Cairn, Pol — is RISC-V only.
 - The block driver uses QEMU legacy virtio-mmio.
 - DMA isolation is modeled through page-table discipline and fixed grants; real
   IOMMU integration is future work.
