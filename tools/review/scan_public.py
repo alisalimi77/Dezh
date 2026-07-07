@@ -48,6 +48,17 @@ SECRET_PATTERNS = [
 ]
 
 
+# Binary assets are not text and must not be UTF-8 "read as text" and scanned:
+# a PNG's bytes can coincidentally decode into the Arabic block and trip the RTL
+# check. Skip them by extension, and defensively skip anything with a NUL byte.
+BINARY_SUFFIXES = {
+    ".png", ".jpg", ".jpeg", ".gif", ".ico", ".webp", ".bmp",
+    ".pdf", ".zip", ".gz", ".woff", ".woff2", ".ttf", ".otf",
+    ".iso", ".img", ".bin", ".o", ".a", ".elf", ".dzp",
+    ".pyc", ".pyo",
+}
+
+
 def iter_files() -> list[Path]:
     files: list[Path] = []
     for path in PUBLIC_PATHS:
@@ -57,11 +68,18 @@ def iter_files() -> list[Path]:
             for child in path.rglob("*"):
                 if "__pycache__" in child.parts:
                     continue
-                if child.suffix in {".pyc", ".pyo"}:
+                if child.suffix.lower() in BINARY_SUFFIXES:
                     continue
                 if child.is_file():
                     files.append(child)
     return sorted(files)
+
+
+def is_binary(path: Path) -> bool:
+    try:
+        return b"\x00" in path.read_bytes()[:8192]
+    except OSError:
+        return False
 
 
 def has_rtl_unicode(text: str) -> bool:
@@ -80,6 +98,8 @@ def main() -> int:
     failures: list[str] = []
     for path in iter_files():
         rel = path.relative_to(ROOT)
+        if is_binary(path):
+            continue
         text = path.read_text(encoding="utf-8", errors="replace")
         if has_rtl_unicode(text):
             failures.append(f"{rel}: contains RTL Unicode code points")
