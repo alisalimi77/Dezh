@@ -123,10 +123,11 @@ ISAs provably execute the same bytes. A Multiboot2 header + `tools/x86/build-iso
 (GRUB `grub-mkrescue`) produce a BIOS ISO that boots in QEMU `-cdrom` **and in
 VirtualBox** (screenshot: docs/assets/dezh-x86-virtualbox.png); output is
 mirrored to the VGA text buffer so it is visible on the VM screen. The QEMU
-`-kernel` PVH path still works for CI. **Deferred (M2):** a full IDT/exception
-handler + timer on x86 — the flagship demos are straight-line and do not need
-it, but until it lands a CPU exception triple-faults the VM. Tracked as an
-honest limitation (W7 / STATUS).
+`-kernel` PVH path still works for CI. **M2 (partial, DONE for exceptions):**
+the x86 kernel installs a 32-vector exception IDT and routes every CPU fault to
+a handler that reports vector/error/RIP and halts — the boot deliberately raises
+a breakpoint to prove faults are caught, not silent triple-faults. Still future
+work: a returnable interrupt path (timer / device IRQs).
 
 #### W6 — Independence and release packaging
 

@@ -138,6 +138,81 @@ long_mode_start:
 "#
 );
 
+// --- IDT: 32 CPU-exception stubs (M2) ----------------------------------------
+// Without an IDT any CPU exception triple-faults and resets the machine. These
+// stubs give every exception a uniform (vector, error, rip) frame and route it
+// to a Rust handler that reports it and halts — so a fault is diagnosable, not a
+// silent reboot. A returnable interrupt path (timer, IRQs) is future work.
+global_asm!(
+    r#"
+.code64
+.macro ISR_NOERR n
+.global isr\n
+isr\n:
+    push 0           /* dummy error code so every frame is uniform */
+    push \n          /* vector number */
+    jmp isr_common
+.endm
+.macro ISR_ERR n
+.global isr\n
+isr\n:
+    push \n          /* CPU already pushed the real error code */
+    jmp isr_common
+.endm
+
+ISR_NOERR 0
+ISR_NOERR 1
+ISR_NOERR 2
+ISR_NOERR 3
+ISR_NOERR 4
+ISR_NOERR 5
+ISR_NOERR 6
+ISR_NOERR 7
+ISR_ERR   8
+ISR_NOERR 9
+ISR_ERR   10
+ISR_ERR   11
+ISR_ERR   12
+ISR_ERR   13
+ISR_ERR   14
+ISR_NOERR 15
+ISR_NOERR 16
+ISR_ERR   17
+ISR_NOERR 18
+ISR_NOERR 19
+ISR_NOERR 20
+ISR_ERR   21
+ISR_NOERR 22
+ISR_NOERR 23
+ISR_NOERR 24
+ISR_NOERR 25
+ISR_NOERR 26
+ISR_NOERR 27
+ISR_NOERR 28
+ISR_NOERR 29
+ISR_NOERR 30
+ISR_NOERR 31
+
+isr_common:
+    mov rdi, [rsp]        /* vector */
+    mov rsi, [rsp + 8]    /* error code */
+    mov rdx, [rsp + 16]   /* faulting RIP */
+    call exception_handler
+3:
+    hlt
+    jmp 3b
+
+.section .rodata
+.align 8
+.global isr_table
+isr_table:
+    .quad isr0,  isr1,  isr2,  isr3,  isr4,  isr5,  isr6,  isr7
+    .quad isr8,  isr9,  isr10, isr11, isr12, isr13, isr14, isr15
+    .quad isr16, isr17, isr18, isr19, isr20, isr21, isr22, isr23
+    .quad isr24, isr25, isr26, isr27, isr28, isr29, isr30, isr31
+"#
+);
+
 // --- COM1 serial -------------------------------------------------------------
 const COM1: u16 = 0x3F8;
 
@@ -278,13 +353,109 @@ impl dezh_core::ir::Host for SerialHost {
     }
 }
 
+// --- IDT setup (Rust side) ---------------------------------------------------
+extern "C" {
+    static isr_table: [u64; 32];
+}
+
+#[repr(C, packed)]
+#[derive(Clone, Copy)]
+struct IdtEntry {
+    off_lo: u16,
+    selector: u16,
+    ist: u8,
+    attr: u8,
+    off_mid: u16,
+    off_hi: u32,
+    zero: u32,
+}
+
+#[repr(C, packed)]
+struct IdtPtr {
+    limit: u16,
+    base: u64,
+}
+
+static mut IDT: [IdtEntry; 32] = [IdtEntry {
+    off_lo: 0,
+    selector: 0,
+    ist: 0,
+    attr: 0,
+    off_mid: 0,
+    off_hi: 0,
+    zero: 0,
+}; 32];
+
+fn idt_init() {
+    unsafe {
+        for i in 0..32 {
+            let addr = isr_table[i];
+            IDT[i] = IdtEntry {
+                off_lo: addr as u16,
+                selector: 0x08, // 64-bit code segment from the boot GDT
+                ist: 0,
+                attr: 0x8E, // present, DPL0, 64-bit interrupt gate
+                off_mid: (addr >> 16) as u16,
+                off_hi: (addr >> 32) as u32,
+                zero: 0,
+            };
+        }
+        let ptr = IdtPtr {
+            limit: (core::mem::size_of::<[IdtEntry; 32]>() - 1) as u16,
+            base: core::ptr::addr_of!(IDT) as u64,
+        };
+        asm!("lidt [{}]", in(reg) &ptr, options(nostack));
+    }
+}
+
+const EXC_NAMES: [&str; 32] = [
+    "divide-by-zero", "debug", "NMI", "breakpoint", "overflow", "bound-range",
+    "invalid-opcode", "device-not-available", "double-fault", "coprocessor-overrun",
+    "invalid-TSS", "segment-not-present", "stack-segment-fault", "general-protection",
+    "page-fault", "reserved-15", "x87-fp", "alignment-check", "machine-check",
+    "SIMD-fp", "virtualization", "control-protection", "reserved-22", "reserved-23",
+    "reserved-24", "reserved-25", "reserved-26", "reserved-27", "hypervisor-injection",
+    "VMM-comm", "security", "reserved-31",
+];
+
+fn print_hex(mut v: u64) {
+    print("0x");
+    let mut buf = [0u8; 16];
+    for i in (0..16).rev() {
+        let nib = (v & 0xF) as u8;
+        buf[i] = if nib < 10 { b'0' + nib } else { b'a' + nib - 10 };
+        v >>= 4;
+    }
+    for &b in &buf {
+        putb(b);
+    }
+}
+
+#[no_mangle]
+extern "C" fn exception_handler(vector: u64, error: u64, rip: u64) -> ! {
+    print("\n[trap] CPU exception ");
+    print_i64(vector as i64);
+    print(" (");
+    print(EXC_NAMES.get(vector as usize).copied().unwrap_or("?"));
+    print("), error=");
+    print_hex(error);
+    print(", rip=");
+    print_hex(rip);
+    print("\n[trap] halting (no ambient recovery).\n");
+    loop {
+        unsafe { asm!("hlt") };
+    }
+}
+
 #[no_mangle]
 pub extern "C" fn kmain() -> ! {
     use dezh_core::ir;
     serial_init();
     vga_clear();
+    idt_init();
     print("\n");
     print("Dezh x86_64 - long mode reached. 64-bit kernel running.\n");
+    print("IDT installed: 32 CPU-exception vectors (faults are reported, not silent).\n");
 
     // Install and run a real .dzp package (F3, D003/D016): the SAME Dezh-IR bytes
     // the RISC-V kernel runs, wrapped in the SAME architecture-independent .dzp
@@ -327,6 +498,13 @@ pub extern "C" fn kmain() -> ! {
         }
     }
 
+    // Prove the IDT works: deliberately raise a breakpoint (vector 3). Without an
+    // IDT this would triple-fault and reset the machine; instead the handler
+    // catches it, reports it, and halts cleanly.
+    print("\nTrap demo: deliberately raising a breakpoint (int3) to prove the handler catches it...\n");
+    unsafe { asm!("int3") };
+
+    // The breakpoint handler halts, so this is unreachable; kept for totality.
     loop {
         unsafe { asm!("hlt") };
     }

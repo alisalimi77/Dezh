@@ -21,9 +21,10 @@ below) and to COM1 serial.
 
 ![Dezh x86_64 booting in VirtualBox](assets/dezh-x86-virtualbox.png)
 
-> Known limitation: the x86 kernel does not yet install an interrupt/exception
-> table (M2). The flagship demo is straight-line and does not need it, but a CPU
-> exception would triple-fault the VM. See [ROADMAP.md](ROADMAP.md).
+The boot also installs a 32-vector exception IDT and, at the end, deliberately
+raises a breakpoint to prove faults are **caught and reported** (not a silent
+triple-fault reset). A returnable interrupt path (timer / device IRQs) is still
+future work — see [ROADMAP.md](ROADMAP.md).
 
 ## x86_64 in QEMU (same ISO)
 

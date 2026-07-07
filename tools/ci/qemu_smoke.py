@@ -365,10 +365,15 @@ def run_x86_64(qemu: str, kernel: Path, iso: Path | None = None) -> None:
     try:
         session.wait_for("Dezh x86_64")
         session.wait_for("long mode reached. 64-bit kernel running.")
+        session.wait_for("IDT installed: 32 CPU-exception vectors")
         session.wait_for("Dezh .dzp agent package (sum 1..=5 with a loop) on x86_64:")
         session.wait_for(".dzp verified: kind=dezh-ir, name=agent-sum")
         session.wait_for("[ir] => 15")
         session.wait_for("[ir] DENIED: agent holds no PRINT capability")
+        # M2: the IDT catches a deliberately-raised breakpoint instead of
+        # triple-faulting the machine.
+        session.wait_for("[trap] CPU exception 3 (breakpoint)")
+        session.wait_for("[trap] halting")
     finally:
         transcript = session.text()
         print(transcript)
