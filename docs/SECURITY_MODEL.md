@@ -38,6 +38,38 @@ The current prototype focuses on:
 - Side-channel resistance.
 - Formal verification.
 
+## Revocation (honest answer)
+
+Reviewers ask this first, so here is the current stance plainly.
+
+**What exists today.** Authority is *attenuable* and its *effects are
+reversible*, which covers the common cases without a general revocation
+mechanism:
+
+- A delegated capability can never exceed the sender's own (`granted =
+  requested & sender_caps`), so authority only ever narrows as it spreads.
+- A capability is bound to a task; when the task exits or is killed on a fault,
+  its authority is gone with it.
+- Damage done through a granted capability is undone structurally: Cairn's
+  commit log lets an operator roll a namespace back to a prior state (the F1/F2
+  demos show exactly this — an agent's bad write is reverted after the fact).
+
+**What does not exist yet.** There is no runtime *lease/revoke* for a
+long-lived capability already delegated to a still-running task — you cannot,
+today, reach into a live task and rescind one capability while it keeps running.
+The honest reasons: capabilities are currently plain task-capability bits, not
+first-class revocable objects with a revocation list, and the MVP prioritized
+proving the grant/attenuation/rollback path end to end.
+
+**How it is intended to work.** The direction (see
+[STRATEGIC_DIRECTION.md](STRATEGIC_DIRECTION.md)) is a lease/generation scheme:
+a delegated capability carries a generation stamp checked at use time, and
+bumping the generation in the issuing service invalidates every outstanding
+copy without tracking each holder. This falls out of the app-registry and
+Cairn-ledger work rather than needing new kernel machinery. Until it lands,
+revocation = drop the grant at the source, end the task, and roll back its
+effects.
+
 ## Reviewer Notes
 
 The current security value is architectural discipline, not production

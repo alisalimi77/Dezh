@@ -10,7 +10,10 @@ This page is the primary navigation point for Dezh OS public review.
 - [Build And Run](BUILD_AND_RUN.md): detailed build, QEMU, Windows, Linux, and
   macOS notes.
 - [Reviewer Guide](REVIEWER_GUIDE.md): what to inspect and how to evaluate the
-  prototype.
+  prototype, organized around the four flagship demos.
+- [Status and Limitations](STATUS.md): one honest page on what is and is not
+  true today.
+- [VM Quickstart](QUICKSTART_VM.md): boot a release in VirtualBox/VMware or QEMU.
 
 ## Architecture
 
