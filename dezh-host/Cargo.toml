@@ -6,7 +6,7 @@ description = "Dezh Step 1 — capability runtime + in-memory resource backend f
 
 [dependencies]
 # Sole runtime dependency. WASI is never enabled; guests get zero ambient access.
-wasmtime = "27"
+wasmtime = "46"
 
 [lib]
 path = "src/lib.rs"
