@@ -24,7 +24,7 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
-          targets: wasm32-unknown-unknown,riscv64gc-unknown-none-elf,x86_64-unknown-none
+          targets: wasm32-unknown-unknown,riscv64gc-unknown-none-elf,x86_64-unknown-none,riscv64gc-unknown-linux-musl
 
       - name: Install QEMU and ISO tooling
         run: |

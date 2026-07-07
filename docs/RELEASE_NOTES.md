@@ -1,5 +1,42 @@
 # Release Notes
 
+## v0.2-review Candidate
+
+The milestone where all four flagship demos are green in CI and a reviewer can
+boot Dezh in a VM with no source tree.
+
+### What a reviewer can now do
+
+- Boot the x86_64 kernel from a real bootable ISO in **VirtualBox / VMware** (or
+  QEMU `-cdrom`); it reaches 64-bit long mode, installs and runs a `.dzp` agent
+  package, enforces the print capability, and catches a deliberately-raised CPU
+  exception instead of triple-faulting. See `QUICKSTART_VM.md`.
+- Run the RISC-V capability console — agent containment (F1), Cairn versioned
+  storage with rollback across reboot (F2), the same byte-identical Dezh-IR app
+  on both ISAs (F3), and a real unmodified Linux ELF under Pol (F4).
+
+### Flagship demos
+
+- **F1 agent containment** — narrow caps, kernel-DENIED beyond grant, attenuated
+  IPC delegation, rollback (`tools/demo/run_agent_demo.py`).
+- **F2 Cairn v1** — commit log, rollback, reboot-persistent, capability-gated
+  namespaces (`cairn-demo`).
+- **F3 multi-ISA** — byte-identical `.dzp` runs on RISC-V and x86_64; bytes
+  pinned by a test.
+- **F4 Pol** — a stock static Linux/RISC-V ELF runs capability-gated; the same
+  bytes run on real Linux; translation overhead measured (`bench-pol`).
+
+### Honest scope
+
+QEMU/VirtualBox targets only; benchmarks that are emulated are labelled as such;
+Pol is a small syscall subset; no runtime revocation, IOMMU, package signing, or
+SMP yet. Full detail in `docs/STATUS.md`.
+
+### Artifacts
+
+RISC-V and x86_64 kernels, the bootable `dezh-<tag>-x86_64.iso`, a `.dzp` sample
+package, a `RUN.txt`, the docs bundle, a manifest, and `SHA256SUMS`.
+
 ## v0.1-review Candidate
 
 `v0.1-review` is the first public review candidate for Dezh OS.
