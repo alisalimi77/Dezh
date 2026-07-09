@@ -236,6 +236,20 @@ def run_riscv64(qemu: str, kernel: Path) -> None:
                     "[ir] ir-wrote-this-durably",
                 ],
             ),
+            # --- Intent as mechanism (W8 / Ahd): derived capability <= intent ---
+            ("intent-open writer", "opened Ahd #1 kind=writer"),
+            ("intent-open compute", "opened Ahd #2 kind=compute"),
+            ("intent-list", "Ahd #2 kind=compute ceiling=print"),
+            (
+                "intent-demo",
+                [
+                    "intent (Ahd) is the ONLY path to authority",
+                    "[intent-demo] agent finished within intent",
+                    "beyond-intent DENIED (dropped): cairn-read cairn-write",
+                    "kernel DENIED an out-of-intent hostcall",
+                    "[intent-demo] PASS",
+                ],
+            ),
             (
                 "cairn-demo",
                 [

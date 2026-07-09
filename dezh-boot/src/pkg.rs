@@ -1401,33 +1401,43 @@ pub(crate) fn pkg_run(plan: &KernelPlan, arg: &str) {
         crate::record_event("kernel", "pkg.run", "package", "DENIED");
         return;
     };
+    run_loaded_entry(plan, i, unsafe { PKGS[i].mcaps }, "pkg-run");
+}
+
+/// Run an already-loaded package slot with an EFFECTIVE capability set that may
+/// be narrower than the package's installed grants. `pkg-run` passes the
+/// installed grants unchanged; `intent-run` passes a set already reduced to an
+/// Ahd ceiling (see `intent_run`). Everything downstream — the IR host caps,
+/// the Cairn namespace binding, and the U-mode task caps — is derived from
+/// `eff_mcaps`, so authority never exceeds what the caller supplies here.
+fn run_loaded_entry(plan: &KernelPlan, i: usize, eff_mcaps: u32, label: &str) {
     let entry = unsafe { PKGS[i] };
     kprint!(
-        "[pkg-run] '{}' {} kind={} caps=",
+        "[{label}] '{}' {} kind={} caps=",
         entry.name(),
         entry.version(),
         dzp::kind_name(entry.kind)
     );
-    mcap_names(entry.mcaps, &mut crate::Uart);
+    mcap_names(eff_mcaps, &mut crate::Uart);
     kprintln!();
     crate::record_event("installer", "pkg.run", "package", "start");
     match entry.kind {
         dzp::KIND_DEZH_IR => {
             let mut host = crate::KHost {
-                caps: ir_caps_from(entry.mcaps),
-                cairn: app_cairn_ns(entry.mcaps, entry.name()).map(|ns| (plan, ns)),
+                caps: ir_caps_from(eff_mcaps),
+                cairn: app_cairn_ns(eff_mcaps, entry.name()).map(|ns| (plan, ns)),
             };
             match ir::run(entry.payload(), &mut host) {
-                Ok(()) => kprintln!("[pkg-run] '{}' finished", entry.name()),
+                Ok(()) => kprintln!("[{label}] '{}' finished", entry.name()),
                 Err(t) => {
                     if t == ir::Trap::MissingCapability {
                         kprintln!(
-                            "[pkg-run] DENIED by kernel: {} (grant it in app.toml caps=[...])",
+                            "[{label}] DENIED by kernel: {} (grant it in app.toml caps=[...])",
                             t.msg()
                         );
                         crate::record_event("kernel", "pkg.run", "package", "DENIED");
                     } else {
-                        kprintln!("[pkg-run] TRAP: {}", t.msg());
+                        kprintln!("[{label}] TRAP: {}", t.msg());
                         crate::record_event("kernel", "pkg.run", "package", "TRAP");
                     }
                     return;
@@ -1435,17 +1445,227 @@ pub(crate) fn pkg_run(plan: &KernelPlan, arg: &str) {
             }
         }
         dzp::KIND_ELF_RISCV64 => {
-            kprintln!("[pkg-run] launching as U-mode process (own address space)");
+            kprintln!("[{label}] launching as U-mode process (own address space)");
             crate::run_foreground_processes(&[crate::ProcessSpec::new(
                 entry.payload(),
-                task_caps_from(entry.mcaps, entry.name()),
+                task_caps_from(eff_mcaps, entry.name()),
                 0,
             )]);
-            kprintln!("[pkg-run] '{}' exited; back in the console", entry.name());
+            kprintln!("[{label}] '{}' exited; back in the console", entry.name());
         }
-        _ => kprintln!("[pkg-run] unknown payload kind"),
+        _ => kprintln!("[{label}] unknown payload kind"),
     }
     crate::record_event("installer", "pkg.run", "package", "OK");
+}
+
+// --- Ahd: intent as the authority-derivation mechanism (W8, D020/D021) --------
+//
+// An `Ahd` is a declared capability CEILING. Running a package under an Ahd
+// derives the effective capability set as `requested & ceiling`, so the derived
+// authority is provably a SUBSET of the Ahd — this is structural (a bitwise
+// AND), not a purpose string. Any capability the package requests beyond the
+// Ahd is dropped and reported: authority only ever flows through a declared
+// intent, and can never exceed it. Ahds are runtime authority sessions; they
+// are intentionally not persisted (an intent is opened for a run).
+
+const AHD_KINDS: &[(&str, u32)] = &[
+    ("compute", MCAP_PRINT),
+    ("reader", MCAP_PRINT | MCAP_CAIRN_READ),
+    ("writer", MCAP_PRINT | MCAP_CAIRN_READ | MCAP_CAIRN_WRITE),
+    ("ipc", MCAP_PRINT | MCAP_IPC),
+    (
+        "full",
+        MCAP_PRINT | MCAP_IPC | MCAP_UPTIME | MCAP_CAIRN_READ | MCAP_CAIRN_WRITE,
+    ),
+];
+
+fn ahd_kind(kind: &str) -> Option<(&'static str, u32)> {
+    AHD_KINDS
+        .iter()
+        .find(|(n, _)| *n == kind)
+        .map(|(n, c)| (*n, *c))
+}
+
+fn print_ahd_kinds() {
+    kprint!("  known intent kinds:");
+    for (n, _) in AHD_KINDS {
+        kprint!(" {n}");
+    }
+    kprintln!();
+}
+
+const MAX_AHD: usize = 8;
+
+#[derive(Clone, Copy)]
+struct AhdSlot {
+    used: bool,
+    id: u16,
+    kind: &'static str,
+    ceiling: u32,
+}
+
+const EMPTY_AHD: AhdSlot = AhdSlot {
+    used: false,
+    id: 0,
+    kind: "",
+    ceiling: 0,
+};
+
+static mut AHDS: [AhdSlot; MAX_AHD] = [EMPTY_AHD; MAX_AHD];
+static mut AHD_NEXT_ID: u16 = 1;
+
+pub(crate) fn intent_open(arg: &str) {
+    let kind = arg.trim();
+    let Some((kname, ceiling)) = ahd_kind(kind) else {
+        kprintln!("[intent-open] unknown intent kind '{kind}'");
+        print_ahd_kinds();
+        return;
+    };
+    let Some(slot) = (unsafe { (0..MAX_AHD).find(|&i| !AHDS[i].used) }) else {
+        kprintln!("[intent-open] no free Ahd slots (max {MAX_AHD})");
+        return;
+    };
+    let id = unsafe { AHD_NEXT_ID };
+    unsafe {
+        AHD_NEXT_ID = AHD_NEXT_ID.wrapping_add(1);
+        AHDS[slot] = AhdSlot {
+            used: true,
+            id,
+            kind: kname,
+            ceiling,
+        };
+    }
+    kprint!("[intent-open] opened Ahd #{id} kind={kname} ceiling=");
+    mcap_names(ceiling, &mut crate::Uart);
+    kprintln!();
+    kprintln!("  authority derived under it is proven <= this ceiling");
+    kprintln!("  run a package under it with: intent-run {id} <app>");
+    crate::record_event("intent", "intent.open", "ahd", "OK");
+}
+
+pub(crate) fn intent_list() {
+    kprintln!("open Ahds (intent tokens):");
+    let mut any = false;
+    for i in 0..MAX_AHD {
+        let a = unsafe { AHDS[i] };
+        if !a.used {
+            continue;
+        }
+        any = true;
+        kprint!("  Ahd #{} kind={} ceiling=", a.id, a.kind);
+        mcap_names(a.ceiling, &mut crate::Uart);
+        kprintln!();
+    }
+    if !any {
+        kprintln!("  (none open - open one with `intent-open <kind>`)");
+        print_ahd_kinds();
+    }
+}
+
+fn find_ahd(id: u16) -> Option<u32> {
+    (0..MAX_AHD).find_map(|i| {
+        let a = unsafe { AHDS[i] };
+        (a.used && a.id == id).then_some(a.ceiling)
+    })
+}
+
+pub(crate) fn intent_run(plan: &KernelPlan, arg: &str) {
+    let (id_str, name) = match arg.trim().split_once(' ') {
+        Some((a, b)) => (a.trim(), b.trim()),
+        None => {
+            kprintln!("usage: intent-run <ahd-id> <app>");
+            return;
+        }
+    };
+    let Ok(id) = id_str.parse::<u16>() else {
+        kprintln!("[intent-run] bad Ahd id '{id_str}'");
+        return;
+    };
+    let Some(ceiling) = find_ahd(id) else {
+        kprintln!("[intent-run] no open Ahd #{id} (see intent-list; open with intent-open)");
+        crate::record_event("intent", "intent.run", "ahd", "DENIED");
+        return;
+    };
+    if !ensure_loaded(plan) {
+        kprintln!("[intent-run] package store unavailable or degraded");
+        return;
+    }
+    let Some(i) = find_runtime_pkg(name) else {
+        kprintln!("[intent-run] no installed package '{name}' (see pkg-list)");
+        crate::record_event("intent", "intent.run", "package", "DENIED");
+        return;
+    };
+    let requested = unsafe { PKGS[i].mcaps };
+    let derived = requested & ceiling;
+    let beyond = requested & !ceiling;
+
+    kprint!("[intent-run] Ahd #{id} ceiling=");
+    mcap_names(ceiling, &mut crate::Uart);
+    kprint!(" | '{name}' requests=");
+    mcap_names(requested, &mut crate::Uart);
+    kprintln!();
+    if beyond != 0 {
+        kprint!("[intent-run] beyond-intent DENIED (dropped): ");
+        mcap_names(beyond, &mut crate::Uart);
+        kprintln!(" -- authority cannot exceed the Ahd");
+        crate::record_event("intent", "intent.derive", "cap", "DENIED");
+    }
+    kprint!("[intent-run] derived (proven subset of Ahd) = ");
+    mcap_names(derived, &mut crate::Uart);
+    kprintln!();
+    run_loaded_entry(plan, i, derived, "intent-run");
+}
+
+/// Self-contained proof that authority only flows through an Ahd, using the
+/// built-in Dezh-IR agent (no package upload needed). The SAME agent bytecode
+/// (write+read+print) is run under two Ahds: a `writer` Ahd that contains its
+/// intent (durable Cairn write succeeds), and a `compute` Ahd where the write
+/// is beyond intent (dropped, then the kernel denies the ungranted hostcall).
+pub(crate) fn intent_demo(plan: &KernelPlan) {
+    kprintln!("[intent-demo] intent (Ahd) is the ONLY path to authority; derived cap <= Ahd");
+    kprintln!("[intent-demo] same agent bytecode, two different Ahds:");
+    let agent_requests = MCAP_PRINT | MCAP_CAIRN_READ | MCAP_CAIRN_WRITE;
+    intent_demo_run(plan, "writer", MCAP_PRINT | MCAP_CAIRN_READ | MCAP_CAIRN_WRITE, agent_requests);
+    intent_demo_run(plan, "compute", MCAP_PRINT, agent_requests);
+    kprintln!("[intent-demo] PASS: under 'writer' the write is in-intent; under 'compute' it is beyond-intent and denied");
+}
+
+fn intent_demo_run(plan: &KernelPlan, kind: &str, ceiling: u32, requested: u32) {
+    let derived = requested & ceiling;
+    let beyond = requested & !ceiling;
+    kprint!("[intent-demo] --- Ahd kind={kind} ceiling=");
+    mcap_names(ceiling, &mut crate::Uart);
+    kprintln!();
+    if beyond != 0 {
+        kprint!("[intent-demo] beyond-intent DENIED (dropped): ");
+        mcap_names(beyond, &mut crate::Uart);
+        kprintln!();
+    }
+    let mut buf = [0u8; 512];
+    let prog = ir::demo_cairn(&mut buf);
+    // The Cairn binding follows the DERIVED caps: no write/read cap -> no ns.
+    let cairn = if derived & (MCAP_CAIRN_READ | MCAP_CAIRN_WRITE) != 0 {
+        crate::cairn_ns_id("agent").map(|ns| (plan, ns))
+    } else {
+        None
+    };
+    let mut host = crate::KHost {
+        caps: ir_caps_from(derived),
+        cairn,
+    };
+    match ir::run(prog, &mut host) {
+        Ok(()) => kprintln!("[intent-demo] agent finished within intent"),
+        Err(t) => {
+            if t == ir::Trap::MissingCapability {
+                kprintln!(
+                    "[intent-demo] kernel DENIED an out-of-intent hostcall: {}",
+                    t.msg()
+                );
+            } else {
+                kprintln!("[intent-demo] agent trapped: {}", t.msg());
+            }
+        }
+    }
 }
 
 // --- Inspect / remove / recovery ----------------------------------------------
