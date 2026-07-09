@@ -14,6 +14,68 @@ building blocks, but they are not the differentiator by themselves.
 The differentiator should be that Dezh treats **intent** and **effect** as
 first-class OS concepts.
 
+## The Ground We Own (D021)
+
+Dezh is **not** trying to be a better microkernel, a cleaner capability system,
+or a kernel that compiles to more ISAs. Each of those has strong prior art
+(seL4, KeyKOS, EROS, Barrelfish) and none is a defensible identity. Running on
+both x86 and RISC-V is a portability property, not the point — **ISA is an
+implementation backend, not identity**: the same mission bytes should produce
+the same effect semantics on every backend, and if a new ISA appears in ten
+years, Dezh's identity does not change.
+
+**The real competitor is not another OS.** For the concrete job "contain an
+untrusted agent and let it be productive," the incumbents are user-space
+isolation layers: gVisor, Firecracker / microVMs, wasmtime / WASI,
+seccomp+landlock, containers. They confine syscalls and resources well and they
+ship today. Any honest positioning compares against *them*, not against a
+research microkernel.
+
+What none of them do:
+
+- **Tie every effect to the intent that authorized it** as part of the
+  execution model (not a bolt-on audit log an app can route around).
+- **Reverse a whole agent mission atomically** — undo everything one intent
+  caused, in one operation.
+- Do both on a substrate where **the ledger cannot be bypassed**. On a
+  conventional OS the ledger is a library sitting on top of ambient authority;
+  a program can always reach the resource underneath. On Dezh there is no
+  authority underneath to reach — the intent-derived path is the only path, so
+  the ledger is not optional instrumentation, it is the execution itself.
+
+**One-line differentiator** (the reviewer challenge): *Unlike seL4, Barrelfish,
+Fuchsia, or Redox — which make **access** safe — Dezh makes **effect**
+accountable: every action an agent takes is bound to its intent, attributable,
+and reversible where possible, and because the kernel has no ambient authority
+by construction, that ledger cannot be bypassed.*
+
+### Value Is Only Visible Against An Adversary
+
+A secure system that is never attacked is just an assertion. The proving demo
+must carry a **villain**: an agent that actively *tries to escape* its intent —
+read another namespace, write raw device MMIO, forge or amplify a capability,
+act outside its declared intent, monopolize the CPU — and is stopped at a named
+boundary each time, with `why-denied` explaining it. Happy-path demos (an app
+acting inside its grant) do not make the value visible; the escape that fails
+does.
+
+### The Mission Is The Reversible Unit
+
+The unit that makes effect-accountability compelling is not a single write but a
+**mission**: the set of effects produced under one intent. Whole-mission atomic
+rollback ("undo everything this agent's task did") is precisely what the
+user-space sandboxes above cannot offer, because they have no structured notion
+of which effects belonged to which authorized purpose. The ledger groups
+effects by intent so a mission is a first-class, reversible object.
+
+Honesty boundary: a mission may contain an **irreversible external effect** (a
+network send, a physical output). Whole-mission rollback undoes the internal and
+compensatable effects and **refuses the irreversible ones with an explanation**
+— it never pretends an external effect was recalled. A separate
+`docs/THREAT_MODEL.md` states what Dezh's trusted base is, what it defends, and
+what it explicitly does not defend (side channels, a malicious kernel, hardware,
+no-IOMMU DMA).
+
 ## Why This Matters
 
 Traditional operating systems usually grant authority around processes, users,
@@ -231,19 +293,64 @@ Mapping:
 
 ## Near-Term Milestones
 
-### 1. Intent + Effect Runtime v0 (inside W2/W3)
+These are now consolidated as roadmap **W8 (Intent + Effect Runtime)**, the one
+workstream that turns D020/D021 from prose into a demonstrated differentiator.
+W8 is not "add a feature"; it is the feature plus the three things that make its
+value legible to a skeptical practitioner audience — an adversary, a
+whole-mission rollback with an honest irreversible effect, and an owned cost.
 
-Introduce intent and effect as visible OS-level concepts.
+### 1. Intent as mechanism
 
-Candidate commands:
+- `intent-open <kind>` issues an intent token (a ceiling of capabilities for a
+  target namespace), `intent-run <intent> <app>` runs an app whose derived
+  capability is proven ⊆ the intent, `intent-list` enumerates open intents.
+- Manifest grants (W1) become intent-derived; a request for authority beyond
+  the intent is denied. This rides the existing IPC attenuation and per-task
+  capability bits.
 
-- `intent-list`
-- `intent-open <kind>`
-- `intent-run <intent> <app>`
-- `effect-log`
-- `effect-info <id>`
-- `effect-rollback <id>`
-- `why-denied <last|id>`
+### 2. Effect ledger on Cairn
+
+- A user-space service (never kernel) records each effect as
+  `actor → intent → derived capability → target namespace/service → status →
+  reversibility class → rollback/compensation handle → generation`.
+- Commands: `effect-log`, `effect-info <id>`.
+
+### 3. Mission + whole-mission rollback + honest external effect
+
+- A **mission** groups the effects under one intent; `effect-rollback
+  <mission>` undoes them atomically; `effect-rollback <id>` undoes one.
+- At least one `irreversible` external effect (simulated network/print) that
+  rollback **refuses with an explanation**, and one `compensatable` effect with
+  a registered compensation action.
+
+### 4. The adversary
+
+- A `redteam` scenario: a malicious agent that attempts cross-namespace reads,
+  raw MMIO writes, capability forgery/amplification, out-of-intent actions, and
+  CPU monopoly — each stopped at a named boundary (page fault / capability check
+  / intent bound / preemption) with `why-denied`.
+
+### 5. Explainable denial + provenance
+
+- `why-denied <last|id>`, `cap-tree` / `cap-audit` / `component-info`, and a
+  queryable `actor → intent → effect` provenance graph ("everything this agent
+  touched and why").
+
+### 6. Credibility layer
+
+- **Cost:** the per-effect ledger overhead measured and folded into
+  `BENCH.md` (D015).
+- **Head-to-head:** a documented scenario where gVisor / Firecracker /
+  wasmtime cannot cleanly undo a whole mission but Dezh can (Dezh's side
+  reproducible in CI even if the competitor is only described).
+- **`docs/THREAT_MODEL.md`:** trusted base, what is defended, and what is
+  explicitly not defended.
+
+### 7. One flagship narrative
+
+All of the above collapse into a single story — "leave a coding agent loose on
+your machine overnight" — with a transcript and a CI smoke leg. This is the
+final form of the F1 (D020) agent-containment demo, not a separate demo.
 
 The first implementation maps a small set of intents onto existing package,
 storage, and service operations, with the ledger stored in Cairn.

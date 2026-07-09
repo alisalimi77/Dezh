@@ -150,6 +150,59 @@ Suggested order: W1 → W2 → W3 → W4 → W5 → W6 → W7 (W7 items can land
 alongside any workstream; outreach only after all four flagship demos are
 green in CI).
 
+#### W8 — Intent + Effect Runtime (the differentiator made visible; D020/D021)
+
+The MVP (W1–W7) proves the *mechanism* — no ambient authority, capability-gated
+storage, rollback, multi-ISA, Pol. W8 turns that mechanism into the thing the
+project is actually *about*: an unbypassable intent-to-effect ledger, and it is
+scoped so the value is legible to a skeptical practitioner audience (not another
+happy-path demo). It is the final form of the F1 demo, not a new differentiator.
+
+Real competitor to beat: not another OS, but user-space agent isolation
+(gVisor, Firecracker, wasmtime/WASI, seccomp+landlock). W8 must show something
+they structurally cannot — attributing and reversing a whole agent mission.
+
+- **Intent as mechanism.** `intent-open <kind>` (a capability ceiling for a
+  target namespace), `intent-run <intent> <app>` (derived capability proven ⊆
+  intent — the *only* path to authority), `intent-list`. Manifest grants (W1)
+  become intent-derived. Acceptance: a request for authority beyond the intent
+  is DENIED in a CI smoke leg.
+- **Effect ledger on Cairn** (user-space, never kernel; rides the W2 commit
+  log). Each effect: `actor → intent → derived cap → target ns/service →
+  status → reversibility class → rollback/compensation handle → generation`.
+  Commands `effect-log`, `effect-info <id>`. Acceptance: effects recorded,
+  survive reboot, cross-namespace attempt denied with kernel-attested caps.
+- **Mission + whole-mission rollback + honest external effect.** A mission =
+  the effects under one intent; `effect-rollback <mission>` undoes them
+  atomically; `effect-rollback <id>` undoes one. At least one `irreversible`
+  external effect that rollback **refuses with an explanation**, and one
+  `compensatable` effect with a registered compensation. Acceptance: "10
+  changes, error midway, whole-mission rollback restores" and "rollback of an
+  irreversible effect is refused with an explanation".
+- **The adversary (`redteam`).** A malicious agent that *tries to escape* —
+  cross-namespace read, raw MMIO write, capability forgery/amplification,
+  out-of-intent action, CPU monopoly — each stopped at a named boundary with
+  `why-denied`; system survives. Acceptance: every escape attempt reaches a
+  named denial in CI.
+- **Explainable denial + provenance.** `why-denied <last|id>`, `cap-tree` /
+  `cap-audit` / `component-info`, and a queryable `actor → intent → effect`
+  provenance graph.
+- **Credibility layer.** Per-effect ledger overhead measured into BENCH.md
+  (D015); a documented head-to-head where gVisor/Firecracker/wasmtime cannot
+  cleanly undo a whole mission but Dezh can (Dezh side reproducible in CI); and
+  `docs/THREAT_MODEL.md` (trusted base, what is defended, what is explicitly
+  not — side channels, malicious kernel, hardware, no-IOMMU DMA).
+- **One flagship narrative.** All the above collapse into a single story —
+  "leave a coding agent loose on your machine overnight" — with a transcript
+  and a CI smoke leg.
+
+Post-MVP horizon (recorded, deliberately not started in W8): explicit system
+generations / time-travel, multi-agent attenuated sub-delegation with
+provenance chains, full saga/compensation for external effects, human-approval
+gates for sensitive intents, cross-ISA effect-semantics identity, and
+non-storage typed effects (network/service/install). See
+`docs/STRATEGIC_DIRECTION.md`.
+
 ## Medium Term (post-MVP)
 
 - Convert more services from embedded demos into separate ELF services.

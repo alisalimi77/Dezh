@@ -88,6 +88,33 @@ The long-term thesis is:
 
 **Dezh is an intent-native, effect-accountable OS prototype.**
 
+### How Dezh differs
+
+Unlike seL4, Barrelfish, Fuchsia, or Redox — which make **access** safe — Dezh
+makes **effect** accountable: every action an agent takes is bound to its
+intent, attributable, and reversible where possible. And because the kernel has
+no ambient authority by construction, that ledger **cannot be bypassed**.
+
+The real point of comparison is not another OS but user-space agent isolation —
+gVisor, Firecracker/microVMs, wasmtime/WASI, seccomp+landlock, containers. They
+confine resources well and ship today; what none of them do is attribute every
+effect to its authorizing intent and **reverse a whole agent mission** on a
+substrate with no ambient authority underneath to route around. ISA (RISC-V,
+x86_64) is an implementation backend, not the identity: the same program should
+mean the same thing on any backend. See
+[strategic direction](docs/STRATEGIC_DIRECTION.md) (D021).
+
+### Terminology
+
+| Term | Meaning |
+| --- | --- |
+| **Cairn** | The persistent effect layer — a versioned, rollbackable object store. A filesystem is one use of it, not its definition. |
+| **Pol** | The Linux compatibility personality: foreign binaries run capability-gated, with zero ambient authority. |
+| **Dezh-IR** | The typed, verifiable intermediate format apps and agents execute in — one program, any ISA. |
+| **`.dzp`** | The Dezh package format: manifest (requested capabilities) + payload (Dezh-IR or ISA ELF). |
+| **Intent** | A declared capability ceiling; the **only** path to authority. A derived capability is provably ⊆ its intent. |
+| **Effect / mission** | A recorded, attributable state change; a *mission* is the set of effects under one intent and is reversible as a unit. |
+
 ## What Works Today
 
 - Bare-metal RISC-V boot on QEMU `virt` in S-mode through OpenSBI.
