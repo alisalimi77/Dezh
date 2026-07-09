@@ -1401,7 +1401,7 @@ pub(crate) fn pkg_run(plan: &KernelPlan, arg: &str) {
         crate::record_event("kernel", "pkg.run", "package", "DENIED");
         return;
     };
-    run_loaded_entry(plan, i, unsafe { PKGS[i].mcaps }, "pkg-run");
+    run_loaded_entry(plan, i, unsafe { PKGS[i].mcaps }, 0, "pkg-run");
 }
 
 /// Run an already-loaded package slot with an EFFECTIVE capability set that may
@@ -1410,7 +1410,7 @@ pub(crate) fn pkg_run(plan: &KernelPlan, arg: &str) {
 /// Ahd ceiling (see `intent_run`). Everything downstream — the IR host caps,
 /// the Cairn namespace binding, and the U-mode task caps — is derived from
 /// `eff_mcaps`, so authority never exceeds what the caller supplies here.
-fn run_loaded_entry(plan: &KernelPlan, i: usize, eff_mcaps: u32, label: &str) {
+fn run_loaded_entry(plan: &KernelPlan, i: usize, eff_mcaps: u32, ahd_id: u16, label: &str) {
     let entry = unsafe { PKGS[i] };
     kprint!(
         "[{label}] '{}' {} kind={} caps=",
@@ -1423,9 +1423,14 @@ fn run_loaded_entry(plan: &KernelPlan, i: usize, eff_mcaps: u32, label: &str) {
     crate::record_event("installer", "pkg.run", "package", "start");
     match entry.kind {
         dzp::KIND_DEZH_IR => {
+            // Effects this package makes carry its intent (Ahd) and derived cap
+            // into the Sand ledger. `ahd_id == 0` (the pkg-run path) records a
+            // direct effect; `intent-run` supplies the real Ahd id.
             let mut host = crate::KHost {
                 caps: ir_caps_from(eff_mcaps),
                 cairn: app_cairn_ns(eff_mcaps, entry.name()).map(|ns| (plan, ns)),
+                intent: ahd_id,
+                derived: eff_mcaps,
             };
             match ir::run(entry.payload(), &mut host) {
                 Ok(()) => kprintln!("[{label}] '{}' finished", entry.name()),
@@ -1514,17 +1519,12 @@ const EMPTY_AHD: AhdSlot = AhdSlot {
 static mut AHDS: [AhdSlot; MAX_AHD] = [EMPTY_AHD; MAX_AHD];
 static mut AHD_NEXT_ID: u16 = 1;
 
-pub(crate) fn intent_open(arg: &str) {
-    let kind = arg.trim();
-    let Some((kname, ceiling)) = ahd_kind(kind) else {
-        kprintln!("[intent-open] unknown intent kind '{kind}'");
-        print_ahd_kinds();
-        return;
-    };
-    let Some(slot) = (unsafe { (0..MAX_AHD).find(|&i| !AHDS[i].used) }) else {
-        kprintln!("[intent-open] no free Ahd slots (max {MAX_AHD})");
-        return;
-    };
+/// Allocate an Ahd (intent) slot for `kind`, returning its id, canonical name,
+/// and capability ceiling. Shared by the `intent-open` console command and the
+/// self-contained `sand-demo` so both derive authority through the same path.
+fn open_ahd(kind: &str) -> Option<(u16, &'static str, u32)> {
+    let (kname, ceiling) = ahd_kind(kind)?;
+    let slot = unsafe { (0..MAX_AHD).find(|&i| !AHDS[i].used) }?;
     let id = unsafe { AHD_NEXT_ID };
     unsafe {
         AHD_NEXT_ID = AHD_NEXT_ID.wrapping_add(1);
@@ -1535,6 +1535,20 @@ pub(crate) fn intent_open(arg: &str) {
             ceiling,
         };
     }
+    Some((id, kname, ceiling))
+}
+
+pub(crate) fn intent_open(arg: &str) {
+    let kind = arg.trim();
+    if ahd_kind(kind).is_none() {
+        kprintln!("[intent-open] unknown intent kind '{kind}'");
+        print_ahd_kinds();
+        return;
+    }
+    let Some((id, kname, ceiling)) = open_ahd(kind) else {
+        kprintln!("[intent-open] no free Ahd slots (max {MAX_AHD})");
+        return;
+    };
     kprint!("[intent-open] opened Ahd #{id} kind={kname} ceiling=");
     mcap_names(ceiling, &mut crate::Uart);
     kprintln!();
@@ -1613,7 +1627,7 @@ pub(crate) fn intent_run(plan: &KernelPlan, arg: &str) {
     kprint!("[intent-run] derived (proven subset of Ahd) = ");
     mcap_names(derived, &mut crate::Uart);
     kprintln!();
-    run_loaded_entry(plan, i, derived, "intent-run");
+    run_loaded_entry(plan, i, derived, id, "intent-run");
 }
 
 /// Self-contained proof that authority only flows through an Ahd, using the
@@ -1652,6 +1666,8 @@ fn intent_demo_run(plan: &KernelPlan, kind: &str, ceiling: u32, requested: u32) 
     let mut host = crate::KHost {
         caps: ir_caps_from(derived),
         cairn,
+        intent: 0,
+        derived,
     };
     match ir::run(prog, &mut host) {
         Ok(()) => kprintln!("[intent-demo] agent finished within intent"),
@@ -1664,6 +1680,48 @@ fn intent_demo_run(plan: &KernelPlan, kind: &str, ceiling: u32, requested: u32) 
             } else {
                 kprintln!("[intent-demo] agent trapped: {}", t.msg());
             }
+        }
+    }
+}
+
+/// Open a real `writer` Ahd, run the built-in agent under it, and let its Cairn
+/// write become a Sand effect stamped with that intent. Returns the Ahd id (0 on
+/// failure) so the caller can read the effect back off the ledger. This is the
+/// intent -> derived cap -> effect half of the W8 P2 `sand-demo`; the ledger
+/// read-back half lives in the console.
+pub(crate) fn sand_demo_effect(plan: &KernelPlan) -> u16 {
+    let Some((id, kname, ceiling)) = open_ahd("writer") else {
+        kprintln!("[sand-demo] no free Ahd slots to open a writer intent");
+        return 0;
+    };
+    kprint!("[sand-demo] opened Ahd #{id} kind={kname} ceiling=");
+    mcap_names(ceiling, &mut crate::Uart);
+    kprintln!();
+    // The built-in agent requests print + cairn read + cairn write; under a
+    // writer Ahd all three are in-intent, so derived == requested.
+    let requested = MCAP_PRINT | MCAP_CAIRN_READ | MCAP_CAIRN_WRITE;
+    let derived = requested & ceiling;
+    kprint!("[sand-demo] derived under intent (proven <= Ahd) = ");
+    mcap_names(derived, &mut crate::Uart);
+    kprintln!();
+    kprintln!("[sand-demo] running the built-in agent; its Cairn write becomes an accountable effect");
+    let mut buf = [0u8; 512];
+    let prog = ir::demo_cairn(&mut buf);
+    let mut host = crate::KHost {
+        caps: ir_caps_from(derived),
+        cairn: crate::cairn_ns_id("agent").map(|ns| (plan, ns)),
+        intent: id,
+        derived,
+    };
+    match ir::run(prog, &mut host) {
+        Ok(()) => {
+            crate::record_event("intent", "sand.effect", "ns:agent", "OK");
+            id
+        }
+        Err(t) => {
+            kprintln!("[sand-demo] the agent trapped before recording an effect: {}", t.msg());
+            crate::record_event("intent", "sand.effect", "ns:agent", "TRAP");
+            0
         }
     }
 }

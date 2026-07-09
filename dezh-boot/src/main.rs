@@ -29,6 +29,12 @@ struct KHost<'a> {
     /// store is reached through the user-space virtio-block daemon over IPC
     /// with the namespace capability — no kernel-side block I/O path.
     cairn: Option<(&'a KernelPlan, usize)>,
+    /// Sand provenance for effects this host makes: the intent(Ahd) id under
+    /// which authority was derived (0 = direct/no intent) and the derived
+    /// capability set. Recorded on every Cairn commit so the effect ledger can
+    /// answer "which intent authorized this effect".
+    intent: u16,
+    derived: u32,
 }
 impl dezh_core::ir::Host for KHost<'_> {
     fn can(&self, cap: u32) -> bool {
@@ -48,7 +54,7 @@ impl dezh_core::ir::Host for KHost<'_> {
         prepare_virtio_input_bytes(data);
         run_virtio_client_ns_raw(
             plan,
-            cairn_req(BLK_REQ_CAIRN_COMMIT, ns, 0),
+            cairn_req_intent(BLK_REQ_CAIRN_COMMIT, ns, self.intent, self.derived),
             data.len(),
             task_ns_cap(ns),
         ) == 0
@@ -2235,6 +2241,9 @@ const BLK_REQ_CAIRN_LOG: usize = 45;
 const BLK_REQ_CAIRN_ROLLBACK: usize = 46;
 const BLK_REQ_CAIRN_VERIFY: usize = 47;
 const BLK_REQ_CAIRN_STATUS: usize = 48;
+// Sand (W8 P2): effect-ledger view over the same enriched Cairn commit log.
+const BLK_REQ_SAND_LOG: usize = 49;
+const BLK_REQ_SAND_INFO: usize = 50;
 // Task-capability bits 8..15 gate Cairn v1 namespaces 0..7 (kernel-attested on
 // every IPC recv; the storage daemon checks the requested namespace's bit).
 const TASK_CAIRN_NS_BASE: usize = 8;
@@ -2251,6 +2260,14 @@ const fn task_ns_cap(ns: usize) -> usize {
 /// Pack a Cairn request for the virtio-blk client: base op | ns << 8 | steps << 12.
 fn cairn_req(base: usize, ns: usize, steps: usize) -> usize {
     base | (ns << 8) | (steps.min(0xfff) << 12)
+}
+
+/// Pack a Sand-carrying commit request: the base packing plus the intent(Ahd)
+/// id in bits 24..39 and the derived cap in bits 40..47. The client courier
+/// unpacks these into the commit IPC so the daemon records provenance. A direct
+/// (no-intent) commit uses `cairn_req` with `ahd == 0`.
+fn cairn_req_intent(base: usize, ns: usize, ahd: u16, derived: u32) -> usize {
+    cairn_req(base, ns, 0) | ((ahd as usize) << 24) | (((derived & 0xff) as usize) << 40)
 }
 const IPC_PROTO_V1: usize = 0xd1;
 const IPC_SERVICE_SYSTEM: usize = 0;
@@ -2819,6 +2836,60 @@ fn run_cairn_demo(plan: &KernelPlan) {
         kprintln!(
             "[cairn-demo] FAIL: statuses commit={s1},{s2},{s3} rollback={s4} verify={s5} denied={s6} (expected 0,0,0,0,0,1)"
         );
+    }
+}
+
+/// Sand console front-end: sand-log / sand-info are provenance views over the
+/// SAME Cairn commit log (they carry no write authority — read the ns bit only).
+fn sand_cmd(plan: &KernelPlan, base: usize, arg: &str) {
+    let Some((ns, _)) = cairn_parse_ns(arg) else {
+        return;
+    };
+    let _ = run_registered_virtio_client_ns(plan, cairn_req(base, ns, 0), "", task_ns_cap(ns));
+}
+
+/// W8 P2 flagship: prove the effect ledger links an effect back to the intent
+/// that authorized it. Open a `writer` Ahd, run the built-in agent under it so
+/// its Cairn write is derived from that intent, then read the Sand ledger and
+/// show the effect carries actor -> intent(Ahd) -> derived cap -> reversibility.
+fn run_sand_demo(plan: &KernelPlan) {
+    const AGENT: usize = 4;
+    kprintln!("[sand-demo] Sand = the Cairn commit log as an effect ledger (not a parallel store)");
+    kprintln!("[sand-demo] 1/3 open a writer intent and run the built-in agent under it");
+    let id = pkg::sand_demo_effect(plan);
+    if id == 0 {
+        kprintln!("[sand-demo] FAIL: could not open an intent / record the effect");
+        record_event("console", "sand.demo", "ns:agent", "fail");
+        return;
+    }
+    kprintln!("[sand-demo] 2/3 the effect ledger for ns=agent (newest first)");
+    let sl = run_registered_virtio_client_ns(
+        plan,
+        cairn_req(BLK_REQ_SAND_LOG, AGENT, 0),
+        "",
+        task_ns_cap(AGENT),
+    );
+    kprintln!("[sand-demo] 3/3 head effect detail");
+    let si = run_registered_virtio_client_ns(
+        plan,
+        cairn_req(BLK_REQ_SAND_INFO, AGENT, 0),
+        "",
+        task_ns_cap(AGENT),
+    );
+    let pass = sl == 0 && si == 0;
+    record_event(
+        "console",
+        "sand.demo",
+        "ns:agent",
+        if pass { "pass" } else { "fail" },
+    );
+    if pass {
+        kprintln!(
+            "[sand-demo] PASS: the effect is on the ledger as actor -> intent Ahd#{id} -> derived cap -> reversible"
+        );
+        kprintln!("[sand-demo] every effect is now accountable to the intent that authorized it");
+    } else {
+        kprintln!("[sand-demo] FAIL: sand-log={sl} sand-info={si} (expected 0,0)");
     }
 }
 
@@ -4209,6 +4280,27 @@ const COMMANDS: &[CommandSpec] = &[
         help: "self-contained proof: same agent under two Ahds (in-intent vs beyond-intent)",
     },
     CommandSpec {
+        name: "sand-log",
+        cap: cap::INSPECT,
+        cap_name: "INSPECT",
+        group: "Effects",
+        help: "Sand effect ledger for <ns>: actor -> intent -> derived cap -> reversibility",
+    },
+    CommandSpec {
+        name: "sand-info",
+        cap: cap::INSPECT,
+        cap_name: "INSPECT",
+        group: "Effects",
+        help: "Sand: full provenance of the head effect in <ns>",
+    },
+    CommandSpec {
+        name: "sand-demo",
+        cap: cap::SPAWN,
+        cap_name: "SPAWN",
+        group: "Effects",
+        help: "W8 P2 flagship: run an agent under an intent, then show its effect on the ledger",
+    },
+    CommandSpec {
         name: "pkg-remove",
         cap: cap::SPAWN,
         cap_name: "SPAWN",
@@ -5011,6 +5103,9 @@ fn dispatch(cmd: &str, arg: &str, plan: &KernelPlan, memory: &[MemoryRegion], he
         "cairn-verify" => cairn_cmd_simple(plan, BLK_REQ_CAIRN_VERIFY, arg),
         "cairn-rollback" => cairn_cmd_rollback(plan, arg),
         "cairn-demo" => run_cairn_demo(plan),
+        "sand-log" => sand_cmd(plan, BLK_REQ_SAND_LOG, arg),
+        "sand-info" => sand_cmd(plan, BLK_REQ_SAND_INFO, arg),
+        "sand-demo" => run_sand_demo(plan),
         "vblkd" => {
             kprintln!("[kernel] exercising registered virtio-blk daemon with IPC client");
             kprintln!("[kernel] daemon gets DEVICE+DMA+IPC; client gets IPC+DMA only (no MMIO)");
@@ -5029,6 +5124,8 @@ fn dispatch(cmd: &str, arg: &str, plan: &KernelPlan, memory: &[MemoryRegion], he
                 let mut h = KHost {
                     caps: ir::CAP_PRINT,
                     cairn: None,
+                    intent: 0,
+                    derived: 0,
                 };
                 if let Err(t) = ir::run(sum, &mut h) {
                     kprintln!("  [ir] TRAP: {}", t.msg());
@@ -5037,6 +5134,8 @@ fn dispatch(cmd: &str, arg: &str, plan: &KernelPlan, memory: &[MemoryRegion], he
                 let mut h = KHost {
                     caps: 0,
                     cairn: None,
+                    intent: 0,
+                    derived: 0,
                 };
                 if let Err(t) = ir::run(sum, &mut h) {
                     kprintln!("  [ir] TRAP: {}", t.msg());
@@ -5049,6 +5148,8 @@ fn dispatch(cmd: &str, arg: &str, plan: &KernelPlan, memory: &[MemoryRegion], he
             let mut h = KHost {
                 caps: ir::CAP_WRITE | ir::CAP_READ | ir::CAP_PRINT,
                 cairn: cairn_ns_id("agent").map(|ns| (plan, ns)),
+                intent: 0,
+                derived: 0,
             };
             if let Err(t) = ir::run(cairn, &mut h) {
                 kprintln!("  [ir] TRAP: {}", t.msg());

@@ -162,18 +162,23 @@ Real competitor to beat: not another OS, but user-space agent isolation
 (gVisor, Firecracker, wasmtime/WASI, seccomp+landlock). W8 must show something
 they structurally cannot — attributing and reversing a whole agent mission.
 
-- **Intent as mechanism (Ahd).** `intent-open <kind>` mints an **Ahd** (a
-  capability ceiling for a target namespace), `intent-run <ahd> <app>` runs an
-  app whose derived capability is proven ⊆ the Ahd — the *only* path to
-  authority — and `intent-list` enumerates open Ahds. Manifest grants (W1)
-  become Ahd-derived. Acceptance: a request for authority beyond the Ahd is
-  DENIED in a CI smoke leg.
-- **Effect ledger on Cairn (Sand)** (user-space, never kernel; rides the W2
-  commit log). Each **Sand** record: `actor → intent → derived cap → target
-  ns/service → status → reversibility class → rollback/compensation handle →
-  generation`. Commands `effect-log`, `effect-info <id>`. Acceptance: effects
-  recorded, survive reboot, cross-namespace attempt denied with kernel-attested
-  caps.
+- **Intent as mechanism (Ahd). — DONE (P1).** `intent-open <kind>` mints an
+  **Ahd** (a capability ceiling), `intent-run <ahd> <app>` runs an app whose
+  derived capability is proven ⊆ the Ahd — the *only* path to authority — and
+  `intent-list` enumerates open Ahds. `intent-demo` is the self-contained proof
+  (same agent under two Ahds). A request for authority beyond the Ahd is DENIED
+  in a CI smoke leg.
+- **Effect ledger on Cairn (Sand). — DONE (P2).** Sand is the **same** Cairn v1
+  commit log (user-space, never kernel), enriched so every commit *is* an effect
+  record: the commit header now carries `intent (Ahd id) → derived cap →
+  reversibility class → status → generation` alongside the existing
+  `actor → parent → hash`. It is **not** a parallel store. The intent id and
+  derived cap are threaded kernel→daemon on the commit IPC (request-id +
+  status byte) and recorded by the daemon that owns the disk. Commands
+  `sand-log <ns>`, `sand-info <ns>`, and the self-contained `sand-demo` (open a
+  writer intent → run the built-in agent under it → read the effect back off the
+  ledger). CI proves effects are recorded, carry their intent, and survive a
+  reboot with the provenance intact.
 - **Mission (Sfar) + whole-mission rollback + honest external effect.** A
   **Sfar** = the effects under one Ahd; `effect-rollback <sfar>` undoes them
   atomically; `effect-rollback <id>` undoes one. At least one `irreversible`

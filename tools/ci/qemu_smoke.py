@@ -260,6 +260,20 @@ def run_riscv64(qemu: str, kernel: Path) -> None:
                 ],
             ),
             ("events", "cairn.demo"),
+            # --- Sand effect ledger (W8 P2): effects accountable to intent -----
+            (
+                "sand-demo",
+                [
+                    "Sand = the Cairn commit log as an effect ledger",
+                    "[sand-demo] opened Ahd #3 kind=writer",
+                    "[sand] effect ledger ns=agent",
+                    "intent=Ahd#3 derived=print,cairn-read,cairn-write reversibility=reversible status=committed",
+                    "[sand-demo] PASS",
+                ],
+            ),
+            ("sand-log agent", "actor -> intent -> derived cap -> effect"),
+            ("sand-info agent", "head effect ns=agent"),
+            ("events", "sand.effect"),
             ("deny", "Pol denial demo skipped here to keep running services alive"),
             (
                 "bench-pol",
@@ -336,6 +350,9 @@ def run_riscv64(qemu: str, kernel: Path) -> None:
             ("cairn-get vault", "cairn value = \"ci-vault-secret"),
             ("cairn-verify note", "hash MATCH"),
             ("cairn-log note", "reversible=yes"),
+            # Sand provenance is durable: the intent behind the head effect
+            # survives a power cycle (it lives on the same Cairn commit).
+            ("sand-log agent", "intent=Ahd#3"),
             ("halt", "halting."),
         ]
         for command, expected in reboot_commands:

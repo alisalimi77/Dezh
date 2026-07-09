@@ -74,6 +74,12 @@ const REQ_CAIRN_LOG: usize = 45;
 const REQ_CAIRN_ROLLBACK: usize = 46;
 const REQ_CAIRN_VERIFY: usize = 47;
 const REQ_CAIRN_STATUS: usize = 48;
+// Sand (W8 P2): the effect-ledger VIEW over the SAME Cairn commit log. Not a
+// parallel store — these ops walk the enriched commit records and render the
+// actor -> intent(Ahd) -> derived cap -> effect -> reversibility -> status
+// provenance that every commit now carries.
+const REQ_SAND_LOG: usize = 49;
+const REQ_SAND_INFO: usize = 50;
 
 const IPC_PROTO_V1: usize = 0xd1;
 const IPC_SERVICE_VIRTIO_BLOCK: usize = 1;
@@ -153,6 +159,19 @@ const CAIRN1_NS_MAX: usize = 8;
 const CAIRN1_NONE: u32 = 0xffff_ffff;
 const CAIRN1_VALUE_OFF: usize = 64;
 const CAIRN1_VALUE_MAX: usize = SECTOR_SIZE - CAIRN1_VALUE_OFF;
+// Sand enrichment lives in the commit-record header's previously-spare span
+// (offsets 36..64). It is additive: a freshly formatted store zeroes these, so
+// a direct/operator commit reads intent=0 (no Ahd). The DZC1 magic is unchanged
+// — Sand is the same commit record, richer, never a second log.
+const CAIRN1_OFF_INTENT: usize = 36; // u32: Ahd (intent) id; 0 = direct, no intent
+const CAIRN1_OFF_DERIVED: usize = 40; // u32: capability set derived under the Ahd
+const CAIRN1_OFF_REVCLASS: usize = 44; // u8: reversibility class (see SAND_REV_*)
+const CAIRN1_OFF_STATUS: usize = 45; // u8: effect status (see SAND_STATUS_*)
+const CAIRN1_OFF_GEN: usize = 46; // u16: this effect's generation on the ns chain
+const SAND_REV_REVERSIBLE: u8 = 0; // undo by moving the ref (a Cairn commit)
+const SAND_REV_COMPENSATABLE: u8 = 1; // undo needs a compensating effect
+const SAND_REV_IRREVERSIBLE: u8 = 2; // cannot be undone (e.g. an external send)
+const SAND_STATUS_COMMITTED: u8 = 0;
 // Kernel task-capability bits 8..15 gate access to Cairn namespace 0..7. The
 // kernel attests the sender's caps on every recv; the daemon checks the bit
 // for the requested namespace, so a client cannot reach another app's data.
@@ -501,6 +520,81 @@ fn cairn_ns_entry_off(ns: usize) -> usize {
     16 + ns * 32
 }
 
+fn d_read_u8(off: usize) -> u8 {
+    unsafe { core::ptr::read_volatile(data_ptr().add(off)) }
+}
+
+/// Render a derived-capability bitmask using the manifest capability names, so
+/// the ledger reads in the same vocabulary the operator granted with.
+fn print_mcaps(m: u32) {
+    const NAMES: [(&[u8], u32); 5] = [
+        (b"print", 1 << 0),
+        (b"ipc", 1 << 1),
+        (b"uptime", 1 << 2),
+        (b"cairn-read", 1 << 3),
+        (b"cairn-write", 1 << 4),
+    ];
+    let mut first = true;
+    for (name, bit) in NAMES {
+        if m & bit != 0 {
+            if !first {
+                sys_print(b",");
+            }
+            sys_print(name);
+            first = false;
+        }
+    }
+    if first {
+        sys_print(b"(none)");
+    }
+}
+
+fn print_revclass(c: u8) {
+    match c {
+        SAND_REV_REVERSIBLE => sys_print(b"reversible"),
+        SAND_REV_COMPENSATABLE => sys_print(b"compensatable"),
+        SAND_REV_IRREVERSIBLE => sys_print(b"irreversible"),
+        _ => sys_print(b"unknown"),
+    }
+}
+
+fn print_status_name(s: u8) {
+    match s {
+        SAND_STATUS_COMMITTED => sys_print(b"committed"),
+        _ => sys_print(b"unknown"),
+    }
+}
+
+/// One provenance line for a single commit already loaded in the data buffer.
+fn print_sand_record(slot: u32) {
+    let intent = d_read_u32(CAIRN1_OFF_INTENT);
+    let derived = d_read_u32(CAIRN1_OFF_DERIVED);
+    let revclass = d_read_u8(CAIRN1_OFF_REVCLASS);
+    let status = d_read_u8(CAIRN1_OFF_STATUS);
+    let gen = (d_read_u8(CAIRN1_OFF_GEN) as u16) | ((d_read_u8(CAIRN1_OFF_GEN + 1) as u16) << 8);
+    sys_print(b"slot=");
+    print_num(slot as usize);
+    sys_print(b" gen=");
+    print_num(gen as usize);
+    sys_print(b" actor=task");
+    print_num(d_read_u32(24) as usize);
+    sys_print(b" intent=");
+    if intent == 0 {
+        sys_print(b"direct");
+    } else {
+        sys_print(b"Ahd#");
+        print_num(intent as usize);
+    }
+    sys_print(b" derived=");
+    print_mcaps(derived);
+    sys_print(b" reversibility=");
+    print_revclass(revclass);
+    sys_print(b" status=");
+    print_status_name(status);
+    sys_print(b" hash=");
+    print_hex(d_read_u64(16));
+}
+
 /// Read the superblock into the data buffer; format it fresh if the magic is
 /// missing (first boot on a blank disk). Returns false on I/O failure.
 fn cairn_load_super(dma_base: usize) -> bool {
@@ -556,7 +650,14 @@ fn cairn_ns_allowed(ns: usize, sender_caps: usize, from: usize) -> bool {
     false
 }
 
-fn cairn_commit(dma_base: usize, ns: usize, len: usize, from: usize) -> usize {
+fn cairn_commit(
+    dma_base: usize,
+    ns: usize,
+    len: usize,
+    from: usize,
+    intent: u32,
+    derived: u32,
+) -> usize {
     if !cairn_load_super(dma_base) {
         return IPC_STATUS_IO_FAILURE;
     }
@@ -570,7 +671,9 @@ fn cairn_commit(dma_base: usize, ns: usize, len: usize, from: usize) -> usize {
     let count = d_read_u32(e + 20);
     let len = len.min(CAIRN1_VALUE_MAX - 1);
     let hash = fnv64((DMA_VA + INPUT_OFF) as *const u8, len);
-    // Build the commit record in the data buffer, then persist it.
+    // Build the commit record in the data buffer, then persist it. The header
+    // now doubles as a Sand effect record: actor + intent(Ahd) + derived cap +
+    // reversibility class + status + generation, all on the same commit.
     zero_data();
     set_data(b"DZC1");
     d_write_u32(4, next);
@@ -580,6 +683,16 @@ fn cairn_commit(dma_base: usize, ns: usize, len: usize, from: usize) -> usize {
     d_write_u32(24, from as u32); // actor (kernel task id)
     d_write_u32(28, 1); // flags bit0: reversible
     d_write_u32(32, len as u32);
+    // Sand enrichment (offsets 36..48).
+    d_write_u32(CAIRN1_OFF_INTENT, intent);
+    d_write_u32(CAIRN1_OFF_DERIVED, derived);
+    let gen = count + 1;
+    unsafe {
+        core::ptr::write_volatile(data_ptr().add(CAIRN1_OFF_REVCLASS), SAND_REV_REVERSIBLE);
+        core::ptr::write_volatile(data_ptr().add(CAIRN1_OFF_STATUS), SAND_STATUS_COMMITTED);
+        core::ptr::write_volatile(data_ptr().add(CAIRN1_OFF_GEN), gen as u8);
+        core::ptr::write_volatile(data_ptr().add(CAIRN1_OFF_GEN + 1), (gen >> 8) as u8);
+    }
     unsafe {
         core::ptr::copy_nonoverlapping(
             (DMA_VA + INPUT_OFF) as *const u8,
@@ -618,8 +731,67 @@ fn cairn_commit(dma_base: usize, ns: usize, len: usize, from: usize) -> usize {
     print_hex(hash);
     sys_print(b" actor=task");
     print_num(from);
+    sys_print(b" intent=");
+    if intent == 0 {
+        sys_print(b"direct");
+    } else {
+        sys_print(b"Ahd#");
+        print_num(intent as usize);
+    }
     sys_print(b"\n");
     IPC_STATUS_OK
+}
+
+/// Sand effect ledger: walk the SAME commit chain newest-first and render the
+/// provenance each commit carries. This is a view, not a store.
+fn sand_log(dma_base: usize, ns: usize) -> usize {
+    if !cairn_load_super(dma_base) {
+        return IPC_STATUS_IO_FAILURE;
+    }
+    let mut cur = d_read_u32(cairn_ns_entry_off(ns) + 16);
+    sys_print(b"  [sand] effect ledger ns=");
+    print_ns_name(ns);
+    sys_print(b" (newest first): actor -> intent -> derived cap -> effect\n");
+    if cur == CAIRN1_NONE {
+        sys_print(b"    (no effects recorded)\n");
+        return IPC_STATUS_OK;
+    }
+    let mut shown = 0usize;
+    while cur != CAIRN1_NONE && shown < 8 {
+        let st = rw(dma_base, CAIRN1_COMMIT_FIRST_SECTOR + cur as u64, false);
+        if st != 0 || !data_starts_with(b"DZC1") {
+            sys_print(b"    [sand] ledger walk failed: unreadable commit slot\n");
+            return IPC_STATUS_IO_FAILURE;
+        }
+        let parent = d_read_u32(8);
+        sys_print(b"    ");
+        print_sand_record(cur);
+        sys_print(b"\n");
+        cur = parent;
+        shown += 1;
+    }
+    IPC_STATUS_OK
+}
+
+/// Sand detail for the head effect of a namespace: the full provenance record.
+fn sand_info(dma_base: usize, ns: usize) -> usize {
+    match cairn_load_head(dma_base, ns) {
+        None => IPC_STATUS_IO_FAILURE,
+        Some(CAIRN1_NONE) => {
+            sys_print(b"  [sand] ns=");
+            print_ns_name(ns);
+            sys_print(b" has no effects yet\n");
+            IPC_STATUS_UNAVAILABLE
+        }
+        Some(head) => {
+            sys_print(b"  [sand] head effect ns=");
+            print_ns_name(ns);
+            sys_print(b": ");
+            print_sand_record(head);
+            sys_print(b"\n");
+            IPC_STATUS_OK
+        }
+    }
 }
 
 /// Load the head commit of `ns` into the data buffer. Returns the head slot
@@ -1013,6 +1185,11 @@ fn daemon(dma_base: usize) -> ! {
         // the low 12 bits carry the value length or the rollback step count.
         let cairn_ns = (request_arg(word) >> 12) & 0xf;
         let cairn_aux = request_arg(word) & 0xfff;
+        // Sand provenance rides on a commit request: the intent (Ahd) id travels
+        // in the request-id field and the derived capability set in the request
+        // status byte. Both are kernel-supplied — the daemon only records them.
+        let sand_intent = request_id(word) as u32;
+        let sand_derived = ((word >> 16) & 0xff) as u32;
         if op == REQ_PROBE {
             sys_print(b"  [virtio-blk-daemon] PROBE over IPC\n");
             send_status(from, word, IPC_STATUS_OK);
@@ -1523,7 +1700,7 @@ fn daemon(dma_base: usize) -> ! {
             send_status(from, word, cairn_status(dma_base));
         } else if op == REQ_CAIRN_COMMIT {
             let st = if cairn_ns_allowed(cairn_ns, sender_caps, from) {
-                cairn_commit(dma_base, cairn_ns, cairn_aux, from)
+                cairn_commit(dma_base, cairn_ns, cairn_aux, from, sand_intent, sand_derived)
             } else {
                 IPC_STATUS_DENIED
             };
@@ -1552,6 +1729,20 @@ fn daemon(dma_base: usize) -> ! {
         } else if op == REQ_CAIRN_VERIFY {
             let st = if cairn_ns_allowed(cairn_ns, sender_caps, from) {
                 cairn_verify(dma_base, cairn_ns)
+            } else {
+                IPC_STATUS_DENIED
+            };
+            send_status(from, word, st);
+        } else if op == REQ_SAND_LOG {
+            let st = if cairn_ns_allowed(cairn_ns, sender_caps, from) {
+                sand_log(dma_base, cairn_ns)
+            } else {
+                IPC_STATUS_DENIED
+            };
+            send_status(from, word, st);
+        } else if op == REQ_SAND_INFO {
+            let st = if cairn_ns_allowed(cairn_ns, sender_caps, from) {
+                sand_info(dma_base, cairn_ns)
             } else {
                 IPC_STATUS_DENIED
             };
@@ -1599,6 +1790,19 @@ fn client_send(to: usize, op: usize, sector_or_len: usize) -> usize {
     response_status(reply)
 }
 
+/// Commit send carrying Sand provenance: the intent(Ahd) id travels in the
+/// request-id field and the derived cap in the request status byte, so the
+/// daemon records who/under-what-intent every effect happened.
+fn client_send_commit(to: usize, intent: usize, derived: usize, arg: usize) -> usize {
+    let rc = sys_send(to, typed_word(REQ_CAIRN_COMMIT, intent, derived, arg));
+    if rc != 0 {
+        sys_print(b"  [vblk-client] service unavailable or IPC denied\n");
+        return IPC_STATUS_UNAVAILABLE;
+    }
+    let (reply, _, _) = sys_recv();
+    response_status(reply)
+}
+
 fn client_demo(daemon: usize) -> ! {
     sys_print(b"  [vblk-client] talking to long-lived virtio-blk daemon over IPC\n");
     let _ = client_send(daemon, REQ_PROBE, 0);
@@ -1625,11 +1829,15 @@ fn client_demo(daemon: usize) -> ! {
 }
 
 fn client_request(daemon: usize, input_len: usize, req: usize) -> ! {
-    // Cairn v1 requests arrive packed: base op | ns << 8 | steps << 12.
+    // Cairn v1 requests arrive packed: base op | ns << 8 | steps << 12. Sand
+    // adds the intent(Ahd) id in bits 24..39 and the derived cap in bits 40..47
+    // (zero on direct/operator commits).
     let base = req & 0xff;
     let cairn_ns = (req >> 8) & 0xf;
     let cairn_steps = (req >> 12) & 0xfff;
-    if base >= REQ_CAIRN_INIT && base <= REQ_CAIRN_STATUS {
+    let sand_intent = (req >> 24) & 0xffff;
+    let sand_derived = (req >> 40) & 0xff;
+    if base >= REQ_CAIRN_INIT && base <= REQ_SAND_INFO {
         let arg = if base == REQ_CAIRN_COMMIT {
             (cairn_ns << 12) | input_len.min(0xfff)
         } else if base == REQ_CAIRN_ROLLBACK {
@@ -1637,7 +1845,11 @@ fn client_request(daemon: usize, input_len: usize, req: usize) -> ! {
         } else {
             cairn_ns << 12
         };
-        let st = client_send(daemon, base, arg);
+        let st = if base == REQ_CAIRN_COMMIT {
+            client_send_commit(daemon, sand_intent, sand_derived, arg)
+        } else {
+            client_send(daemon, base, arg)
+        };
         if base == REQ_CAIRN_COMMIT {
             sys_print(b"  [vblk-client] cairn-commit status=");
         } else if base == REQ_CAIRN_GET {
@@ -1650,6 +1862,10 @@ fn client_request(daemon: usize, input_len: usize, req: usize) -> ! {
             sys_print(b"  [vblk-client] cairn-verify status=");
         } else if base == REQ_CAIRN_STATUS {
             sys_print(b"  [vblk-client] cairn-status status=");
+        } else if base == REQ_SAND_LOG {
+            sys_print(b"  [vblk-client] sand-log status=");
+        } else if base == REQ_SAND_INFO {
+            sys_print(b"  [vblk-client] sand-info status=");
         } else {
             sys_print(b"  [vblk-client] cairn-init status=");
         }

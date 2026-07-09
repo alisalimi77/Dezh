@@ -309,12 +309,18 @@ whole-mission rollback with an honest irreversible effect, and an owned cost.
   Ahd is denied. This rides the existing IPC attenuation and per-task
   capability bits.
 
-### 2. Effect ledger on Cairn (Sand)
+### 2. Effect ledger on Cairn (Sand) — built (W8 P2)
 
-- A user-space service (never kernel) records each effect in **Sand** as
-  `actor → intent → derived capability → target namespace/service → status →
-  reversibility class → rollback/compensation handle → generation`.
-- Commands: `effect-log`, `effect-info <id>`.
+- **Sand is the same Cairn v1 commit log, enriched — not a parallel store.**
+  The user-space storage daemon (which alone holds the disk capability) records
+  each effect on the very commit that produces it: `actor → intent (Ahd) →
+  derived capability → target namespace → status → reversibility class →
+  generation`, alongside the pre-existing `parent → hash`. The intent id and
+  derived cap are supplied by the kernel on the commit IPC; the daemon only
+  records them.
+- Commands: `sand-log <ns>`, `sand-info <ns>`, and `sand-demo` (open an intent →
+  run an agent under it → read the effect back off the ledger). Provenance
+  survives a reboot because it lives on the durable commit.
 
 ### 3. Mission (Sfar) + whole-mission rollback + honest external effect
 
