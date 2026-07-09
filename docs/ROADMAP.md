@@ -162,22 +162,24 @@ Real competitor to beat: not another OS, but user-space agent isolation
 (gVisor, Firecracker, wasmtime/WASI, seccomp+landlock). W8 must show something
 they structurally cannot — attributing and reversing a whole agent mission.
 
-- **Intent as mechanism.** `intent-open <kind>` (a capability ceiling for a
-  target namespace), `intent-run <intent> <app>` (derived capability proven ⊆
-  intent — the *only* path to authority), `intent-list`. Manifest grants (W1)
-  become intent-derived. Acceptance: a request for authority beyond the intent
-  is DENIED in a CI smoke leg.
-- **Effect ledger on Cairn** (user-space, never kernel; rides the W2 commit
-  log). Each effect: `actor → intent → derived cap → target ns/service →
-  status → reversibility class → rollback/compensation handle → generation`.
-  Commands `effect-log`, `effect-info <id>`. Acceptance: effects recorded,
-  survive reboot, cross-namespace attempt denied with kernel-attested caps.
-- **Mission + whole-mission rollback + honest external effect.** A mission =
-  the effects under one intent; `effect-rollback <mission>` undoes them
+- **Intent as mechanism (Ahd).** `intent-open <kind>` mints an **Ahd** (a
+  capability ceiling for a target namespace), `intent-run <ahd> <app>` runs an
+  app whose derived capability is proven ⊆ the Ahd — the *only* path to
+  authority — and `intent-list` enumerates open Ahds. Manifest grants (W1)
+  become Ahd-derived. Acceptance: a request for authority beyond the Ahd is
+  DENIED in a CI smoke leg.
+- **Effect ledger on Cairn (Sand)** (user-space, never kernel; rides the W2
+  commit log). Each **Sand** record: `actor → intent → derived cap → target
+  ns/service → status → reversibility class → rollback/compensation handle →
+  generation`. Commands `effect-log`, `effect-info <id>`. Acceptance: effects
+  recorded, survive reboot, cross-namespace attempt denied with kernel-attested
+  caps.
+- **Mission (Sfar) + whole-mission rollback + honest external effect.** A
+  **Sfar** = the effects under one Ahd; `effect-rollback <sfar>` undoes them
   atomically; `effect-rollback <id>` undoes one. At least one `irreversible`
   external effect that rollback **refuses with an explanation**, and one
   `compensatable` effect with a registered compensation. Acceptance: "10
-  changes, error midway, whole-mission rollback restores" and "rollback of an
+  changes, error midway, whole-Sfar rollback restores" and "rollback of an
   irreversible effect is refused with an explanation".
 - **The adversary (`redteam`).** A malicious agent that *tries to escape* —
   cross-namespace read, raw MMIO write, capability forgery/amplification,
@@ -185,8 +187,8 @@ they structurally cannot — attributing and reversing a whole agent mission.
   `why-denied`; system survives. Acceptance: every escape attempt reaches a
   named denial in CI.
 - **Explainable denial + provenance.** `why-denied <last|id>`, `cap-tree` /
-  `cap-audit` / `component-info`, and a queryable `actor → intent → effect`
-  provenance graph.
+  `cap-audit` / `component-info`, and **Tbar**, a queryable
+  `actor → intent → effect` provenance graph.
 - **Credibility layer.** Per-effect ledger overhead measured into BENCH.md
   (D015); a documented head-to-head where gVisor/Firecracker/wasmtime cannot
   cleanly undo a whole mission but Dezh can (Dezh side reproducible in CI); and

@@ -59,6 +59,18 @@ The app registry v0 supports embedded app bundles, install/remove state,
 private app storage sectors, and no-grant denial demos. This is sufficient for
 reviewing the authority model, not a production package ecosystem.
 
+## Names (ours)
+
+| Name | Subsystem | Status |
+| --- | --- | --- |
+| `Dezh` | The OS. | shipped |
+| `Cairn` | The persistent effect layer — a versioned, rollbackable object store (a filesystem is one use of it). | shipped (v1) |
+| `Pol` | Legacy-compatibility personality servers (Linux first); foreign binaries run capability-gated. | shipped (Linux) |
+| `Ahd` | An intent token: the declared capability ceiling and the only path to authority (derived capability ⊆ Ahd). | W8, planned |
+| `Sand` | The effect ledger: records `actor → intent → effect` on Cairn (a deed/record; also stone/waypoint, Cairn-adjacent). | W8, planned |
+| `Sfar` | A mission: the set of effects produced under one Ahd; reversible as a single unit. | W8, planned |
+| `Tbar` | The provenance graph: a queryable `actor → intent → effect` lineage. | W8, planned |
+
 ## Naming Policy
 
 Public documentation uses the name `Dezh OS` only as a project label. Public

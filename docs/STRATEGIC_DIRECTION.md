@@ -299,26 +299,27 @@ W8 is not "add a feature"; it is the feature plus the three things that make its
 value legible to a skeptical practitioner audience — an adversary, a
 whole-mission rollback with an honest irreversible effect, and an owned cost.
 
-### 1. Intent as mechanism
+### 1. Intent as mechanism (Ahd)
 
-- `intent-open <kind>` issues an intent token (a ceiling of capabilities for a
-  target namespace), `intent-run <intent> <app>` runs an app whose derived
-  capability is proven ⊆ the intent, `intent-list` enumerates open intents.
-- Manifest grants (W1) become intent-derived; a request for authority beyond
-  the intent is denied. This rides the existing IPC attenuation and per-task
+- `intent-open <kind>` issues an **Ahd** (an intent token: a ceiling of
+  capabilities for a target namespace), `intent-run <ahd> <app>` runs an app
+  whose derived capability is proven ⊆ the Ahd, `intent-list` enumerates open
+  Ahds.
+- Manifest grants (W1) become Ahd-derived; a request for authority beyond the
+  Ahd is denied. This rides the existing IPC attenuation and per-task
   capability bits.
 
-### 2. Effect ledger on Cairn
+### 2. Effect ledger on Cairn (Sand)
 
-- A user-space service (never kernel) records each effect as
+- A user-space service (never kernel) records each effect in **Sand** as
   `actor → intent → derived capability → target namespace/service → status →
   reversibility class → rollback/compensation handle → generation`.
 - Commands: `effect-log`, `effect-info <id>`.
 
-### 3. Mission + whole-mission rollback + honest external effect
+### 3. Mission (Sfar) + whole-mission rollback + honest external effect
 
-- A **mission** groups the effects under one intent; `effect-rollback
-  <mission>` undoes them atomically; `effect-rollback <id>` undoes one.
+- A **Sfar** groups the effects under one Ahd; `effect-rollback <sfar>` undoes
+  them atomically; `effect-rollback <id>` undoes one.
 - At least one `irreversible` external effect (simulated network/print) that
   rollback **refuses with an explanation**, and one `compensatable` effect with
   a registered compensation action.
@@ -332,9 +333,9 @@ whole-mission rollback with an honest irreversible effect, and an owned cost.
 
 ### 5. Explainable denial + provenance
 
-- `why-denied <last|id>`, `cap-tree` / `cap-audit` / `component-info`, and a
-  queryable `actor → intent → effect` provenance graph ("everything this agent
-  touched and why").
+- `why-denied <last|id>`, `cap-tree` / `cap-audit` / `component-info`, and
+  **Tbar**, a queryable `actor → intent → effect` provenance graph
+  ("everything this agent touched and why").
 
 ### 6. Credibility layer
 

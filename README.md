@@ -112,8 +112,10 @@ mean the same thing on any backend. See
 | **Pol** | The Linux compatibility personality: foreign binaries run capability-gated, with zero ambient authority. |
 | **Dezh-IR** | The typed, verifiable intermediate format apps and agents execute in — one program, any ISA. |
 | **`.dzp`** | The Dezh package format: manifest (requested capabilities) + payload (Dezh-IR or ISA ELF). |
-| **Intent** | A declared capability ceiling; the **only** path to authority. A derived capability is provably ⊆ its intent. |
-| **Effect / mission** | A recorded, attributable state change; a *mission* is the set of effects under one intent and is reversible as a unit. |
+| **Ahd** | An *intent*: a declared capability ceiling and the **only** path to authority. A derived capability is provably ⊆ its Ahd. *(W8)* |
+| **Sand** | The *effect ledger* — records `actor → intent → effect` on Cairn. *(W8)* |
+| **Sfar** | A *mission*: the set of effects under one Ahd, reversible as a single unit. *(W8)* |
+| **Tbar** | The *provenance graph* — a queryable `actor → intent → effect` lineage. *(W8)* |
 
 ## What Works Today
 
