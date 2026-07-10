@@ -179,13 +179,24 @@ they structurally cannot — attributing and reversing a whole agent mission.
   writer intent → run the built-in agent under it → read the effect back off the
   ledger). CI proves effects are recorded, carry their intent, and survive a
   reboot with the provenance intact.
-- **Mission (Sfar) + whole-mission rollback + honest external effect.** A
-  **Sfar** = the effects under one Ahd; `effect-rollback <sfar>` undoes them
-  atomically; `effect-rollback <id>` undoes one. At least one `irreversible`
-  external effect that rollback **refuses with an explanation**, and one
-  `compensatable` effect with a registered compensation. Acceptance: "10
-  changes, error midway, whole-Sfar rollback restores" and "rollback of an
-  irreversible effect is refused with an explanation".
+- **Mission (Sfar) + whole-mission rollback + honest external effect. — DONE
+  (P3, first slice).** A **Sfar** = the effects under one Ahd (found by the
+  intent id stamped on each Sand commit). `sfar-plan <ahd>` is the rollback
+  **forecast** — it walks the *live* per-namespace chains and reports how many of
+  the mission's effects are `reversible` / `compensatable` / `irreversible` /
+  `unknown`, with an honest confidence (never "full" if anything cannot be
+  undone). `sfar-rollback <ahd>` retracts the contiguous reversible head-run per
+  namespace with a single atomic superblock write and **refuses** the rest with
+  an explanation. A fourth reversibility class `unknown` exists so a connector
+  that does not declare semantics is never optimistically treated as reversible.
+  `sfar-demo` is the self-contained proof: a mission with one MODELED
+  irreversible external send + two reversible writes → forecast "partial" →
+  rollback undoes the two writes and refuses the send ("already happened in the
+  outside world"). CI proves the outcome and that the refused effect + its
+  provenance survive a reboot. **Remaining for a later slice:** a
+  `compensatable` effect with a *registered compensating action* (rollback runs
+  the compensation rather than refusing), and mission authority that spans every
+  namespace it touched (this slice gates on the demo's single `agent` namespace).
 - **The adversary (`redteam`).** A malicious agent that *tries to escape* —
   cross-namespace read, raw MMIO write, capability forgery/amplification,
   out-of-intent action, CPU monopoly — each stopped at a named boundary with

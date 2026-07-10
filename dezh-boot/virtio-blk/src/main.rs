@@ -80,6 +80,12 @@ const REQ_CAIRN_STATUS: usize = 48;
 // provenance that every commit now carries.
 const REQ_SAND_LOG: usize = 49;
 const REQ_SAND_INFO: usize = 50;
+// Sfar (W8 P3): a mission = the set of effects under one Ahd. sfar-plan is the
+// rollback FORECAST (what could be undone and with what confidence, computed
+// before touching anything); sfar-rollback undoes the reversible effects of a
+// mission and refuses the rest with an explanation.
+const REQ_SFAR_PLAN: usize = 51;
+const REQ_SFAR_ROLLBACK: usize = 52;
 
 const IPC_PROTO_V1: usize = 0xd1;
 const IPC_SERVICE_VIRTIO_BLOCK: usize = 1;
@@ -171,6 +177,7 @@ const CAIRN1_OFF_GEN: usize = 46; // u16: this effect's generation on the ns cha
 const SAND_REV_REVERSIBLE: u8 = 0; // undo by moving the ref (a Cairn commit)
 const SAND_REV_COMPENSATABLE: u8 = 1; // undo needs a compensating effect
 const SAND_REV_IRREVERSIBLE: u8 = 2; // cannot be undone (e.g. an external send)
+const SAND_REV_UNKNOWN: u8 = 3; // connector did not declare — never assume reversible
 const SAND_STATUS_COMMITTED: u8 = 0;
 // Kernel task-capability bits 8..15 gate access to Cairn namespace 0..7. The
 // kernel attests the sender's caps on every recv; the daemon checks the bit
@@ -554,6 +561,7 @@ fn print_revclass(c: u8) {
         SAND_REV_REVERSIBLE => sys_print(b"reversible"),
         SAND_REV_COMPENSATABLE => sys_print(b"compensatable"),
         SAND_REV_IRREVERSIBLE => sys_print(b"irreversible"),
+        SAND_REV_UNKNOWN => sys_print(b"unknown"),
         _ => sys_print(b"unknown"),
     }
 }
@@ -657,6 +665,7 @@ fn cairn_commit(
     from: usize,
     intent: u32,
     derived: u32,
+    rev_class: u8,
 ) -> usize {
     if !cairn_load_super(dma_base) {
         return IPC_STATUS_IO_FAILURE;
@@ -688,7 +697,7 @@ fn cairn_commit(
     d_write_u32(CAIRN1_OFF_DERIVED, derived);
     let gen = count + 1;
     unsafe {
-        core::ptr::write_volatile(data_ptr().add(CAIRN1_OFF_REVCLASS), SAND_REV_REVERSIBLE);
+        core::ptr::write_volatile(data_ptr().add(CAIRN1_OFF_REVCLASS), rev_class);
         core::ptr::write_volatile(data_ptr().add(CAIRN1_OFF_STATUS), SAND_STATUS_COMMITTED);
         core::ptr::write_volatile(data_ptr().add(CAIRN1_OFF_GEN), gen as u8);
         core::ptr::write_volatile(data_ptr().add(CAIRN1_OFF_GEN + 1), (gen >> 8) as u8);
@@ -792,6 +801,188 @@ fn sand_info(dma_base: usize, ns: usize) -> usize {
             IPC_STATUS_OK
         }
     }
+}
+
+/// Sfar rollback FORECAST (W8 P3): scan every commit, tally the effects that
+/// belong to mission `ahd` by reversibility class, and report what a rollback
+/// could and could not undo — BEFORE touching anything. Confidence is honest:
+/// any irreversible/unknown effect drops it to "partial", never "full".
+fn sfar_plan(dma_base: usize, ahd: u32) -> usize {
+    if ahd == 0 {
+        sys_print(b"  [sfar] a mission is the effects under one intent; ahd 0 is 'direct' (no mission)\n");
+        return IPC_STATUS_BAD_REQUEST;
+    }
+    if !cairn_load_super(dma_base) {
+        return IPC_STATUS_IO_FAILURE;
+    }
+    // Snapshot each namespace's live head, then walk only the LIVE chains so a
+    // forecast reflects what is still standing (retracted effects stay on disk
+    // as history but must not inflate the forecast).
+    let mut head = [CAIRN1_NONE; CAIRN1_NS_MAX];
+    let mut ns = 0usize;
+    while ns < CAIRN1_NS_MAX {
+        head[ns] = d_read_u32(cairn_ns_entry_off(ns) + 16);
+        ns += 1;
+    }
+    let mut reversible = 0usize;
+    let mut compensatable = 0usize;
+    let mut irreversible = 0usize;
+    let mut unknown = 0usize;
+    sys_print(b"  [sfar] rollback forecast for mission Ahd#");
+    print_num(ahd as usize);
+    sys_print(b" (live effects, newest first):\n");
+    ns = 0;
+    while ns < CAIRN1_NS_MAX {
+        let mut cur = head[ns];
+        let mut guard = 0usize;
+        while cur != CAIRN1_NONE && guard < CAIRN1_COMMIT_SLOTS as usize {
+            guard += 1;
+            let st = rw(dma_base, CAIRN1_COMMIT_FIRST_SECTOR + cur as u64, false);
+            if st != 0 || !data_starts_with(b"DZC1") {
+                break;
+            }
+            let parent = d_read_u32(8);
+            if d_read_u32(CAIRN1_OFF_INTENT) == ahd {
+                match d_read_u8(CAIRN1_OFF_REVCLASS) {
+                    SAND_REV_REVERSIBLE => reversible += 1,
+                    SAND_REV_COMPENSATABLE => compensatable += 1,
+                    SAND_REV_IRREVERSIBLE => irreversible += 1,
+                    _ => unknown += 1,
+                }
+                sys_print(b"    ");
+                print_sand_record(cur);
+                sys_print(b" ns=");
+                print_ns_name(ns);
+                sys_print(b"\n");
+            }
+            cur = parent;
+        }
+        ns += 1;
+    }
+    let total = reversible + compensatable + irreversible + unknown;
+    if total == 0 {
+        sys_print(b"  [sfar] no effects recorded for this mission\n");
+        return IPC_STATUS_UNAVAILABLE;
+    }
+    sys_print(b"  [sfar] plan: reversible=");
+    print_num(reversible);
+    sys_print(b" compensatable=");
+    print_num(compensatable);
+    sys_print(b" irreversible=");
+    print_num(irreversible);
+    sys_print(b" unknown=");
+    print_num(unknown);
+    sys_print(b" confidence=");
+    if irreversible == 0 && unknown == 0 && compensatable == 0 {
+        sys_print(b"full (whole mission can be undone)\n");
+    } else if irreversible == 0 && unknown == 0 {
+        sys_print(b"partial (compensations required)\n");
+    } else {
+        sys_print(b"partial (some effects cannot be undone)\n");
+    }
+    IPC_STATUS_OK
+}
+
+/// Whole-mission rollback (W8 P3): for each namespace, walk the head chain and
+/// retract the contiguous run of THIS mission's reversible effects by moving the
+/// ref back — stopping (and refusing with an explanation) at the first effect
+/// that is not reversible or not part of the mission. All ref moves are staged
+/// in memory and committed with a single superblock write, so the retraction is
+/// atomic. History is preserved; only the refs move.
+///
+/// Authority note: this is an operator/mission-owner action gated on the passed
+/// namespace capability. A mission spanning namespaces the caller does not hold
+/// is out of scope for this slice (single-namespace missions are the demo).
+fn sfar_rollback(dma_base: usize, ahd: u32) -> usize {
+    if ahd == 0 {
+        sys_print(b"  [sfar] refusing: ahd 0 is 'direct' (no mission to roll back)\n");
+        return IPC_STATUS_BAD_REQUEST;
+    }
+    if !cairn_load_super(dma_base) {
+        return IPC_STATUS_IO_FAILURE;
+    }
+    let mut new_head = [CAIRN1_NONE; CAIRN1_NS_MAX];
+    let mut undone = [0u32; CAIRN1_NS_MAX];
+    let mut count = [0u32; CAIRN1_NS_MAX];
+    let mut ns = 0usize;
+    while ns < CAIRN1_NS_MAX {
+        let e = cairn_ns_entry_off(ns);
+        new_head[ns] = d_read_u32(e + 16);
+        count[ns] = d_read_u32(e + 20);
+        ns += 1;
+    }
+    let mut refused_irrev = 0usize;
+    let mut refused_comp = 0usize;
+    ns = 0;
+    while ns < CAIRN1_NS_MAX {
+        let mut cur = new_head[ns];
+        loop {
+            if cur == CAIRN1_NONE {
+                break;
+            }
+            let st = rw(dma_base, CAIRN1_COMMIT_FIRST_SECTOR + cur as u64, false);
+            if st != 0 || !data_starts_with(b"DZC1") {
+                break;
+            }
+            let parent = d_read_u32(8);
+            let intent = d_read_u32(CAIRN1_OFF_INTENT);
+            let cls = d_read_u8(CAIRN1_OFF_REVCLASS);
+            if intent != ahd {
+                break; // reached an effect outside this mission; leave it be
+            }
+            if cls != SAND_REV_REVERSIBLE {
+                // A non-reversible mission effect blocks the ref from moving past
+                // it — this is the honest boundary of what rollback can do.
+                sys_print(b"    [sfar] REFUSED at ns=");
+                print_ns_name(ns);
+                sys_print(b" slot=");
+                print_num(cur as usize);
+                sys_print(b": ");
+                print_revclass(cls);
+                if cls == SAND_REV_COMPENSATABLE {
+                    sys_print(b" effect needs a compensating action, not a ref move\n");
+                    refused_comp += 1;
+                } else {
+                    sys_print(b" effect already happened in the outside world; cannot be undone\n");
+                    refused_irrev += 1;
+                }
+                break;
+            }
+            new_head[ns] = parent;
+            undone[ns] += 1;
+            cur = parent;
+        }
+        ns += 1;
+    }
+    // Commit all ref moves atomically with one superblock write.
+    if !cairn_load_super(dma_base) {
+        return IPC_STATUS_IO_FAILURE;
+    }
+    let mut total = 0u32;
+    ns = 0;
+    while ns < CAIRN1_NS_MAX {
+        if undone[ns] > 0 {
+            let e = cairn_ns_entry_off(ns);
+            d_write_u32(e + 16, new_head[ns]);
+            d_write_u32(e + 20, count[ns].saturating_sub(undone[ns]));
+            total += undone[ns];
+        }
+        ns += 1;
+    }
+    let st = rw(dma_base, CAIRN1_SUPER_SECTOR, true);
+    if st != 0 {
+        return IPC_STATUS_IO_FAILURE;
+    }
+    sys_print(b"  [sfar] mission Ahd#");
+    print_num(ahd as usize);
+    sys_print(b" rolled back: reversible effects retracted=");
+    print_num(total as usize);
+    sys_print(b" refused_irreversible=");
+    print_num(refused_irrev);
+    sys_print(b" refused_compensatable=");
+    print_num(refused_comp);
+    sys_print(b"\n  [sfar] history preserved: rollback moved refs; refused effects are explained, not silently undone\n");
+    IPC_STATUS_OK
 }
 
 /// Load the head commit of `ns` into the data buffer. Returns the head slot
@@ -1189,7 +1380,11 @@ fn daemon(dma_base: usize) -> ! {
         // in the request-id field and the derived capability set in the request
         // status byte. Both are kernel-supplied — the daemon only records them.
         let sand_intent = request_id(word) as u32;
-        let sand_derived = ((word >> 16) & 0xff) as u32;
+        // The request status byte packs derived caps (bits 0..4) and the
+        // effect's reversibility class (bits 5..6).
+        let sand_status_byte = (word >> 16) & 0xff;
+        let sand_derived = (sand_status_byte & 0x1f) as u32;
+        let sand_revclass = ((sand_status_byte >> 5) & 0x3) as u8;
         if op == REQ_PROBE {
             sys_print(b"  [virtio-blk-daemon] PROBE over IPC\n");
             send_status(from, word, IPC_STATUS_OK);
@@ -1700,7 +1895,15 @@ fn daemon(dma_base: usize) -> ! {
             send_status(from, word, cairn_status(dma_base));
         } else if op == REQ_CAIRN_COMMIT {
             let st = if cairn_ns_allowed(cairn_ns, sender_caps, from) {
-                cairn_commit(dma_base, cairn_ns, cairn_aux, from, sand_intent, sand_derived)
+                cairn_commit(
+                    dma_base,
+                    cairn_ns,
+                    cairn_aux,
+                    from,
+                    sand_intent,
+                    sand_derived,
+                    sand_revclass,
+                )
             } else {
                 IPC_STATUS_DENIED
             };
@@ -1743,6 +1946,20 @@ fn daemon(dma_base: usize) -> ! {
         } else if op == REQ_SAND_INFO {
             let st = if cairn_ns_allowed(cairn_ns, sender_caps, from) {
                 sand_info(dma_base, cairn_ns)
+            } else {
+                IPC_STATUS_DENIED
+            };
+            send_status(from, word, st);
+        } else if op == REQ_SFAR_PLAN {
+            let st = if cairn_ns_allowed(cairn_ns, sender_caps, from) {
+                sfar_plan(dma_base, sand_intent)
+            } else {
+                IPC_STATUS_DENIED
+            };
+            send_status(from, word, st);
+        } else if op == REQ_SFAR_ROLLBACK {
+            let st = if cairn_ns_allowed(cairn_ns, sender_caps, from) {
+                sfar_rollback(dma_base, sand_intent)
             } else {
                 IPC_STATUS_DENIED
             };
@@ -1790,11 +2007,11 @@ fn client_send(to: usize, op: usize, sector_or_len: usize) -> usize {
     response_status(reply)
 }
 
-/// Commit send carrying Sand provenance: the intent(Ahd) id travels in the
-/// request-id field and the derived cap in the request status byte, so the
-/// daemon records who/under-what-intent every effect happened.
-fn client_send_commit(to: usize, intent: usize, derived: usize, arg: usize) -> usize {
-    let rc = sys_send(to, typed_word(REQ_CAIRN_COMMIT, intent, derived, arg));
+/// Send with explicit request-id and status fields. Sand rides these: a commit
+/// carries intent(Ahd) in the id field and derived-cap|rev-class in the status
+/// byte; a Sfar op carries the target mission's Ahd id in the id field.
+fn client_send_meta(to: usize, op: usize, id_field: usize, status_field: usize, arg: usize) -> usize {
+    let rc = sys_send(to, typed_word(op, id_field, status_field, arg));
     if rc != 0 {
         sys_print(b"  [vblk-client] service unavailable or IPC denied\n");
         return IPC_STATUS_UNAVAILABLE;
@@ -1835,9 +2052,11 @@ fn client_request(daemon: usize, input_len: usize, req: usize) -> ! {
     let base = req & 0xff;
     let cairn_ns = (req >> 8) & 0xf;
     let cairn_steps = (req >> 12) & 0xfff;
+    // Sand: intent(Ahd) id in bits 24..39; derived cap + rev-class byte in bits
+    // 40..47 (derived in bits 0..4, rev-class in bits 5..6 of that byte).
     let sand_intent = (req >> 24) & 0xffff;
-    let sand_derived = (req >> 40) & 0xff;
-    if base >= REQ_CAIRN_INIT && base <= REQ_SAND_INFO {
+    let sand_status_byte = (req >> 40) & 0xff;
+    if base >= REQ_CAIRN_INIT && base <= REQ_SFAR_ROLLBACK {
         let arg = if base == REQ_CAIRN_COMMIT {
             (cairn_ns << 12) | input_len.min(0xfff)
         } else if base == REQ_CAIRN_ROLLBACK {
@@ -1846,7 +2065,10 @@ fn client_request(daemon: usize, input_len: usize, req: usize) -> ! {
             cairn_ns << 12
         };
         let st = if base == REQ_CAIRN_COMMIT {
-            client_send_commit(daemon, sand_intent, sand_derived, arg)
+            client_send_meta(daemon, base, sand_intent, sand_status_byte, arg)
+        } else if base == REQ_SFAR_PLAN || base == REQ_SFAR_ROLLBACK {
+            // Sfar targets a mission: its Ahd id rides the request-id field.
+            client_send_meta(daemon, base, sand_intent, 0, arg)
         } else {
             client_send(daemon, base, arg)
         };
@@ -1866,6 +2088,10 @@ fn client_request(daemon: usize, input_len: usize, req: usize) -> ! {
             sys_print(b"  [vblk-client] sand-log status=");
         } else if base == REQ_SAND_INFO {
             sys_print(b"  [vblk-client] sand-info status=");
+        } else if base == REQ_SFAR_PLAN {
+            sys_print(b"  [vblk-client] sfar-plan status=");
+        } else if base == REQ_SFAR_ROLLBACK {
+            sys_print(b"  [vblk-client] sfar-rollback status=");
         } else {
             sys_print(b"  [vblk-client] cairn-init status=");
         }

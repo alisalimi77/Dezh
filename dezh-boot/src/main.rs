@@ -52,9 +52,16 @@ impl dezh_core::ir::Host for KHost<'_> {
             return false;
         };
         prepare_virtio_input_bytes(data);
+        // IR/storage effects are reversible: undo moves the Cairn ref.
         run_virtio_client_ns_raw(
             plan,
-            cairn_req_intent(BLK_REQ_CAIRN_COMMIT, ns, self.intent, self.derived),
+            cairn_req_intent(
+                BLK_REQ_CAIRN_COMMIT,
+                ns,
+                self.intent,
+                self.derived,
+                SAND_REV_REVERSIBLE,
+            ),
             data.len(),
             task_ns_cap(ns),
         ) == 0
@@ -2244,6 +2251,9 @@ const BLK_REQ_CAIRN_STATUS: usize = 48;
 // Sand (W8 P2): effect-ledger view over the same enriched Cairn commit log.
 const BLK_REQ_SAND_LOG: usize = 49;
 const BLK_REQ_SAND_INFO: usize = 50;
+// Sfar (W8 P3): mission rollback forecast + whole-mission rollback.
+const BLK_REQ_SFAR_PLAN: usize = 51;
+const BLK_REQ_SFAR_ROLLBACK: usize = 52;
 // Task-capability bits 8..15 gate Cairn v1 namespaces 0..7 (kernel-attested on
 // every IPC recv; the storage daemon checks the requested namespace's bit).
 const TASK_CAIRN_NS_BASE: usize = 8;
@@ -2263,12 +2273,29 @@ fn cairn_req(base: usize, ns: usize, steps: usize) -> usize {
 }
 
 /// Pack a Sand-carrying commit request: the base packing plus the intent(Ahd)
-/// id in bits 24..39 and the derived cap in bits 40..47. The client courier
-/// unpacks these into the commit IPC so the daemon records provenance. A direct
-/// (no-intent) commit uses `cairn_req` with `ahd == 0`.
-fn cairn_req_intent(base: usize, ns: usize, ahd: u16, derived: u32) -> usize {
-    cairn_req(base, ns, 0) | ((ahd as usize) << 24) | (((derived & 0xff) as usize) << 40)
+/// id in bits 24..39 and a status byte in bits 40..47 that holds the derived cap
+/// (bits 0..4) and the effect's reversibility class (bits 5..6). The client
+/// courier unpacks these into the commit IPC so the daemon records provenance.
+/// A direct (no-intent) reversible commit uses `cairn_req` with `ahd == 0`.
+fn cairn_req_intent(base: usize, ns: usize, ahd: u16, derived: u32, rev_class: u8) -> usize {
+    let status_byte = ((derived & 0x1f) | (((rev_class & 0x3) as u32) << 5)) as usize;
+    cairn_req(base, ns, 0) | ((ahd as usize) << 24) | (status_byte << 40)
 }
+
+/// Pack a Sfar (mission) request: base op | ns << 8 | ahd << 24. The mission's
+/// Ahd id rides the request-id field over the commit IPC to the daemon.
+fn sfar_req(base: usize, ns: usize, ahd: u16) -> usize {
+    cairn_req(base, ns, 0) | ((ahd as usize) << 24)
+}
+
+// Reversibility classes, mirrored from the storage daemon: an effect never
+// silently claims to be reversible (unknown is its own class).
+const SAND_REV_REVERSIBLE: u8 = 0;
+#[allow(dead_code)]
+const SAND_REV_COMPENSATABLE: u8 = 1;
+const SAND_REV_IRREVERSIBLE: u8 = 2;
+#[allow(dead_code)]
+const SAND_REV_UNKNOWN: u8 = 3;
 const IPC_PROTO_V1: usize = 0xd1;
 const IPC_SERVICE_SYSTEM: usize = 0;
 const IPC_STATUS_OK: usize = 0;
@@ -2890,6 +2917,97 @@ fn run_sand_demo(plan: &KernelPlan) {
         kprintln!("[sand-demo] every effect is now accountable to the intent that authorized it");
     } else {
         kprintln!("[sand-demo] FAIL: sand-log={sl} sand-info={si} (expected 0,0)");
+    }
+}
+
+/// Sfar console front-end: `sfar-plan <ahd>` (rollback forecast) and
+/// `sfar-rollback <ahd>` (whole-mission retraction). Slice-1 missions are
+/// namespace-scoped to ns=agent; the gate uses that namespace's capability.
+fn sfar_cmd(plan: &KernelPlan, base: usize, arg: &str) {
+    const AGENT: usize = 4;
+    let Ok(id) = arg.trim().parse::<u16>() else {
+        kprintln!("usage: {} <ahd-id> (see intent-list / sand-log for the mission's Ahd)",
+            if base == BLK_REQ_SFAR_ROLLBACK { "sfar-rollback" } else { "sfar-plan" });
+        return;
+    };
+    if id == 0 {
+        kprintln!("[sfar] Ahd #0 is 'direct' (no mission); open one with intent-open");
+        return;
+    }
+    let st = run_registered_virtio_client_ns(plan, sfar_req(base, AGENT, id), "", task_ns_cap(AGENT));
+    record_event(
+        "console",
+        if base == BLK_REQ_SFAR_ROLLBACK { "sfar.rollback" } else { "sfar.plan" },
+        "mission",
+        if st == 0 { "ok" } else { "fail" },
+    );
+}
+
+/// W8 P3 flagship: a whole agent MISSION under one intent, then an honest
+/// rollback. The mission makes three effects — one MODELED irreversible external
+/// send plus two reversible storage writes — so the forecast is "partial" and
+/// the rollback retracts the reversible writes but REFUSES the irreversible send
+/// with an explanation. This is the "leave an agent loose, then undo the night"
+/// story, scoped to be reproducible in CI.
+fn run_sfar_demo(plan: &KernelPlan) {
+    const AGENT: usize = 4;
+    let derived = pkg::MCAP_PRINT | pkg::MCAP_CAIRN_READ | pkg::MCAP_CAIRN_WRITE;
+    kprintln!("[sfar-demo] a mission = the effects under one intent; rollback is honest about limits");
+    let Some((id, _ceiling)) = pkg::open_intent("writer") else {
+        kprintln!("[sfar-demo] FAIL: no free intent slot");
+        record_event("console", "sfar.demo", "mission", "fail");
+        return;
+    };
+    kprintln!("[sfar-demo] 1/4 mission Ahd#{id}: one irreversible external send + two reversible writes");
+    // Order matters: the irreversible effect is committed first so it sits
+    // BELOW the reversible writes — rollback then retracts the writes and stops
+    // at the irreversible send, exactly the honest boundary.
+    let e_irrev = run_registered_virtio_client_ns(
+        plan,
+        cairn_req_intent(BLK_REQ_CAIRN_COMMIT, AGENT, id, derived, SAND_REV_IRREVERSIBLE),
+        "email.send:ops@dezh [modeled external effect]",
+        task_ns_cap(AGENT),
+    );
+    let e1 = run_registered_virtio_client_ns(
+        plan,
+        cairn_req_intent(BLK_REQ_CAIRN_COMMIT, AGENT, id, derived, SAND_REV_REVERSIBLE),
+        "mission-step-1",
+        task_ns_cap(AGENT),
+    );
+    let e2 = run_registered_virtio_client_ns(
+        plan,
+        cairn_req_intent(BLK_REQ_CAIRN_COMMIT, AGENT, id, derived, SAND_REV_REVERSIBLE),
+        "mission-step-2",
+        task_ns_cap(AGENT),
+    );
+    kprintln!("[sfar-demo] 2/4 rollback FORECAST before touching anything");
+    let plan_st = run_registered_virtio_client_ns(
+        plan,
+        sfar_req(BLK_REQ_SFAR_PLAN, AGENT, id),
+        "",
+        task_ns_cap(AGENT),
+    );
+    kprintln!("[sfar-demo] 3/4 roll the mission back: retract reversible, refuse irreversible");
+    let rb_st = run_registered_virtio_client_ns(
+        plan,
+        sfar_req(BLK_REQ_SFAR_ROLLBACK, AGENT, id),
+        "",
+        task_ns_cap(AGENT),
+    );
+    kprintln!("[sfar-demo] 4/4 the ledger after rollback (the irreversible send remains, recorded)");
+    let _ = run_registered_virtio_client_ns(
+        plan,
+        cairn_req(BLK_REQ_SAND_LOG, AGENT, 0),
+        "",
+        task_ns_cap(AGENT),
+    );
+    let pass = e_irrev == 0 && e1 == 0 && e2 == 0 && plan_st == 0 && rb_st == 0;
+    record_event("console", "sfar.demo", "mission", if pass { "pass" } else { "fail" });
+    if pass {
+        kprintln!("[sfar-demo] PASS: whole-mission rollback undid the reversible writes and refused the irreversible send with an explanation");
+        kprintln!("[sfar-demo] Dezh does not over-promise rollback: unknown/irreversible effects are never silently 'undone'");
+    } else {
+        kprintln!("[sfar-demo] FAIL: effects={e_irrev},{e1},{e2} plan={plan_st} rollback={rb_st} (expected all 0)");
     }
 }
 
@@ -4301,6 +4419,27 @@ const COMMANDS: &[CommandSpec] = &[
         help: "W8 P2 flagship: run an agent under an intent, then show its effect on the ledger",
     },
     CommandSpec {
+        name: "sfar-plan",
+        cap: cap::INSPECT,
+        cap_name: "INSPECT",
+        group: "Effects",
+        help: "rollback forecast for mission <ahd>: what could be undone, and with what confidence",
+    },
+    CommandSpec {
+        name: "sfar-rollback",
+        cap: cap::SPAWN,
+        cap_name: "SPAWN",
+        group: "Effects",
+        help: "roll a whole mission <ahd> back: retract reversible effects, refuse the rest w/ reason",
+    },
+    CommandSpec {
+        name: "sfar-demo",
+        cap: cap::SPAWN,
+        cap_name: "SPAWN",
+        group: "Effects",
+        help: "W8 P3 flagship: an agent mission with a mix of effect classes, forecast, then honest rollback",
+    },
+    CommandSpec {
         name: "pkg-remove",
         cap: cap::SPAWN,
         cap_name: "SPAWN",
@@ -5106,6 +5245,9 @@ fn dispatch(cmd: &str, arg: &str, plan: &KernelPlan, memory: &[MemoryRegion], he
         "sand-log" => sand_cmd(plan, BLK_REQ_SAND_LOG, arg),
         "sand-info" => sand_cmd(plan, BLK_REQ_SAND_INFO, arg),
         "sand-demo" => run_sand_demo(plan),
+        "sfar-plan" => sfar_cmd(plan, BLK_REQ_SFAR_PLAN, arg),
+        "sfar-rollback" => sfar_cmd(plan, BLK_REQ_SFAR_ROLLBACK, arg),
+        "sfar-demo" => run_sfar_demo(plan),
         "vblkd" => {
             kprintln!("[kernel] exercising registered virtio-blk daemon with IPC client");
             kprintln!("[kernel] daemon gets DEVICE+DMA+IPC; client gets IPC+DMA only (no MMIO)");

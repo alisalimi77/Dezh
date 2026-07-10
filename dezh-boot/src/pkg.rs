@@ -1538,6 +1538,12 @@ fn open_ahd(kind: &str) -> Option<(u16, &'static str, u32)> {
     Some((id, kname, ceiling))
 }
 
+/// Open an Ahd and return its id + ceiling, for callers that drive a whole
+/// mission (e.g. the console `sfar-demo`). Thin wrapper over [`open_ahd`].
+pub(crate) fn open_intent(kind: &str) -> Option<(u16, u32)> {
+    open_ahd(kind).map(|(id, _, ceiling)| (id, ceiling))
+}
+
 pub(crate) fn intent_open(arg: &str) {
     let kind = arg.trim();
     if ahd_kind(kind).is_none() {

@@ -274,6 +274,23 @@ def run_riscv64(qemu: str, kernel: Path) -> None:
             ("sand-log agent", "actor -> intent -> derived cap -> effect"),
             ("sand-info agent", "head effect ns=agent"),
             ("events", "sand.effect"),
+            # --- Sfar mission rollback (W8 P3): honest whole-mission rollback --
+            (
+                "sfar-demo",
+                [
+                    "[sfar-demo] 1/4 mission Ahd#4",
+                    "reversibility=irreversible",
+                    "[sfar] plan: reversible=2 compensatable=0 irreversible=1 unknown=0 confidence=partial",
+                    "REFUSED at ns=agent",
+                    "already happened in the outside world; cannot be undone",
+                    "reversible effects retracted=2 refused_irreversible=1",
+                    "[sfar-demo] PASS",
+                ],
+            ),
+            # After rollback the live forecast drops the two retracted writes;
+            # only the irreversible send is still standing.
+            ("sfar-plan 4", "reversible=0 compensatable=0 irreversible=1"),
+            ("events", "sfar.demo"),
             ("deny", "Pol denial demo skipped here to keep running services alive"),
             (
                 "bench-pol",
@@ -350,9 +367,13 @@ def run_riscv64(qemu: str, kernel: Path) -> None:
             ("cairn-get vault", "cairn value = \"ci-vault-secret"),
             ("cairn-verify note", "hash MATCH"),
             ("cairn-log note", "reversible=yes"),
-            # Sand provenance is durable: the intent behind the head effect
-            # survives a power cycle (it lives on the same Cairn commit).
-            ("sand-log agent", "intent=Ahd#3"),
+            # Sand provenance is durable: after the mission rollback the head of
+            # ns=agent is the irreversible send that rollback refused to undo,
+            # and it — with its intent — survives a power cycle.
+            ("sand-info agent", "intent=Ahd#4 derived=print,cairn-read,cairn-write reversibility=irreversible"),
+            # The Ahd session itself is gone after reboot, but the mission's
+            # provenance persists on the commits, so the forecast still resolves.
+            ("sfar-plan 4", "irreversible=1"),
             ("halt", "halting."),
         ]
         for command, expected in reboot_commands:
