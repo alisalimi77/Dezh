@@ -2917,6 +2917,108 @@ fn run_nsrevoke_demo(plan: &KernelPlan) {
     }
 }
 
+// --- Confidentiality enforcement on the storage path (DIFC) -------------------
+//
+// Each namespace carries a secrecy label. The console operator accumulates a
+// taint as it READS namespaces, and a commit is refused if the operator's taint
+// does not flow down into the target namespace (no write-down) — real
+// exfiltration prevention on the live Cairn path, with an explicit privileged
+// `declassify` escape hatch (the standard DIFC declassification). Model in
+// `dezh_core::difc`.
+
+const NS_SECRET_VAULT: dezh_core::difc::Label = 1 << 0;
+static mut NS_LABEL: [dezh_core::difc::Label; 8] = [0; 8];
+static mut OP_TAINT: dezh_core::difc::Taint = dezh_core::difc::Taint::new();
+static mut DIFC_INIT: bool = false;
+
+fn difc_init() {
+    unsafe {
+        if DIFC_INIT {
+            return;
+        }
+        // vault (ns id 3) holds secrets; other namespaces are public here.
+        NS_LABEL[3] = NS_SECRET_VAULT;
+        DIFC_INIT = true;
+    }
+}
+
+fn ns_label(ns: usize) -> dezh_core::difc::Label {
+    difc_init();
+    unsafe { *NS_LABEL.get(ns).unwrap_or(&0) }
+}
+
+/// After a successful READ of `ns`, raise the operator's taint by that
+/// namespace's secrecy label — reading a secret taints the reader.
+fn difc_observe(ns: usize) {
+    let l = ns_label(ns);
+    if l != 0 {
+        unsafe { OP_TAINT.observe(l) };
+        kprintln!(
+            "[difc] operator tainted by reading a labelled namespace (secrecy now {:#x})",
+            unsafe { OP_TAINT.secrecy() }
+        );
+    }
+}
+
+/// Before a WRITE to `ns`, the operator's taint must flow down into the target
+/// (`taint ⊆ ns label`); otherwise the write would exfiltrate a secret to a
+/// lower sink. Prints an explainable denial and returns false when refused.
+fn difc_may_write(ns: usize) -> bool {
+    if unsafe { OP_TAINT.may_flow_to(ns_label(ns)) } {
+        return true;
+    }
+    kprintln!(
+        "[difc] DENIED: writing to ns='{}' would leak secret-tainted data to a lower sink (taint={:#x}, sink label={:#x}); declassify first",
+        CAIRN_NS_NAMES.get(ns).copied().unwrap_or("?"),
+        unsafe { OP_TAINT.secrecy() },
+        ns_label(ns)
+    );
+    false
+}
+
+fn declassify() {
+    difc_init();
+    unsafe { OP_TAINT = dezh_core::difc::Taint::new() };
+    kprintln!("[declassify] operator taint cleared (privileged declassification)");
+    record_event("kernel", "difc.declassify", "operator", "OK");
+}
+
+fn taint_show() {
+    kprintln!("[taint] operator secrecy taint = {:#x}", unsafe {
+        OP_TAINT.secrecy()
+    });
+}
+
+/// Prove DIFC enforcement on the real storage path: read a secret namespace,
+/// then be refused when writing it down to a public one, until an explicit
+/// declassification.
+fn run_taintflow_demo(plan: &KernelPlan) {
+    const LAB: usize = 1;
+    declassify();
+    kprintln!("[taintflow-demo] read a secret, then be refused writing it down to a public namespace (enforced on the storage path)");
+    kprintln!("[taintflow-demo] 1/4 read ns=vault (secret) -> the operator is tainted:");
+    cairn_cmd_simple(plan, BLK_REQ_CAIRN_GET, "vault");
+    kprintln!("[taintflow-demo] 2/4 try to commit to ns=lab (public) -> exfiltration REFUSED:");
+    cairn_cmd_commit(plan, "lab leaked-secret");
+    let blocked = !unsafe { OP_TAINT.may_flow_to(ns_label(LAB)) };
+    kprintln!("[taintflow-demo] 3/4 declassify (privileged), then commit to ns=lab:");
+    declassify();
+    cairn_cmd_commit(plan, "lab after-declassify");
+    let allowed = unsafe { OP_TAINT.may_flow_to(ns_label(LAB)) };
+    let pass = blocked && allowed;
+    record_event(
+        "kernel",
+        "taintflow.demo",
+        "confidentiality",
+        if pass { "OK" } else { "fail" },
+    );
+    if pass {
+        kprintln!("[taintflow-demo] PASS: a secret read taints the operator and blocks the write-down; declassification is the explicit, privileged escape -- confidentiality enforced on real data flow");
+    } else {
+        kprintln!("[taintflow-demo] FAIL: blocked={blocked} allowed={allowed}");
+    }
+}
+
 // --- Cairn v1 console front-end -------------------------------------------------
 
 fn cairn_parse_ns<'a>(arg: &'a str) -> Option<(usize, &'a str)> {
@@ -2945,6 +3047,12 @@ fn cairn_cmd_commit(plan: &KernelPlan, arg: &str) {
         record_event("console", "cairn.commit", CAIRN_NS_NAMES[ns], "DENIED");
         return;
     }
+    // Confidentiality: refuse a write that would leak secret-tainted data down
+    // into a lower-secrecy namespace (no write-down).
+    if !difc_may_write(ns) {
+        record_event("console", "cairn.commit", CAIRN_NS_NAMES[ns], "DENIED");
+        return;
+    }
     let st = run_registered_virtio_client_ns(
         plan,
         cairn_req(BLK_REQ_CAIRN_COMMIT, ns, 0),
@@ -2966,7 +3074,11 @@ fn cairn_cmd_simple(plan: &KernelPlan, base: usize, arg: &str) {
     if !ns_authority_live(ns) {
         return;
     }
-    let _ = run_registered_virtio_client_ns(plan, cairn_req(base, ns, 0), "", task_ns_cap(ns));
+    let st = run_registered_virtio_client_ns(plan, cairn_req(base, ns, 0), "", task_ns_cap(ns));
+    // A successful READ of a labelled namespace taints the operator (DIFC).
+    if base == BLK_REQ_CAIRN_GET && st == 0 {
+        difc_observe(ns);
+    }
 }
 
 fn cairn_cmd_rollback(plan: &KernelPlan, arg: &str) {
@@ -5056,6 +5168,27 @@ const COMMANDS: &[CommandSpec] = &[
         help: "confidentiality (DIFC): reading a secret taints an agent so it cannot leak it to a public sink",
     },
     CommandSpec {
+        name: "taintflow-demo",
+        cap: cap::SPAWN,
+        cap_name: "SPAWN",
+        group: "Effects",
+        help: "DIFC enforced on the storage path: read vault, then a write-down to a public ns is refused until declassify",
+    },
+    CommandSpec {
+        name: "taint",
+        cap: cap::INSPECT,
+        cap_name: "INSPECT",
+        group: "Effects",
+        help: "show the operator's current secrecy taint (DIFC)",
+    },
+    CommandSpec {
+        name: "declassify",
+        cap: cap::SPAWN,
+        cap_name: "SPAWN",
+        group: "Effects",
+        help: "privileged declassification: clear the operator's DIFC taint",
+    },
+    CommandSpec {
         name: "intent-list",
         cap: cap::INSPECT,
         cap_name: "INSPECT",
@@ -6084,6 +6217,9 @@ fn dispatch(cmd: &str, arg: &str, plan: &KernelPlan, memory: &[MemoryRegion], he
         "ns-grant" => ns_grant(arg),
         "nsrevoke-demo" => run_nsrevoke_demo(plan),
         "exfil-demo" => run_exfil_demo(),
+        "taintflow-demo" => run_taintflow_demo(plan),
+        "taint" => taint_show(),
+        "declassify" => declassify(),
         "intent-list" => pkg::intent_list(),
         "intent-run" => pkg::intent_run(plan, arg),
         "intent-demo" => pkg::intent_demo(plan),

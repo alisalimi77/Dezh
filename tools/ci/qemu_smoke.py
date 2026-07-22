@@ -486,6 +486,18 @@ def run_riscv64(qemu: str, kernel: Path) -> None:
                     "[exfil-demo] PASS",
                 ],
             ),
+            # --- DIFC ENFORCED on the real storage path -----------------------
+            # Read vault (secret) taints the operator; a commit to a public ns is
+            # then refused (no write-down) until an explicit declassify.
+            (
+                "taintflow-demo",
+                [
+                    "read ns=vault (secret) -> the operator is tainted",
+                    "[difc] DENIED: writing to ns='lab' would leak secret-tainted data to a lower sink",
+                    "[declassify] operator taint cleared",
+                    "[taintflow-demo] PASS",
+                ],
+            ),
             ("halt", "halting."),
         ]
         cursor = session.wait_for("dezh> ")

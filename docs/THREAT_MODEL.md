@@ -107,16 +107,18 @@ Naming these is part of the honesty rule.
   confines *read access* by capability: an agent cannot read a Cairn namespace it
   was not granted (the `redteam` cross-namespace read is denied). The W8 effect ledger and mission rollback are **integrity** mechanisms
   — they attribute and *undo* what an agent *did*; they cannot un-leak what it
-  *read and sent*. A commit log does not help against exfiltration. The
-  **information-flow-control primitive now exists** (`dezh_core::difc` + the
-  `exfil-demo`: reading a secret raises the actor's taint, after which it may not
-  write to a less-secret sink — no write-down, in the spirit of HiStar/Flume,
-  [RELATED_WORK.md](RELATED_WORK.md) §2). What is **not** done is *enforcing* that
-  taint across every real channel — the storage path, IPC, and above all
-  networking (which does not exist yet). So today: the DIFC mechanism is proven,
-  but confidentiality is not yet enforced end to end. Treat Dezh as strong on
-  *integrity and attribution*, and on *confidentiality* as having the primitive
-  but not the pervasive enforcement.
+  *read and sent*. A commit log does not help against exfiltration. **Information-flow control (DIFC) now exists and is enforced on the storage
+  path.** `dezh_core::difc` provides the primitive (a secrecy label per object, a
+  taint per actor, `taint ⊆ sink` for a write — no write-down, HiStar/Flume,
+  [RELATED_WORK.md](RELATED_WORK.md) §2), and it is *enforced on the live Cairn
+  console path* (`taintflow-demo`): reading `ns=vault` (labelled secret) taints
+  the operator, after which a commit to a lower-secrecy namespace is refused
+  until an explicit, privileged `declassify`. What is **not** yet enforced is the
+  same taint across the U-mode client→daemon hop, IPC generally, and above all
+  networking (which does not exist yet). So confidentiality is real on the
+  storage path but not yet pervasive. Treat Dezh as strong on *integrity and
+  attribution*, and on *confidentiality* as enforced where data lives (Cairn) but
+  not yet across every channel.
 - **Side channels and covert channels.** No defense against timing, cache,
   Spectre/Meltdown-class, or power side channels; no mitigation of covert
   channels between principals.

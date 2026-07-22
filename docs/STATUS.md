@@ -72,14 +72,14 @@ true today, so a reviewer never has to guess.
   per-object revocation and an attenuated delegation graph), but the live IPC /
   Cairn plumbing has **not** been migrated onto it yet — that migration is the
   single largest planned change. See [SECURITY_MODEL.md](SECURITY_MODEL.md).
-- **Confidentiality: the DIFC primitive exists; pervasive enforcement does not.**
-  Read access is capability-gated, and the information-flow-control primitive is
-  now built (`dezh_core::difc` + the `exfil-demo`: reading a secret taints the
-  agent so it cannot write down to a public sink — the exfiltration defense the
-  effect ledger cannot give). What is not done is enforcing that taint across
-  every real channel — storage, IPC, and networking (which does not exist yet).
-  Integrity + attribution are strong; confidentiality has the mechanism but not
-  yet end-to-end enforcement. See [THREAT_MODEL.md](THREAT_MODEL.md) §5.
+- **Confidentiality: DIFC is enforced on the storage path; other channels are
+  not yet.** The information-flow-control primitive is built (`dezh_core::difc`)
+  and **enforced on the live Cairn path** (`taintflow-demo`): reading `ns=vault`
+  (labelled secret) taints the operator, then a commit to a lower namespace is
+  refused (no write-down) until a privileged `declassify`. What is not done is
+  enforcing the same taint across the U-mode client→daemon hop, IPC, and
+  networking (which does not exist yet). Confidentiality is real where data lives
+  (Cairn), not yet across every channel. See [THREAT_MODEL.md](THREAT_MODEL.md) §5.
 - **W8 effect-runtime honesty.** External effects (`email.send`, `prod.deploy`,
   a compensatable `api-key`) are **modeled**, not wired to real connectors — the
   point proven is the *mechanism* (attribution, honest rollback, compensation),
