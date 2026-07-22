@@ -15,6 +15,7 @@ true today, so a reviewer never has to guess.
 | F4 — Pol (Linux personality) | A real, unmodified static Linux/RISC-V ELF runs under a capability-gated Linux syscall shim; the same bytes also run on real riscv64 Linux. |
 | x86_64 boot | Boots via QEMU `-kernel` (PVH) and from a GRUB Multiboot2 ISO in QEMU **and VirtualBox**; a 32-vector exception IDT reports faults instead of triple-faulting. |
 | Drivers out of kernel | virtio-block is a U-mode daemon holding an explicit MMIO + DMA grant; clients reach it only over typed IPC. |
+| W8 — intent → effect runtime | An agent runs under one **intent** (`Ahd`); its derived capability is provably ⊆ the intent. Every effect is a ledger record (`Sand`) carrying `actor → intent → derived cap → reversibility`. A whole **mission** (`Sfar`) is rolled back honestly: reversible effects retracted, compensatable effects undone by a **recorded** compensating action, irreversible effects **refused with a reason** — and rollback needs authority over every namespace the mission touched. A five-escape adversary (`redteam`) is stopped at five named boundaries; `why-denied` names the boundary of the last denial; `Tbar` renders the `actor → intent → effect` provenance graph. The `overnight` flagship runs the whole story. |
 
 ## What is measured, and how honestly
 
@@ -46,6 +47,15 @@ true today, so a reviewer never has to guess.
   hypothesis, not implemented.
 - **No package signing**, no production installer, no SMP, no side-channel
   hardening, no formal verification.
+- **W8 effect-runtime honesty.** External effects (`email.send`, `prod.deploy`,
+  a compensatable `api-key`) are **modeled**, not wired to real connectors — the
+  point proven is the *mechanism* (attribution, honest rollback, compensation),
+  not a network/DB/secrets integration (that is the future "Gateways" line).
+  Ledger integrity trusts the storage daemon (records are parent-linked and
+  hashed for corruption detection + rollback, not signed against a malicious
+  writer). The commit log is a fixed 255 slots with no GC yet. Intents (`Ahd`)
+  are runtime sessions, not persisted, and there is no lease/revocation for
+  long-lived agents. See [THREAT_MODEL.md](THREAT_MODEL.md).
 - **In-kernel U-mode task caveat (RISC-V).** Some baked demo tasks share the
   kernel binary and must avoid non-inlined calls; real apps use the separate-ELF
   and `.dzp` loader paths, which do not have this constraint.

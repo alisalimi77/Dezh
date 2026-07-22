@@ -2468,41 +2468,57 @@ fn denial_boundary(action: &str) -> &'static str {
     }
 }
 
-/// W8 P5: explain the most recent denial. Every important effect and refusal is
-/// recorded in the in-kernel event ring; `why-denied` walks it newest-first,
-/// finds the last denial, and names the boundary that produced it. This is the
-/// explainable-denial half of the differentiator: a refusal is never a silent
-/// "no", it is attributable to a specific mechanism.
-fn why_denied(_arg: &str) {
+/// W8 P5: explain denials. Every important effect and refusal is recorded in the
+/// in-kernel event ring; `why-denied` walks it newest-first and names the
+/// boundary that produced each denial. A refusal is never a silent "no" — it is
+/// attributable to a specific mechanism.
+///
+/// `why-denied`       explains the most recent denial (default).
+/// `why-denied all`   lists every recent denial with its boundary (audit a whole
+///                    agent run, e.g. after `overnight`).
+fn why_denied(arg: &str) {
+    let all = arg.trim() == "all";
     unsafe {
         if EVENT_COUNT == 0 {
             kprintln!("[why-denied] no events recorded yet");
             return;
         }
         let start = if EVENT_COUNT == EVENT_CAP { EVENT_NEXT } else { 0 };
+        let mut found = 0usize;
         let mut k = EVENT_COUNT;
         while k > 0 {
             k -= 1;
             let idx = (start + k) % EVENT_CAP;
             let e = EVENTS[idx];
-            if is_denial(e.result) {
-                kprintln!(
-                    "[why-denied] last denial: actor={} action={} target={} result={} (tick {})",
-                    e.actor,
-                    e.action,
-                    e.target,
-                    e.result,
-                    e.tick
-                );
-                kprintln!("[why-denied] boundary: {}", denial_boundary(e.action));
+            if !is_denial(e.result) {
+                continue;
+            }
+            found += 1;
+            let label = if all { "denial" } else { "last denial" };
+            kprintln!(
+                "[why-denied] {label}: actor={} action={} target={} result={} (tick {})",
+                e.actor,
+                e.action,
+                e.target,
+                e.result,
+                e.tick
+            );
+            kprintln!("[why-denied] boundary: {}", denial_boundary(e.action));
+            if !all {
                 kprintln!("[why-denied] policy: authority is explicit and unforgeable; nothing runs on ambient permission");
                 return;
             }
         }
-        kprintln!(
-            "[why-denied] no denial in the last {} events; every recent action was authorized",
-            EVENT_COUNT
-        );
+        if found == 0 {
+            kprintln!(
+                "[why-denied] no denial in the last {} events; every recent action was authorized",
+                EVENT_COUNT
+            );
+        } else if all {
+            kprintln!(
+                "[why-denied] {found} denial(s) recorded; each attributable to a named boundary (no ambient authority)"
+            );
+        }
     }
 }
 
@@ -4857,7 +4873,7 @@ const COMMANDS: &[CommandSpec] = &[
         cap: cap::INSPECT,
         cap_name: "INSPECT",
         group: "Effects",
-        help: "W8 P5: explain the most recent denial and name the boundary that produced it",
+        help: "W8 P5: explain the last denial (or `why-denied all`) and name the boundary that produced it",
     },
     CommandSpec {
         name: "tbar",

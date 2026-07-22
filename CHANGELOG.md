@@ -26,6 +26,36 @@ VM. Since v0.1-review:
 
 ## Unreleased
 
+### W8 — Intent + Effect Runtime (complete)
+
+The intent-to-effect runtime that makes the differentiator legible — an
+unbypassable effect ledger, whole-mission accountability, and honest rollback.
+All parts are green in `tools/ci/qemu_smoke.py`.
+
+- **Intent as mechanism (`Ahd`):** intent is the only path to authority; a
+  derived capability is provably ⊆ its intent ceiling.
+- **Effect ledger (`Sand`):** every Cairn commit is enriched into an effect
+  record — `actor → intent → derived cap → reversibility class → status` — with
+  no second write and no bypass.
+- **Mission rollback (`Sfar`):** `sfar-plan` forecasts what a rollback can and
+  cannot undo before touching anything; `sfar-rollback` retracts reversible
+  effects, **runs and records** the registered compensating action for
+  compensatable effects, and **refuses irreversible effects with a reason**.
+  Mission authority spans every namespace the mission touched (a partial-
+  authority rollback is refused, naming the missing namespace).
+- **Adversary (`redteam`):** a malicious agent attempts five escapes
+  (cross-namespace read, raw MMIO write, capability forgery, out-of-intent
+  action, CPU monopoly); each is stopped at a named boundary and the system
+  survives.
+- **Explainable denial + provenance:** `why-denied` names the boundary that
+  produced the last denial; `tbar <ahd>` renders the `actor → intent → effect`
+  provenance graph.
+- **Flagship narrative:** `overnight` — "leave a coding agent loose overnight" —
+  collapses the above into one story (`docs/demo-transcript-overnight.md`).
+- **Credibility:** `docs/THREAT_MODEL.md` (trusted base, defenses + mechanisms,
+  explicit non-goals, head-to-head vs user-space sandboxes) and a per-effect
+  ledger-overhead analysis in `dezh-boot/BENCH.md`.
+
 - Added public repository governance files:
   - `LICENSE`
   - `NOTICE`

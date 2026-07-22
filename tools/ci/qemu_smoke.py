@@ -411,6 +411,14 @@ def run_riscv64(qemu: str, kernel: Path) -> None:
                     "[overnight] PASS: the whole night is accounted for",
                 ],
             ),
+            # Audit the whole run: every denial attributed to a named boundary.
+            (
+                "why-denied all",
+                [
+                    "boundary: intent-derivation ceiling",
+                    "denial(s) recorded; each attributable to a named boundary",
+                ],
+            ),
             ("halt", "halting."),
         ]
         cursor = session.wait_for("dezh> ")
