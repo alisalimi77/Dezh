@@ -12,6 +12,10 @@ edition = "2021"
 path = "src/lib.rs"
 
 [dependencies]
+# Audited/reputable, zero-dependency, no_std Ed25519 — NEVER a hand-rolled
+# implementation (rolling your own crypto is one of the mistakes we studied).
+# The kernel only VERIFIES (deterministic, no RNG), so default features are off.
+ed25519-compact = { version = "2", default-features = false }
 
 # Standalone: shared by the per-ISA kernels (dezh-boot, dezh-boot-x86) via path,
 # each of which is its own workspace; keep dezh-core out of the host workspace.
