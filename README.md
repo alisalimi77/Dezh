@@ -107,6 +107,28 @@ x86_64) is an implementation backend, not the identity: the same program should
 mean the same thing on any backend. See
 [strategic direction](docs/STRATEGIC_DIRECTION.md) (D021).
 
+<p align="center">
+  <img src="docs/assets/comparison.svg" alt="Honest capability-comparison matrix: Dezh vs seL4, Genode, Fuchsia, gVisor" width="820">
+</p>
+
+The matrix is deliberately honest: Dezh concedes formal verification to seL4,
+IOMMU-enforced DMA to Genode/Fuchsia, and signed packages to Fuchsia. What it
+uniquely holds is the **effect / mission / intent / agent** row group — the axis
+this project is about. Full lineage and per-system detail in
+[Related Work and Novelty](docs/RELATED_WORK.md).
+
+```mermaid
+flowchart LR
+    A["Actor (agent / task)"] -->|opens| I["Ahd: intent = capability ceiling"]
+    I -->|"derive = requested AND ceiling"| D["Derived capability (proven subset of intent)"]
+    D -->|acts| E["Sand effect record: actor -> intent -> cap -> reversibility"]
+    E -->|grouped by intent| M["Sfar mission"]
+    M -->|sfar-plan| F["rollback forecast"]
+    M -->|sfar-rollback| R["retract / compensate / refuse"]
+    E -->|tbar| P["provenance graph"]
+    I -->|"intent-revoke / lease"| X["authority withdrawn, provenance kept"]
+```
+
 ### Terminology
 
 | Term | Meaning |
@@ -168,6 +190,13 @@ rollback with compensation and multi-namespace authority (`Sfar`), a five-escape
 adversary (`redteam`), and explainable denial + provenance (`why-denied` /
 `Tbar`). See the [threat model](docs/THREAT_MODEL.md) for what is and is not
 defended.
+
+<p align="center">
+  <img src="docs/assets/overnight.svg" alt="The overnight flagship run: an agent's night forecast, rolled back honestly, and its escape contained" width="720">
+</p>
+
+*One command (`overnight`) — the whole differentiator. Full captured transcript:
+[docs/demo-transcript-overnight.md](docs/demo-transcript-overnight.md).*
 
 ### For a serious OS reader
 
