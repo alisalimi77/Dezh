@@ -16,23 +16,42 @@ not comparable.
 
 CPU: 13th Gen Intel Core i7-13650HX. Linux: x86_64 Ubuntu under WSL2.
 
-## What is — and isn't — comparable
+## What this does and does not measure
 
-- **Comparable (same physical CPU, native):** the Dezh **capability check**
-  (0.98 ns) vs the Linux **syscall floor** (49 ns). These measure two different
-  architectural primitives on identical hardware:
-  - Linux gates access by trapping into the kernel — even the cheapest syscall
-    pays ~49 ns for the privilege transition before any work.
-  - Dezh's authority decision is an in-process capability check — ~1 ns, ~**50×**
-    cheaper than even Linux's cheapest syscall. This is the architectural lever
-    behind D015/D018: authority is checked inline and data is shared zero-copy
-    via capabilities, instead of paying a syscall per mediated access.
+Read the two native numbers as **two different primitives**, not as an
+end-to-end "Dezh is faster than Linux" claim — which this benchmark explicitly
+does **not** support:
 
-- **NOT directly comparable:** the Dezh **`ecall` round trip** (~1041 ns) is
-  measured **inside QEMU's TCG emulator**, not on real silicon. Emulated trap
-  costs are far higher and non-representative of hardware. It is reported only to
-  show the kernel's U→S→U path works and to track *relative* changes; it must not
-  be compared against the native Linux number above.
+- The **capability check** (0.98 ns, native) is the cost of the *authorization
+  decision itself* — a bitmask test — in isolation. It is **not** the cost of
+  performing an effect.
+- The **Linux syscall floor** (49 ns, native) is the cost of the privilege
+  transition for the cheapest possible syscall.
+
+These are not like-for-like, and we do not claim they are. The 0.98 ns is an
+in-process, likely-inlined check on the host; the 49 ns is a real `getpid`
+through the glibc wrapper under WSL2. The honest conclusion is deliberately
+narrow: **the authorization decision is nearly free relative to the trap any OS
+pays to cross the privilege boundary.**
+
+It is **not** that "a mediated effect is ~50× cheaper on Dezh." Performing a real
+effect on Dezh also pays an `ecall` (the U→S→U round trip), exactly like a
+syscall — the capability check rides *on top of* that trap, it does not replace
+it. On the same platform both mediation paths pay a trap; what Dezh changes is
+that the authorization on top of the trap is inline and cheap, and that data can
+be passed zero-copy via capabilities (D018) instead of copied per crossing.
+
+The comparison that would actually settle "capability mediation vs syscall
+mediation" — Dezh `ecall` + capability check vs Linux syscall + access check on
+the **same** platform — is **not yet run** (Dezh has no real-silicon port, and
+the emulated `ecall` below is not comparable to native). Until it is, we make no
+end-to-end speed claim; this benchmark supports only the narrow lever above.
+
+- **NOT comparable:** the Dezh **`ecall` round trip** (~1041 ns) is measured
+  **inside QEMU's TCG emulator**, not on real silicon. Emulated trap costs are
+  far higher and non-representative of hardware. It is reported only to show the
+  kernel's U→S→U path works and to track *relative* changes; it must not be
+  compared against the native Linux number above.
 
 ## Pol translation overhead (flagship F4)
 
@@ -67,14 +86,17 @@ identical emulated trap cost, which cancels in the subtraction.
 
 ## Honest reading
 
-This does **not** prove "Dezh is faster than Linux." It proves one specific,
-real-hardware thing: **mediating access by capability is ~50× cheaper than
-mediating access by syscall.** Whether that translates into end-to-end wins
-depends on real-hardware kernel benchmarks we have not run yet (Dezh has no
-real-silicon port). The microkernel's IPC cost (D015) still has to be paid back
-by zero-copy capability passing (D018); measuring that end-to-end, against Linux
-under identical conditions (ideally both under QEMU, or both on real hardware),
-is the next benchmarking milestone.
+This does **not** prove "Dezh is faster than Linux," and it does **not** prove
+"a mediated effect is ~50× cheaper." It proves one narrow thing: **the
+authorization decision (a capability check) is nearly free relative to the
+privilege-boundary trap any OS pays.** A real Dezh effect still pays that trap
+(an `ecall`), so the end-to-end mediation cost is trap-dominated on both systems.
+Whether capability mediation wins end-to-end depends on real-hardware kernel
+benchmarks we have not run (Dezh has no real-silicon port). The microkernel's IPC
+cost (D015) still has to be paid back by zero-copy capability passing (D018);
+measuring that end-to-end against Linux under identical conditions — Dezh
+`ecall`+check vs Linux syscall+check on the same platform — is the next
+benchmarking milestone and the only thing that could support an end-to-end claim.
 
 ## Per-effect ledger overhead (W8, Sand)
 

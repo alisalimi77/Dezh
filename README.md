@@ -80,7 +80,10 @@ security boundary. Dezh is exploring a tighter model:
 - **Effect accountability:** important state changes should be inspectable,
   recoverable, and tied to an explicit actor and route.
 - **Service-mediated persistence:** storage flows through a user-space service,
-  not a hidden kernel block path.
+  not a hidden kernel block path. (Honest caveat: this buys fault isolation and
+  least privilege *of the driver process* today; memory safety against a
+  *malicious* driver that programs the device to DMA anywhere needs an IOMMU,
+  which Dezh does not have yet — see [threat model](docs/THREAT_MODEL.md).)
 - **No silent lifecycle changes:** package updates, new capabilities, rollback,
   remove, and physical cleanup are explicit.
 
@@ -155,7 +158,7 @@ for scope and honest wording rules):
 | --- | --- | --- | --- |
 | F1 | Agent containment: narrow grants, kernel denial, attenuated delegation, rollback of an agent's damage | **Reproducible today** (in CI) | [`tools/demo/run_agent_demo.py`](tools/demo/run_agent_demo.py) → [transcript](docs/demo-transcript-agent-f1.md) |
 | F2 | Cairn storage: versioned commits, capability-gated namespaces, rollback across reboot | **Reproducible today** (in CI) | `cairn-demo` console flow, exercised by [`tools/ci/qemu_smoke.py`](tools/ci/qemu_smoke.py) incl. a second-boot persistence phase |
-| F3 | Multi-ISA apps: the same Dezh-IR program on RISC-V and x86_64 kernels | **Reproducible today** (in CI) | x86_64 kernel installs and runs the byte-identical `.dzp` agent package; bytes pinned by a `dezh-core` test — [x86 smoke](tools/ci/qemu_smoke.py) |
+| F3 | Program-format portability: the byte-identical Dezh-IR `.dzp` runs on the RISC-V and x86_64 kernels | **Reproducible today** (in CI) | x86_64 kernel installs and runs the byte-identical `.dzp` agent package; bytes pinned by a `dezh-core` test — [x86 smoke](tools/ci/qemu_smoke.py). Honest scope: this proves the *program format + IR semantics* are portable, **not** kernel parity — the x86 kernel is deliberately thin (no scheduler / returnable-IRQ path yet; the rich runtime is RISC-V only). |
 | F4 | Pol compatibility: unmodified static Linux binary, capability-gated | **Reproducible today** (in CI) | `linux-elf` runs a real static Linux/RISC-V ELF ([`linux-guest`](dezh-boot/linux-guest/)); the same bytes also run on real riscv64 Linux |
 | W8 | Intent → effect runtime: run an agent under one intent, account for every effect, and undo a whole mission honestly (retract / compensate / refuse-with-reason), with a contained escape | **Reproducible today** (in CI) | `overnight` collapses it into one story → [transcript](docs/demo-transcript-overnight.md); parts: `sfar-demo` `comp-demo` `sfar-cross-demo` `redteam` `why-denied` `tbar` in [`tools/ci/qemu_smoke.py`](tools/ci/qemu_smoke.py) |
 
@@ -315,11 +318,15 @@ The SDK acceptance test covers the deeper package lifecycle:
 Dezh makes no bare "faster than X" claims. What has been measured so far
 (method and caveats in [dezh-boot/BENCH.md](dezh-boot/BENCH.md)):
 
-- A Dezh capability check costs **~0.98 ns** (native host build, i7-13650HX).
-  The Linux `getpid` syscall floor on the same CPU is **~49 ns** (WSL2 glibc
-  wrapper) — mediating an action by capability check is roughly **50× cheaper**
-  than mediating it by syscall on this machine. This backs the architecture
-  argument; it is a microbenchmark, not a whole-system claim.
+- A Dezh capability check (the authorization decision itself) costs **~0.98 ns**
+  (native host build, i7-13650HX); the Linux `getpid` syscall floor on the same
+  CPU is **~49 ns** (WSL2 glibc wrapper). These are **two different primitives**,
+  not a like-for-like effect comparison: a real Dezh effect also pays an `ecall`
+  trap, so the honest, narrow reading is only that *the authorization decision is
+  nearly free relative to the privilege-boundary trap any OS pays* — **not** that
+  a mediated effect is "50× cheaper." No end-to-end speed claim is made until
+  `ecall`+check vs syscall+check is measured on the same platform (see
+  [BENCH.md](dezh-boot/BENCH.md)).
 - The Dezh kernel `ecall` round-trip measures ~1 µs **under QEMU emulation**,
   which is not comparable to native numbers and is reported only for
   completeness.

@@ -14,7 +14,7 @@ true today, so a reviewer never has to guess.
 | F3 — multi-ISA | The same Dezh-IR bytecode runs on the RISC-V and x86_64 kernels; the bytes are pinned byte-identical by a test; x86 runs it as a real `.dzp` package. |
 | F4 — Pol (Linux personality) | A real, unmodified static Linux/RISC-V ELF runs under a capability-gated Linux syscall shim; the same bytes also run on real riscv64 Linux. |
 | x86_64 boot | Boots via QEMU `-kernel` (PVH) and from a GRUB Multiboot2 ISO in QEMU **and VirtualBox**; a 32-vector exception IDT reports faults instead of triple-faulting. |
-| Drivers out of kernel | virtio-block is a U-mode daemon holding an explicit MMIO + DMA grant; clients reach it only over typed IPC. |
+| Drivers out of kernel | virtio-block is a U-mode daemon holding an explicit MMIO + DMA grant; clients reach it only over typed IPC. **Caveat (not buried):** without an IOMMU this gives fault isolation + least privilege of the driver *process*, not memory safety against a malicious driver that programs the device to DMA anywhere. The IOMMU is core to this story, not future polish. |
 | W8 — intent → effect runtime | An agent runs under one **intent** (`Ahd`); its derived capability is provably ⊆ the intent. Every effect is a ledger record (`Sand`) carrying `actor → intent → derived cap → reversibility`. A whole **mission** (`Sfar`) is rolled back honestly: reversible effects retracted, compensatable effects undone by a **recorded** compensating action, irreversible effects **refused with a reason** — and rollback needs authority over every namespace the mission touched. A five-escape adversary (`redteam`) is stopped at five named boundaries; `why-denied` names the boundary of the last denial; `Tbar` renders the `actor → intent → effect` provenance graph. The `overnight` flagship runs the whole story. |
 
 ## What is measured, and how honestly
@@ -45,8 +45,15 @@ true today, so a reviewer never has to guess.
 - **No IOMMU.** DMA isolation for the block daemon is a bounce-window
   convention, not hardware-enforced. Accelerator/DMA isolation (D017) is a
   hypothesis, not implemented.
-- **No package signing**, no production installer, no SMP, no side-channel
-  hardening, no formal verification.
+- **Unsigned packages — a known structural gap, not just missing polish.** `.dzp`
+  packages are CRC-checked and manifest-verified, not cryptographically signed.
+  For a system whose thesis is "no authority without explicit provenance," an
+  unsigned package is a real tension: install-time provenance is currently
+  operator trust + checksum, not a verified signature. Signed manifests
+  (provenance of *who authored the authority a package requests*) are the first
+  item on the hardening roadmap, ahead of broad features.
+- No production installer, no SMP, no side-channel hardening, no formal
+  verification.
 - **W8 effect-runtime honesty.** External effects (`email.send`, `prod.deploy`,
   a compensatable `api-key`) are **modeled**, not wired to real connectors — the
   point proven is the *mechanism* (attribution, honest rollback, compensation),

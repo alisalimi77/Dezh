@@ -73,6 +73,49 @@ over-promise.
 | Mach/L4 personalities; User-Mode Linux; gVisor | Legacy ABIs served by user-space personality servers / a user-space kernel. | `Pol` runs unmodified static Linux ELFs capability-gated — compatibility as a *security downgrade-free bridge*, not the authority baseline (D014). |
 | gVisor, Firecracker (microVMs), WebAssembly/WASI (wasmtime), seccomp-bpf + Landlock, containers | Strong, shipping **confinement** of untrusted code. | **This is Dezh's real point of comparison, not other OSes (D021).** They confine resources well. What they structurally cannot do — because they sit on an ambient-authority host — is attribute *every* effect to its authorizing intent and **reverse a whole agent mission** with no ambient path to route around the ledger. |
 
+## 4b. The closest capability systems, answered directly
+
+The first question a serious reviewer asks is: *what does this do that seL4,
+Genode, Fuchsia/Zircon, Capsicum, or EROS/Coyotos does not?* These systems are
+mature and, in several cases, do things Dezh does not. The honest answer is not
+"we isolate better" — it is that **none of them make the intent→effect chain the
+system's primitive.**
+
+- **seL4** — a formally verified capability microkernel. It is the gold standard
+  for a trustworthy TCB, and Dezh is **not** verified. seL4 gives you verified
+  *access control*; it does not give you an effect ledger, a reversibility
+  taxonomy, or whole-mission rollback — those are policy you would build above
+  it. Dezh's bet is that effect accountability belongs *in* the substrate.
+- **Genode** — has had user-space drivers and a capability architecture for
+  years; component trees delegate authority explicitly. Dezh does **not** claim
+  novelty on "user-space drivers + capabilities" (Genode owns that, D021). What
+  Genode does not provide is an on-the-authorization-path effect ledger with
+  per-effect reversibility and a forecastable, saga-style mission rollback. Dezh
+  adds the *effect* dimension on top of the *access* dimension Genode already
+  nails.
+- **Fuchsia / Zircon** — handles are unforgeable capabilities and packages are
+  hermetic; a shipping, industrial capability OS. Again Dezh claims no novelty on
+  handle-as-capability or hermetic packaging. Zircon does not attribute every
+  effect to an authorizing intent, classify reversibility, or reverse a mission;
+  its model is object access, not effect accounting.
+- **Capsicum (FreeBSD)** — a capability *mode* retrofitted into a mainstream
+  ambient-authority kernel: a process opts into capability mode and loses ambient
+  rights. It is pragmatic and shipping, but it is exactly the retrofit case —
+  ambient authority still exists in the kernel and around opted-in processes, so
+  a system-wide unbypassable effect ledger is not achievable the way it is on a
+  no-ambient-authority substrate. Dezh's whole reason to be from-scratch is to
+  avoid the Capsicum-style residual ambient surface.
+- **EROS / KeyKOS / Coyotos** — persistent capability microkernels; the direct
+  ancestors of Dezh's shape. They pioneered orthogonal persistence of
+  authority-bearing state. They did not target autonomous agents, an effect
+  ledger with reversibility classes, or mission compensation — the recombination
+  in §6.
+
+In one line: **these systems make *access* safe; Dezh's contribution is making
+*effect* accountable and reversible on a substrate where the ledger cannot be
+bypassed — and none of them claims that.** If a reviewer shows a system that
+does, that is exactly the feedback we want.
+
 ## 5. The unclaimed ground: agents as effect-accountable OS principals
 
 Autonomous-agent frameworks (tool-use runtimes, agent orchestrators) enforce
