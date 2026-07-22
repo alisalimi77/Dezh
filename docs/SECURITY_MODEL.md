@@ -54,21 +54,55 @@ mechanism:
   commit log lets an operator roll a namespace back to a prior state (the F1/F2
   demos show exactly this — an agent's bad write is reverted after the fact).
 
-**What does not exist yet.** There is no runtime *lease/revoke* for a
-long-lived capability already delegated to a still-running task — you cannot,
-today, reach into a live task and rescind one capability while it keeps running.
-The honest reasons: capabilities are currently plain task-capability bits, not
-first-class revocable objects with a revocation list, and the MVP prioritized
-proving the grant/attenuation/rollback path end to end.
+**What now exists (intent level).** An intent (`Ahd`) can be opened with a
+**lease** (a bounded run count that auto-revokes on exhaustion) or **revoked**
+explicitly; a revoked or exhausted intent authorizes nothing further, while the
+effects it already produced keep their provenance (`tbar`/`sfar` still resolve).
+This is the first realization of the generation/lease scheme, at the intent
+layer — `lease-demo` proves it.
 
-**How it is intended to work.** The direction (see
-[STRATEGIC_DIRECTION.md](STRATEGIC_DIRECTION.md)) is a lease/generation scheme:
-a delegated capability carries a generation stamp checked at use time, and
-bumping the generation in the issuing service invalidates every outstanding
-copy without tracking each holder. This falls out of the app-registry and
-Cairn-ledger work rather than needing new kernel machinery. Until it lands,
-revocation = drop the grant at the source, end the task, and roll back its
-effects.
+**What still does not exist (capability level).** There is no runtime
+lease/revoke for a single, long-lived **task capability bit** already delegated
+to a still-running task — you cannot reach into a live task and rescind one bit
+mid-execution. The honest reason is the point below: task capabilities are
+bitmask bits, not per-object revocable references.
+
+## What kind of capability is this? (bitmask vs object-capability)
+
+Being precise, because it is the most important honest caveat: a Dezh **task
+capability is a bit in a per-task bitmask** (print, IPC, a Cairn namespace,
+device, block), not an unforgeable reference to one specific object as in a true
+object-capability system (seL4, CHERI). So the granularity is coarse: authority
+is per *class/namespace*, not per *object instance*, and per-bit revocation and a
+full delegation graph are not expressible yet.
+
+Two things keep this from being "just Linux capabilities," though:
+
+- **Not ambient, not inherited.** Linux capabilities are ambient process
+  privileges that a child inherits by default. A Dezh task starts with **zero**
+  authority; it holds only bits explicitly granted, and a spawned process
+  inherits none.
+- **Kernel-attested and attenuable per message.** The kernel stamps the sender's
+  capabilities on **every** IPC message, and delegation is
+  `granted = requested ∩ sender_caps` — you can pass a *narrower* subset of what
+  you hold, checked by the kernel, and never more. Linux capabilities are not
+  attenuable this way.
+
+So Dezh sits **between** Linux capabilities and seL4/CHERI object-capabilities:
+stronger than the former (no ambient authority, attenuable, kernel-attested),
+coarser than the latter (bitmask classes, not per-object references). The honest
+label is *capability-secure in the no-ambient-authority sense*, not *object-
+capability*.
+
+**The path (the one big change).** Turn a capability into a first-class object —
+a generation-stamped handle to a specific resource — so that (a) revocation of a
+single capability falls out (bump the generation; every outstanding handle is
+invalidated at next use), and (b) delegation forms a real provenance graph. The
+intent lease/revocation above is the generation mechanism proven at the intent
+layer; extending generation-stamped handles to the capability model itself is
+the largest, most valuable single change on the roadmap — bigger than any new
+feature. Until it lands, capability revocation = drop the grant at the source,
+end the task, and roll back its effects.
 
 ## Reviewer Notes
 

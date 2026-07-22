@@ -102,6 +102,19 @@ Beyond containment, W8 defends **honest reversibility**:
 
 Naming these is part of the honesty rule.
 
+- **Confidentiality beyond read-access control — the exfiltration gap.** This is
+  the most important one for the agent-containment thesis, so it leads. Dezh
+  confines *read access* by capability: an agent cannot read a Cairn namespace it
+  was not granted (the `redteam` cross-namespace read is denied). But Dezh has
+  **no information-flow control (DIFC)**: once an agent legitimately holds data,
+  nothing stops it from *exfiltrating* that data through a channel it is allowed
+  to use. The W8 effect ledger and mission rollback are **integrity** mechanisms
+  — they attribute and *undo* what an agent *did*; they cannot un-leak what it
+  *read and sent*. A commit log does not help against exfiltration. Closing this
+  needs label-propagation / DIFC in the spirit of HiStar/Flume
+  ([RELATED_WORK.md](RELATED_WORK.md) §2), and it becomes urgent the moment real
+  networking exists (which it does not yet). Treat Dezh today as strong on
+  *integrity and attribution*, weak on *confidentiality of already-granted data*.
 - **Side channels and covert channels.** No defense against timing, cache,
   Spectre/Meltdown-class, or power side channels; no mitigation of covert
   channels between principals.

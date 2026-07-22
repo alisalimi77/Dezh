@@ -64,13 +64,39 @@ The highest-value review areas are:
 - package capability escalation review
 - denial proofs and failure behavior
 
+## Why not build this on seL4 (or Genode)?
+
+The most important question, answered honestly. seL4 is a formally verified
+capability microkernel; Genode is a mature capability component OS with
+user-space drivers and typed IPC. For a *product*, building the Dezh model on top
+of one of them would be the right call — you would inherit verification, real
+object-capabilities, and IOMMU support instead of re-deriving them.
+
+So the from-scratch kernel is **not the contribution, and we do not claim it is**
+(see [DECISIONS.md](DECISIONS.md) D021). The contribution is the *model*: intent
+as the sole authority-derivation path, an effect ledger on the authorization
+path with a reversibility class, and honest whole-mission rollback, aimed at
+autonomous agents. We wrote a small kernel to prototype that model end to end
+with nothing hidden underneath and full control of the substrate while the ideas
+were still moving — the pedagogical and iteration reasons, not a claim that the
+world needs another microkernel.
+
+The honest consequence: several things seL4/Genode already do well (verification,
+per-object capabilities, IOMMU) are gaps here, named in
+[STATUS.md](STATUS.md) and [THREAT_MODEL.md](THREAT_MODEL.md). A credible
+productization path is to **port the intent→effect model onto seL4 or Genode**
+and keep the model, not the kernel. If a reviewer's takeaway is "the ideas are
+interesting but belong on a verified base," that is a conclusion we agree with.
+
 ## What is intentionally out of scope right now?
 
 - production bootloader and installer media
-- production package signing
+- production networking (and with it, information-flow / exfiltration control)
 - dependency solving
 - real IOMMU integration
-- production networking
 - graphics stack
 - real hardware bring-up
 - formal verification of the whole system
+- online PKI / certificate-transparency for package signing (the signing
+  *mechanism* now exists — see [PACKAGE_SIGNING.md](PACKAGE_SIGNING.md) — but the
+  key-distribution layer does not)
