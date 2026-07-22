@@ -3091,6 +3091,75 @@ fn run_sfar_cross_demo(plan: &KernelPlan) {
     }
 }
 
+/// W8 P3 (slice 2b): a compensatable effect carries a registered compensating
+/// action, and rolling the mission back RUNS and RECORDS that action instead of
+/// refusing. The honest undo for an effect that cannot be un-happened by a ref
+/// move is to perform an inverse effect and log it — a saga step, on the same
+/// ledger. The mission (ns=calc) puts one compensatable effect (with a
+/// registered compensation) below two reversible writes: the forecast reports
+/// full-with-compensation, and the rollback retracts the writes and compensates
+/// the compensatable effect, recording the compensating action as a new effect.
+fn run_comp_demo(plan: &KernelPlan) {
+    const CALC: usize = 2;
+    let derived = pkg::MCAP_PRINT | pkg::MCAP_CAIRN_READ | pkg::MCAP_CAIRN_WRITE;
+    kprintln!("[comp-demo] a compensatable effect is undone by a recorded compensating action, not a refusal");
+    let Some((id, _ceiling)) = pkg::open_intent("writer") else {
+        kprintln!("[comp-demo] FAIL: no free intent slot");
+        record_event("console", "comp.demo", "mission", "fail");
+        return;
+    };
+    kprintln!("[comp-demo] 1/4 mission Ahd#{id}: one compensatable effect (with a registered compensation) below two reversible writes");
+    // The compensatable effect ships its inverse action after a unit separator:
+    // "<forward>\x1f<compensation>". Committed first so it sits below the writes.
+    let e_comp = run_registered_virtio_client_ns(
+        plan,
+        cairn_req_intent(BLK_REQ_CAIRN_COMMIT, CALC, id, derived, SAND_REV_COMPENSATABLE),
+        "resource.create:cache/42 [modeled compensatable]\u{1f}resource.delete:cache/42",
+        task_ns_cap(CALC),
+    );
+    let e1 = run_registered_virtio_client_ns(
+        plan,
+        cairn_req_intent(BLK_REQ_CAIRN_COMMIT, CALC, id, derived, SAND_REV_REVERSIBLE),
+        "comp-mission-step-1",
+        task_ns_cap(CALC),
+    );
+    let e2 = run_registered_virtio_client_ns(
+        plan,
+        cairn_req_intent(BLK_REQ_CAIRN_COMMIT, CALC, id, derived, SAND_REV_REVERSIBLE),
+        "comp-mission-step-2",
+        task_ns_cap(CALC),
+    );
+    kprintln!("[comp-demo] 2/4 forecast: reversible undone by ref, compensatable undone by a recorded compensating action");
+    let plan_st = run_registered_virtio_client_ns(
+        plan,
+        sfar_req(BLK_REQ_SFAR_PLAN, CALC, id),
+        "",
+        task_ns_cap(CALC),
+    );
+    kprintln!("[comp-demo] 3/4 roll back: retract the writes, RUN the compensation for the compensatable effect");
+    let rb_st = run_registered_virtio_client_ns(
+        plan,
+        sfar_req(BLK_REQ_SFAR_ROLLBACK, CALC, id),
+        "",
+        task_ns_cap(CALC),
+    );
+    kprintln!("[comp-demo] 4/4 the ledger head for ns=calc is now the recorded compensating action");
+    let _ = run_registered_virtio_client_ns(
+        plan,
+        cairn_req(BLK_REQ_SAND_LOG, CALC, 0),
+        "",
+        task_ns_cap(CALC),
+    );
+    let pass = e_comp == 0 && e1 == 0 && e2 == 0 && plan_st == 0 && rb_st == 0;
+    record_event("console", "comp.demo", "mission", if pass { "pass" } else { "fail" });
+    if pass {
+        kprintln!("[comp-demo] PASS: the compensatable effect was undone by a recorded compensating action; the two reversible writes were retracted");
+        kprintln!("[comp-demo] a compensation is itself an accountable effect on the ledger, never a silent erase");
+    } else {
+        kprintln!("[comp-demo] FAIL: effects={e_comp},{e1},{e2} plan={plan_st} rollback={rb_st} (expected all 0)");
+    }
+}
+
 fn run_bench_os() {
     kprintln!(
         "[bench-os] launching separate U-mode benchmark ELF ({} null syscalls)",
@@ -4527,6 +4596,13 @@ const COMMANDS: &[CommandSpec] = &[
         help: "W8 P3: a mission spanning two namespaces; rollback needs authority over every one it touched",
     },
     CommandSpec {
+        name: "comp-demo",
+        cap: cap::SPAWN,
+        cap_name: "SPAWN",
+        group: "Effects",
+        help: "W8 P3: roll back a compensatable effect by running + recording its registered compensating action",
+    },
+    CommandSpec {
         name: "pkg-remove",
         cap: cap::SPAWN,
         cap_name: "SPAWN",
@@ -5336,6 +5412,7 @@ fn dispatch(cmd: &str, arg: &str, plan: &KernelPlan, memory: &[MemoryRegion], he
         "sfar-rollback" => sfar_cmd(plan, BLK_REQ_SFAR_ROLLBACK, arg),
         "sfar-demo" => run_sfar_demo(plan),
         "sfar-cross-demo" => run_sfar_cross_demo(plan),
+        "comp-demo" => run_comp_demo(plan),
         "vblkd" => {
             kprintln!("[kernel] exercising registered virtio-blk daemon with IPC client");
             kprintln!("[kernel] daemon gets DEVICE+DMA+IPC; client gets IPC+DMA only (no MMIO)");

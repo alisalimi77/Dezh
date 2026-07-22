@@ -179,6 +179,14 @@ const SAND_REV_COMPENSATABLE: u8 = 1; // undo needs a compensating effect
 const SAND_REV_IRREVERSIBLE: u8 = 2; // cannot be undone (e.g. an external send)
 const SAND_REV_UNKNOWN: u8 = 3; // connector did not declare — never assume reversible
 const SAND_STATUS_COMMITTED: u8 = 0;
+// A compensating action recorded during a Sfar rollback. It is a first-class,
+// accountable effect on the ledger — the honest way to "undo" a compensatable
+// effect is to perform and RECORD an inverse action, never to erase the record.
+const SAND_STATUS_COMPENSATION: u8 = 2;
+// The unit separator inside a compensatable effect's value: "forward\x1fcompensation".
+// The connector supplies the compensating action at commit time; the daemon
+// persists it in the commit record and replays it as a logged effect on rollback.
+const SAND_COMP_SEP: u8 = 0x1f;
 // Kernel task-capability bits 8..15 gate access to Cairn namespace 0..7. The
 // kernel attests the sender's caps on every recv; the daemon checks the bit
 // for the requested namespace, so a client cannot reach another app's data.
@@ -569,6 +577,7 @@ fn print_revclass(c: u8) {
 fn print_status_name(s: u8) {
     match s {
         SAND_STATUS_COMMITTED => sys_print(b"committed"),
+        SAND_STATUS_COMPENSATION => sys_print(b"compensation"),
         _ => sys_print(b"unknown"),
     }
 }
@@ -803,6 +812,84 @@ fn sand_info(dma_base: usize, ns: usize) -> usize {
     }
 }
 
+/// If the commit currently in the data buffer carries a compensation token
+/// (value = "forward\x1fcompensation", supplied by the connector at commit
+/// time), copy the compensating action into `out` and return its length. A
+/// compensatable effect WITHOUT a registered compensation returns None — it is
+/// then refused by rollback, never silently dropped.
+fn extract_compensation(out: &mut [u8]) -> Option<usize> {
+    let vlen = (d_read_u32(32) as usize).min(CAIRN1_VALUE_MAX);
+    let p = data_ptr();
+    let mut sep = None;
+    let mut i = 0usize;
+    while i < vlen {
+        let b = unsafe { core::ptr::read_volatile(p.add(CAIRN1_VALUE_OFF + i)) };
+        if b == SAND_COMP_SEP {
+            sep = Some(i);
+            break;
+        }
+        i += 1;
+    }
+    let sep = sep?;
+    let mut n = 0usize;
+    let mut j = sep + 1;
+    while j < vlen && n < out.len() {
+        let b = unsafe { core::ptr::read_volatile(p.add(CAIRN1_VALUE_OFF + j)) };
+        if b == 0 {
+            break;
+        }
+        out[n] = b;
+        n += 1;
+        j += 1;
+    }
+    if n == 0 {
+        None
+    } else {
+        Some(n)
+    }
+}
+
+/// Build a DZC1 commit record for `value` in the data buffer and write it to
+/// commit `slot` — WITHOUT touching the superblock. Sfar rollback batches every
+/// ref move (and any appended compensations) into one atomic superblock write,
+/// so this only lays down the record; an orphaned record (crash before the
+/// superblock write) is harmless because nothing references it yet.
+#[allow(clippy::too_many_arguments)]
+fn append_commit_raw(
+    dma_base: usize,
+    slot: u32,
+    parent: u32,
+    ns: usize,
+    value: &[u8],
+    actor: u32,
+    intent: u32,
+    derived: u32,
+    status: u8,
+    gen: u32,
+) -> bool {
+    let len = value.len().min(CAIRN1_VALUE_MAX - 1);
+    let hash = fnv64(value.as_ptr(), len);
+    zero_data();
+    set_data(b"DZC1");
+    d_write_u32(4, slot);
+    d_write_u32(8, parent);
+    d_write_u32(12, ns as u32);
+    d_write_u64(16, hash);
+    d_write_u32(24, actor);
+    d_write_u32(28, 1);
+    d_write_u32(32, len as u32);
+    d_write_u32(CAIRN1_OFF_INTENT, intent);
+    d_write_u32(CAIRN1_OFF_DERIVED, derived);
+    unsafe {
+        core::ptr::write_volatile(data_ptr().add(CAIRN1_OFF_REVCLASS), SAND_REV_REVERSIBLE);
+        core::ptr::write_volatile(data_ptr().add(CAIRN1_OFF_STATUS), status);
+        core::ptr::write_volatile(data_ptr().add(CAIRN1_OFF_GEN), gen as u8);
+        core::ptr::write_volatile(data_ptr().add(CAIRN1_OFF_GEN + 1), (gen >> 8) as u8);
+        core::ptr::copy_nonoverlapping(value.as_ptr(), data_ptr().add(CAIRN1_VALUE_OFF), len);
+    }
+    rw(dma_base, CAIRN1_COMMIT_FIRST_SECTOR + slot as u64, true) == 0
+}
+
 /// Scan the LIVE chains and return a bitmask of the namespaces that carry at
 /// least one effect belonging to mission `ahd`. Reads commit sectors into the
 /// data buffer, so callers must have already snapshotted the live heads.
@@ -934,9 +1021,9 @@ fn sfar_plan(dma_base: usize, ahd: u32, sender_caps: usize, from: usize) -> usiz
     print_num(unknown);
     sys_print(b" confidence=");
     if irreversible == 0 && unknown == 0 && compensatable == 0 {
-        sys_print(b"full (whole mission can be undone)\n");
+        sys_print(b"full (whole mission undone by ref moves)\n");
     } else if irreversible == 0 && unknown == 0 {
-        sys_print(b"partial (compensations required)\n");
+        sys_print(b"full-with-compensation (reversible by ref, compensatable by a recorded compensating action)\n");
     } else {
         sys_print(b"partial (some effects cannot be undone)\n");
     }
@@ -963,6 +1050,7 @@ fn sfar_rollback(dma_base: usize, ahd: u32, sender_caps: usize, from: usize) -> 
     }
     let mut new_head = [CAIRN1_NONE; CAIRN1_NS_MAX];
     let mut undone = [0u32; CAIRN1_NS_MAX];
+    let mut appended = [0u32; CAIRN1_NS_MAX];
     let mut count = [0u32; CAIRN1_NS_MAX];
     let mut ns = 0usize;
     while ns < CAIRN1_NS_MAX {
@@ -971,6 +1059,8 @@ fn sfar_rollback(dma_base: usize, ahd: u32, sender_caps: usize, from: usize) -> 
         count[ns] = d_read_u32(e + 20);
         ns += 1;
     }
+    // Free slot for any appended compensation commits (superblock offset 8).
+    let mut next_free = d_read_u32(8);
     // Mission authority spans every namespace the mission touched: refuse the
     // whole rollback (before mutating anything) if the caller cannot authorize
     // even one of them.
@@ -980,6 +1070,7 @@ fn sfar_rollback(dma_base: usize, ahd: u32, sender_caps: usize, from: usize) -> 
     }
     let mut refused_irrev = 0usize;
     let mut refused_comp = 0usize;
+    let mut compensated = 0usize;
     ns = 0;
     while ns < CAIRN1_NS_MAX {
         let mut cur = new_head[ns];
@@ -994,25 +1085,88 @@ fn sfar_rollback(dma_base: usize, ahd: u32, sender_caps: usize, from: usize) -> 
             let parent = d_read_u32(8);
             let intent = d_read_u32(CAIRN1_OFF_INTENT);
             let cls = d_read_u8(CAIRN1_OFF_REVCLASS);
+            let derived = d_read_u32(CAIRN1_OFF_DERIVED);
             if intent != ahd {
                 break; // reached an effect outside this mission; leave it be
             }
+            if cls == SAND_REV_COMPENSATABLE {
+                // A compensatable effect is NOT undone by moving a ref. The
+                // honest undo is to perform the connector's registered
+                // compensating action and RECORD it as a new, accountable
+                // effect. Without a registered compensation we refuse.
+                let mut comp = [0u8; 96];
+                if let Some(clen) = extract_compensation(&mut comp) {
+                    if next_free >= CAIRN1_COMMIT_SLOTS {
+                        sys_print(b"    [sfar] cannot compensate: commit log full\n");
+                        refused_comp += 1;
+                        break;
+                    }
+                    // Build "[compensation] <action>" and append it on top of the
+                    // compensatable effect (its parent is the effect it undoes).
+                    let mut val = [0u8; 128];
+                    let prefix = b"[compensation] ";
+                    let mut vlen = 0usize;
+                    while vlen < prefix.len() {
+                        val[vlen] = prefix[vlen];
+                        vlen += 1;
+                    }
+                    let mut k = 0usize;
+                    while k < clen && vlen < val.len() {
+                        val[vlen] = comp[k];
+                        vlen += 1;
+                        k += 1;
+                    }
+                    let slot = next_free;
+                    let gen = count[ns].saturating_sub(undone[ns]) + 1;
+                    let ok = append_commit_raw(
+                        dma_base,
+                        slot,
+                        cur,
+                        ns,
+                        &val[..vlen],
+                        from as u32,
+                        ahd,
+                        derived,
+                        SAND_STATUS_COMPENSATION,
+                        gen,
+                    );
+                    if !ok {
+                        return IPC_STATUS_IO_FAILURE;
+                    }
+                    next_free += 1;
+                    new_head[ns] = slot;
+                    appended[ns] += 1;
+                    compensated += 1;
+                    sys_print(b"    [sfar] COMPENSATED at ns=");
+                    print_ns_name(ns);
+                    sys_print(b" slot=");
+                    print_num(cur as usize);
+                    sys_print(b": ran compensating action \"");
+                    sys_print(&comp[..clen]);
+                    sys_print(b"\" recorded as effect slot=");
+                    print_num(slot as usize);
+                    sys_print(b"\n");
+                } else {
+                    sys_print(b"    [sfar] REFUSED at ns=");
+                    print_ns_name(ns);
+                    sys_print(b" slot=");
+                    print_num(cur as usize);
+                    sys_print(b": compensatable but no compensating action was registered\n");
+                    refused_comp += 1;
+                }
+                break;
+            }
             if cls != SAND_REV_REVERSIBLE {
-                // A non-reversible mission effect blocks the ref from moving past
-                // it — this is the honest boundary of what rollback can do.
+                // An irreversible/unknown mission effect blocks the ref from
+                // moving past it — the honest boundary of what rollback can do.
                 sys_print(b"    [sfar] REFUSED at ns=");
                 print_ns_name(ns);
                 sys_print(b" slot=");
                 print_num(cur as usize);
                 sys_print(b": ");
                 print_revclass(cls);
-                if cls == SAND_REV_COMPENSATABLE {
-                    sys_print(b" effect needs a compensating action, not a ref move\n");
-                    refused_comp += 1;
-                } else {
-                    sys_print(b" effect already happened in the outside world; cannot be undone\n");
-                    refused_irrev += 1;
-                }
+                sys_print(b" effect already happened in the outside world; cannot be undone\n");
+                refused_irrev += 1;
                 break;
             }
             new_head[ns] = parent;
@@ -1021,21 +1175,26 @@ fn sfar_rollback(dma_base: usize, ahd: u32, sender_caps: usize, from: usize) -> 
         }
         ns += 1;
     }
-    // Commit all ref moves atomically with one superblock write.
+    // Commit all ref moves (and the free-slot advance for any compensations)
+    // atomically with one superblock write.
     if !cairn_load_super(dma_base) {
         return IPC_STATUS_IO_FAILURE;
     }
     let mut total = 0u32;
     ns = 0;
     while ns < CAIRN1_NS_MAX {
-        if undone[ns] > 0 {
+        if undone[ns] > 0 || appended[ns] > 0 {
             let e = cairn_ns_entry_off(ns);
             d_write_u32(e + 16, new_head[ns]);
-            d_write_u32(e + 20, count[ns].saturating_sub(undone[ns]));
+            d_write_u32(
+                e + 20,
+                count[ns].saturating_sub(undone[ns]) + appended[ns],
+            );
             total += undone[ns];
         }
         ns += 1;
     }
+    d_write_u32(8, next_free);
     let st = rw(dma_base, CAIRN1_SUPER_SECTOR, true);
     if st != 0 {
         return IPC_STATUS_IO_FAILURE;
@@ -1044,11 +1203,13 @@ fn sfar_rollback(dma_base: usize, ahd: u32, sender_caps: usize, from: usize) -> 
     print_num(ahd as usize);
     sys_print(b" rolled back: reversible effects retracted=");
     print_num(total as usize);
+    sys_print(b" compensations performed=");
+    print_num(compensated);
     sys_print(b" refused_irreversible=");
     print_num(refused_irrev);
     sys_print(b" refused_compensatable=");
     print_num(refused_comp);
-    sys_print(b"\n  [sfar] history preserved: rollback moved refs; refused effects are explained, not silently undone\n");
+    sys_print(b"\n  [sfar] history preserved: reversible effects retracted by ref, compensatable effects undone by a recorded compensating action, irreversible effects explained not erased\n");
     IPC_STATUS_OK
 }
 

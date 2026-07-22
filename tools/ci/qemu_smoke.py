@@ -283,7 +283,7 @@ def run_riscv64(qemu: str, kernel: Path) -> None:
                     "[sfar] plan: reversible=2 compensatable=0 irreversible=1 unknown=0 confidence=partial",
                     "REFUSED at ns=agent",
                     "already happened in the outside world; cannot be undone",
-                    "reversible effects retracted=2 refused_irreversible=1",
+                    "reversible effects retracted=2 compensations performed=0 refused_irreversible=1",
                     "[sfar-demo] PASS",
                 ],
             ),
@@ -301,10 +301,25 @@ def run_riscv64(qemu: str, kernel: Path) -> None:
                     "reversible=2 compensatable=0 irreversible=0 unknown=0 confidence=full",
                     "DENIED: mission authority requires the capability for every namespace it touched",
                     "missing capability CAIRN_NS_2 (ns=calc)",
-                    "reversible effects retracted=2 refused_irreversible=0",
+                    "reversible effects retracted=2 compensations performed=0 refused_irreversible=0",
                     "[sfar-cross-demo] PASS",
                 ],
             ),
+            # --- Compensation for compensatable effects (W8 P3 slice 2) --------
+            # A compensatable effect ships a registered compensating action;
+            # rollback RUNS and RECORDS it (a saga step) instead of refusing.
+            (
+                "comp-demo",
+                [
+                    "one compensatable effect (with a registered compensation) below two reversible writes",
+                    "compensatable=1 irreversible=0 unknown=0 confidence=full-with-compensation",
+                    'ran compensating action "resource.delete:cache/42"',
+                    "reversible effects retracted=2 compensations performed=1",
+                    "status=compensation",
+                    "[comp-demo] PASS",
+                ],
+            ),
+            ("events", "comp.demo"),
             ("deny", "Pol denial demo skipped here to keep running services alive"),
             (
                 "bench-pol",
