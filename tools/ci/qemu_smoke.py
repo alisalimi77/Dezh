@@ -509,6 +509,10 @@ def run_riscv64(qemu: str, kernel: Path) -> None:
                     "[taintflow-demo] PASS",
                 ],
             ),
+            # Persisted namespace revocation: revoke ns=calc at the object owner
+            # (the daemon writes it to the superblock). The reboot phase proves it
+            # survives a power cycle.
+            ("ns-revoke calc", "namespace 'calc' REVOKED (persisted)"),
             ("halt", "halting."),
         ]
         cursor = session.wait_for("dezh> ")
@@ -553,6 +557,11 @@ def run_riscv64(qemu: str, kernel: Path) -> None:
         session.wait_for("Dezh console. Every command requires an explicit capability.")
         session.wait_for("dezh> ")
         reboot_commands = [
+            # Persisted namespace revocation survived the power cycle: the kernel
+            # gate is fresh (live) after reboot, but the daemon still refuses
+            # ns=calc from its superblock flag - object-owner-enforced revocation.
+            ("cairn-commit calc reboot-x", "namespace 'calc' is REVOKED (persisted across reboot"),
+            ("ns-grant calc", "re-granted (persisted revocation cleared)"),
             ("cairn-get note", "cairn value = \"note-v2"),
             ("cairn-get vault", "cairn value = \"ci-vault-secret"),
             ("cairn-verify note", "hash MATCH"),

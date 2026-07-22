@@ -2267,6 +2267,10 @@ const BLK_REQ_SFAR_PLAN: usize = 51;
 const BLK_REQ_SFAR_ROLLBACK: usize = 52;
 // Tbar (W8 P5): actor -> intent -> effect provenance graph for one intent.
 const BLK_REQ_TBAR: usize = 53;
+// Persisted namespace revocation (ocap migration): the daemon records a per-ns
+// revoked flag in the superblock so revocation survives reboot.
+const BLK_REQ_NS_REVOKE: usize = 54;
+const BLK_REQ_NS_GRANT: usize = 55;
 // Task-capability bits 8..15 gate Cairn v1 namespaces 0..7 (kernel-attested on
 // every IPC recv; the storage daemon checks the requested namespace's bit).
 const TASK_CAIRN_NS_BASE: usize = 8;
@@ -2872,28 +2876,43 @@ fn ns_authority_live(ns: usize) -> bool {
     false
 }
 
-fn ns_revoke(arg: &str) {
+fn ns_revoke(plan: &KernelPlan, arg: &str) {
     let Some((ns, _)) = cairn_parse_ns(arg) else {
         return;
     };
     ns_authority_init();
+    // In-memory kernel gate (fast, this boot).
     unsafe { NS_TABLE.revoke(ns) };
+    // Persist at the object owner (survives reboot): the daemon records the
+    // revoked flag in the superblock and enforces it on every Cairn op.
+    let st = run_registered_virtio_client_ns(
+        plan,
+        cairn_req(BLK_REQ_NS_REVOKE, ns, 0),
+        "",
+        task_ns_cap(ns),
+    );
     kprintln!(
-        "[ns-revoke] namespace '{}' capability REVOKED (generation bumped); every held handle to it is now stale",
+        "[ns-revoke] namespace '{}' capability REVOKED (kernel handle stale + persisted at the store, status={st})",
         CAIRN_NS_NAMES[ns]
     );
     record_event("kernel", "ns.revoke", CAIRN_NS_NAMES[ns], "OK");
 }
 
-fn ns_grant(arg: &str) {
+fn ns_grant(plan: &KernelPlan, arg: &str) {
     use dezh_core::ocap::{R_DELEGATE, R_READ, R_WRITE};
     let Some((ns, _)) = cairn_parse_ns(arg) else {
         return;
     };
     ns_authority_init();
     unsafe { NS_HANDLE[ns] = NS_TABLE.mint(ns, R_READ | R_WRITE | R_DELEGATE) };
+    let st = run_registered_virtio_client_ns(
+        plan,
+        cairn_req(BLK_REQ_NS_GRANT, ns, 0),
+        "",
+        task_ns_cap(ns),
+    );
     kprintln!(
-        "[ns-grant] namespace '{}' capability re-minted at the current generation",
+        "[ns-grant] namespace '{}' capability re-minted + persisted grant cleared at the store (status={st})",
         CAIRN_NS_NAMES[ns]
     );
     record_event("kernel", "ns.grant", CAIRN_NS_NAMES[ns], "OK");
@@ -6277,8 +6296,8 @@ fn dispatch(cmd: &str, arg: &str, plan: &KernelPlan, memory: &[MemoryRegion], he
         "intent-revoke" => pkg::intent_revoke(arg),
         "lease-demo" => pkg::lease_demo(),
         "cap-demo" => run_cap_demo(),
-        "ns-revoke" => ns_revoke(arg),
-        "ns-grant" => ns_grant(arg),
+        "ns-revoke" => ns_revoke(plan, arg),
+        "ns-grant" => ns_grant(plan, arg),
         "nsrevoke-demo" => run_nsrevoke_demo(plan),
         "agentrevoke-demo" => run_agentrevoke_demo(plan),
         "exfil-demo" => run_exfil_demo(),

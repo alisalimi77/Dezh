@@ -118,14 +118,21 @@ commit or an agent's write to that namespace is refused until `ns-grant`
 (`nsrevoke-demo`, `agentrevoke-demo`). So runtime revocation of a live namespace
 capability is real for every kernel-side path today.
 
-What **remains** is the deeper step: the daemon still attests authority per IPC
-message with the coarse **bitmask** (kernel-attested, so unforgeable, but not
-generation-checked at the object owner). Moving the daemon's own check to a
-persisted per-object generation — so revocation survives reboot and is enforced
-by the object owner itself — and migrating the remaining task-capability bits
-onto `ocap` handles, is the largest remaining change. Until then, task-bit-level
-revocation = drop the grant at the source, end the task, and roll back its
-effects; the namespace capability already has full ocap revocation.
+Revocation is now also **enforced by the object owner and survives reboot**: the
+storage daemon records a per-namespace revoked flag in the Cairn superblock, so
+`ns-revoke` persists on disk and the daemon refuses every operation on a revoked
+namespace until `ns-grant` — independent of the in-memory kernel gate. A CI
+reboot leg proves it: revoke a namespace, power-cycle, and the daemon still
+refuses it from its superblock even though the kernel's in-memory handle is fresh.
+So the Cairn namespace capability has full ocap revocation at three layers: the
+console gate, the untrusted-agent (`KHost`) gate, and the persisted object-owner
+check.
+
+What **remains** is breadth: the daemon still attests the *other* authority per
+IPC message with the coarse **bitmask** (kernel-attested, so unforgeable, but
+namespace-level), and the remaining task-capability bits (print, IPC, device,
+block) are not yet `ocap` handles. Migrating those is the largest remaining
+change; the namespace capability is the worked example of the target model.
 
 ## Reviewer Notes
 

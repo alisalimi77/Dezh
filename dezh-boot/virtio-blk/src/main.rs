@@ -89,6 +89,11 @@ const REQ_SFAR_ROLLBACK: usize = 52;
 // Tbar (W8 P5): the queryable actor -> intent -> effect provenance graph for a
 // mission/intent. Same authority rule as Sfar (hold every touched namespace).
 const REQ_TBAR: usize = 53;
+// Persisted namespace revocation (ocap migration): the daemon (the object owner)
+// records a per-namespace revoked flag in the superblock, so a revoked namespace
+// stays revoked across reboot until re-granted, enforced on every Cairn op.
+const REQ_NS_REVOKE: usize = 54;
+const REQ_NS_GRANT: usize = 55;
 
 const IPC_PROTO_V1: usize = 0xd1;
 const IPC_SERVICE_VIRTIO_BLOCK: usize = 1;
@@ -536,6 +541,39 @@ fn print_ns_name(ns: usize) {
 
 fn cairn_ns_entry_off(ns: usize) -> usize {
     16 + ns * 32
+}
+
+// Per-namespace revoked flag, in the previously-spare tail of each superblock
+// namespace entry (name[16] | head@16 | count@20 | revoked@24). A fresh store
+// zeroes it (0 = live); revocation persists here across reboot.
+const CAIRN1_NS_OFF_REVOKED: usize = 24;
+
+/// Is namespace `ns` currently revoked (persisted in the superblock)? Reads the
+/// superblock into the data buffer as a side effect.
+fn cairn_ns_revoked(dma_base: usize, ns: usize) -> bool {
+    if !cairn_load_super(dma_base) {
+        return false;
+    }
+    ns < CAIRN1_NS_MAX && d_read_u32(cairn_ns_entry_off(ns) + CAIRN1_NS_OFF_REVOKED) != 0
+}
+
+/// Set/clear the persisted revoked flag for namespace `ns` and write the
+/// superblock back. Returns an IPC status.
+fn cairn_ns_set_revoked(dma_base: usize, ns: usize, revoked: bool) -> usize {
+    if ns >= CAIRN1_NS_MAX {
+        return IPC_STATUS_BAD_REQUEST;
+    }
+    if !cairn_load_super(dma_base) {
+        return IPC_STATUS_IO_FAILURE;
+    }
+    d_write_u32(
+        cairn_ns_entry_off(ns) + CAIRN1_NS_OFF_REVOKED,
+        if revoked { 1 } else { 0 },
+    );
+    if rw(dma_base, CAIRN1_SUPER_SECTOR, true) != 0 {
+        return IPC_STATUS_IO_FAILURE;
+    }
+    IPC_STATUS_OK
 }
 
 fn d_read_u8(off: usize) -> u8 {
@@ -2192,6 +2230,45 @@ fn daemon(dma_base: usize) -> ! {
                 sys_print(b"  [vault-storage] vault-get denied: vault not installed\n");
                 send_status(from, word, IPC_STATUS_UNAVAILABLE);
             }
+        } else if (op == REQ_CAIRN_COMMIT
+            || op == REQ_CAIRN_GET
+            || op == REQ_CAIRN_LOG
+            || op == REQ_CAIRN_ROLLBACK
+            || op == REQ_CAIRN_VERIFY
+            || op == REQ_SAND_LOG
+            || op == REQ_SAND_INFO)
+            && cairn_ns_revoked(dma_base, cairn_ns)
+        {
+            // Persisted namespace revocation, enforced by the object owner and
+            // surviving reboot — independent of any kernel-side gate.
+            sys_print(b"  [cairn] DENIED: namespace '");
+            print_ns_name(cairn_ns);
+            sys_print(b"' is REVOKED (persisted across reboot; ns-grant to restore)\n");
+            send_status(from, word, IPC_STATUS_DENIED);
+        } else if op == REQ_NS_REVOKE {
+            let st = if cairn_ns_allowed(cairn_ns, sender_caps, from) {
+                cairn_ns_set_revoked(dma_base, cairn_ns, true)
+            } else {
+                IPC_STATUS_DENIED
+            };
+            if st == IPC_STATUS_OK {
+                sys_print(b"  [cairn] namespace '");
+                print_ns_name(cairn_ns);
+                sys_print(b"' REVOKED (persisted)\n");
+            }
+            send_status(from, word, st);
+        } else if op == REQ_NS_GRANT {
+            let st = if cairn_ns_allowed(cairn_ns, sender_caps, from) {
+                cairn_ns_set_revoked(dma_base, cairn_ns, false)
+            } else {
+                IPC_STATUS_DENIED
+            };
+            if st == IPC_STATUS_OK {
+                sys_print(b"  [cairn] namespace '");
+                print_ns_name(cairn_ns);
+                sys_print(b"' re-granted (persisted revocation cleared)\n");
+            }
+            send_status(from, word, st);
         } else if op == REQ_CAIRN_INIT {
             let st = if cairn_load_super(dma_base) {
                 sys_print(b"  [cairn] v1 store ready (superblock verified)\n");
@@ -2360,7 +2437,7 @@ fn client_request(daemon: usize, input_len: usize, req: usize) -> ! {
     // 40..47 (derived in bits 0..4, rev-class in bits 5..6 of that byte).
     let sand_intent = (req >> 24) & 0xffff;
     let sand_status_byte = (req >> 40) & 0xff;
-    if base >= REQ_CAIRN_INIT && base <= REQ_TBAR {
+    if base >= REQ_CAIRN_INIT && base <= REQ_NS_GRANT {
         let arg = if base == REQ_CAIRN_COMMIT {
             (cairn_ns << 12) | input_len.min(0xfff)
         } else if base == REQ_CAIRN_ROLLBACK {
@@ -2398,6 +2475,10 @@ fn client_request(daemon: usize, input_len: usize, req: usize) -> ! {
             sys_print(b"  [vblk-client] sfar-rollback status=");
         } else if base == REQ_TBAR {
             sys_print(b"  [vblk-client] tbar status=");
+        } else if base == REQ_NS_REVOKE {
+            sys_print(b"  [vblk-client] ns-revoke status=");
+        } else if base == REQ_NS_GRANT {
+            sys_print(b"  [vblk-client] ns-grant status=");
         } else {
             sys_print(b"  [vblk-client] cairn-init status=");
         }
