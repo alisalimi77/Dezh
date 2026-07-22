@@ -30,6 +30,10 @@ This page is the primary navigation point for Dezh OS public review.
   review focus.
 - [Threat Model](THREAT_MODEL.md): what Dezh defends, what it does not, the
   trusted computing base, and the head-to-head vs user-space sandboxes.
+- [Package Signing](PACKAGE_SIGNING.md): a capability-native signing design —
+  the supply-chain mistakes studied (TUF, xz, Sigstore, code-signing) and how
+  Dezh avoids them by signing the *authority*, attenuating publishers, and
+  recording installs as ledgered effects.
 - [Strategic Direction](STRATEGIC_DIRECTION.md): long-term architecture plan.
 - [Roadmap](ROADMAP.md): milestone sequence and acceptance criteria.
 
