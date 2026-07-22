@@ -76,6 +76,51 @@ by zero-copy capability passing (D018); measuring that end-to-end, against Linux
 under identical conditions (ideally both under QEMU, or both on real hardware),
 is the next benchmarking milestone.
 
+## Per-effect ledger overhead (W8, Sand)
+
+The effect ledger (Sand) is **not a second write.** Every effect *is* a Cairn v1
+commit; the "ledger" is the same append-only commit record, enriched so it
+carries its own provenance. So the honest question for D015 is: *what does the
+enrichment cost over a plain durable commit?*
+
+**Marginal cost = a handful of byte writes into a sector already being written,
+and zero extra I/O.** The enrichment occupies previously-spare bytes in the
+512-byte commit header — intent/Ahd id (`u32`), derived capability set (`u32`),
+reversibility class (`u8`), status (`u8`), generation (`u16`) — alongside the
+actor, parent ref and object hash the commit already stored. Concretely:
+
+| Cost dimension | Plain durable commit | Sand effect commit | Delta |
+| --- | --- | --- | --- |
+| Block writes per effect | commit sector + superblock | commit sector + superblock | **0** |
+| IPC messages per effect | 1 (commit request) | 1 (commit request) | **0** |
+| Header bytes written | actor+parent+hash+len | + intent+derived+revclass+status+gen | **+12 bytes, same sector** |
+| Kernel→daemon threading | request-id + status byte | request-id (Ahd) + status byte (derived+revclass) | **0 extra fields** |
+
+The intent id and derived cap ride fields the commit IPC **already** carries
+(the request-id word and the status byte), so there is no extra message and no
+extra sector. The dominant, measured cost of recording an effect is therefore
+the durable commit's block round trip itself — the same figure the storage path
+already pays (see `bench-storage` / `bench-all`, routed through the user-space
+`virtio-block` daemon). The provenance enrichment sits *below* the measurement
+noise of the emulated block path because it adds no I/O.
+
+**Why this matters for the differentiator.** A user-space effect log (write the
+action, then separately append to an audit file) pays a *second* write and can
+be bypassed by anything that reaches the resource around the logger. Here the
+effect path goes *through* the ledger: the same record that authorizes and
+persists the effect is the ledger entry, and on a kernel with no ambient
+authority there is no path to the resource that skips it. The cost of that
+property is ~zero marginal I/O, not a tax.
+
+Rollback/forecast are reads: `sfar-plan` and `tbar` walk the live per-namespace
+chains (bounded by the 255-slot commit log); `sfar-rollback` retracts a
+contiguous reversible head-run with **one** atomic superblock write regardless of
+how many effects are retracted, and appends one commit per compensation.
+
+*(All storage figures are QEMU-emulated; the architectural claim — no extra I/O
+per effect — holds independent of the platform because it is a property of the
+record layout, not of the timing.)*
+
 ## Reproduce
 
 ```sh

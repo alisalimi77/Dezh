@@ -25,6 +25,8 @@ This page is the primary navigation point for Dezh OS public review.
   framing.
 - [Security Model](SECURITY_MODEL.md): capability boundaries, known gaps, and
   review focus.
+- [Threat Model](THREAT_MODEL.md): what Dezh defends, what it does not, the
+  trusted computing base, and the head-to-head vs user-space sandboxes.
 - [Strategic Direction](STRATEGIC_DIRECTION.md): long-term architecture plan.
 - [Roadmap](ROADMAP.md): milestone sequence and acceptance criteria.
 
