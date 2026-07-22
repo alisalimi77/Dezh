@@ -449,6 +449,20 @@ def run_riscv64(qemu: str, kernel: Path) -> None:
                     "[lease-demo] PASS",
                 ],
             ),
+            # --- Object-capabilities (the 'one big change') --------------------
+            # A first-class handle to one object: attenuated delegation + per-
+            # object generation-stamped revocation, which a bitmask cannot do.
+            (
+                "cap-demo",
+                [
+                    "B write (never delegated): DENIED (insufficient rights)",
+                    "A read after revoke: REVOKED (stale generation)",
+                    "B read after revoke (whole delegation subtree): REVOKED",
+                    "C read after revoke (object 5, untouched): OK",
+                    "forged: REVOKED (stale generation)",
+                    "[cap-demo] PASS",
+                ],
+            ),
             ("halt", "halting."),
         ]
         cursor = session.wait_for("dezh> ")

@@ -3407,6 +3407,66 @@ fn run_overnight(plan: &KernelPlan) {
     }
 }
 
+/// Object-capability demo (the "one big change", first-class primitive): a
+/// capability is a handle to ONE object with attenuable rights and a
+/// generation stamp, so per-object revocation and an attenuated delegation graph
+/// exist — the things a per-task bitmask cannot express. Model lives in
+/// `dezh_core::ocap` (host-tested exhaustively); this drives it in the kernel.
+fn run_cap_demo() {
+    use dezh_core::ocap::{Cap, CapCheck, CapTable, R_DELEGATE, R_READ, R_WRITE};
+    fn show(label: &str, r: CapCheck) {
+        let s = match r {
+            CapCheck::Ok => "OK",
+            CapCheck::Revoked => "REVOKED (stale generation)",
+            CapCheck::Denied => "DENIED (insufficient rights)",
+            CapCheck::NoSuchObject => "NO-SUCH-OBJECT",
+        };
+        kprintln!("[cap-demo]   {label}: {s}");
+    }
+
+    let mut table = CapTable::<8>::new();
+    kprintln!("[cap-demo] object-capabilities: a handle to ONE object, attenuable, with generation-stamped revocation");
+
+    // Mint a parent handle to object 3 with read+write+delegate.
+    let a = table.mint(3, R_READ | R_WRITE | R_DELEGATE).unwrap();
+    kprintln!("[cap-demo] 1/5 minted cap A -> object 3 rights=read+write+delegate gen={}", a.generation());
+    // Attenuated delegation: derive a child with read only (a delegation graph).
+    let b = table.derive(&a, R_READ).unwrap();
+    kprintln!("[cap-demo] 2/5 derived cap B from A with mask=read -> B rights=read only (attenuated), same object+gen");
+    // A separate object, to prove revocation is per-object.
+    let c = table.mint(5, R_READ).unwrap();
+
+    kprintln!("[cap-demo] 3/5 use them:");
+    show("A read", table.check(&a, R_READ));
+    show("A write", table.check(&a, R_WRITE));
+    show("B read", table.check(&b, R_READ));
+    show("B write (never delegated)", table.check(&b, R_WRITE));
+    show("C read (object 5)", table.check(&c, R_READ));
+
+    kprintln!("[cap-demo] 4/5 revoke object 3 (bump its generation) -> every outstanding handle to object 3 goes stale at next use");
+    table.revoke(3);
+    show("A read after revoke", table.check(&a, R_READ));
+    show("B read after revoke (whole delegation subtree)", table.check(&b, R_READ));
+    show("C read after revoke (object 5, untouched)", table.check(&c, R_READ));
+
+    // A forged handle (attacker-guessed generation) is not live.
+    let forged = Cap::forged(3, R_READ | R_WRITE, 0xdead_beef);
+    kprintln!("[cap-demo] 5/5 a forged handle (guessed generation) is rejected:");
+    show("forged", table.check(&forged, R_READ));
+
+    let pass = table.check(&a, R_READ) == CapCheck::Revoked
+        && table.check(&b, R_READ) == CapCheck::Revoked
+        && table.check(&c, R_READ) == CapCheck::Ok
+        && table.check(&b, R_WRITE) != CapCheck::Ok
+        && table.check(&forged, R_READ) != CapCheck::Ok;
+    record_event("kernel", "cap.demo", "object-capability", if pass { "OK" } else { "fail" });
+    if pass {
+        kprintln!("[cap-demo] PASS: per-object revocation + attenuated delegation graph on a first-class object-capability (what a bitmask cannot do)");
+    } else {
+        kprintln!("[cap-demo] FAIL: object-capability semantics did not hold");
+    }
+}
+
 fn run_bench_os() {
     kprintln!(
         "[bench-os] launching separate U-mode benchmark ELF ({} null syscalls)",
@@ -4806,6 +4866,13 @@ const COMMANDS: &[CommandSpec] = &[
         help: "self-contained proof: a leased intent expires after N runs; a revoked one authorizes nothing",
     },
     CommandSpec {
+        name: "cap-demo",
+        cap: cap::INSPECT,
+        cap_name: "INSPECT",
+        group: "Intent",
+        help: "object-capability primitive: attenuated delegation + per-object generation-stamped revocation",
+    },
+    CommandSpec {
         name: "intent-list",
         cap: cap::INSPECT,
         cap_name: "INSPECT",
@@ -5829,6 +5896,7 @@ fn dispatch(cmd: &str, arg: &str, plan: &KernelPlan, memory: &[MemoryRegion], he
         "intent-open" => pkg::intent_open(arg),
         "intent-revoke" => pkg::intent_revoke(arg),
         "lease-demo" => pkg::lease_demo(),
+        "cap-demo" => run_cap_demo(),
         "intent-list" => pkg::intent_list(),
         "intent-run" => pkg::intent_run(plan, arg),
         "intent-demo" => pkg::intent_demo(plan),

@@ -63,13 +63,15 @@ true today, so a reviewer never has to guess.
   `pkg-recv` upload path. No online PKI / certificate-transparency service.
 - No production installer, no SMP, no side-channel hardening, no formal
   verification.
-- **Capabilities are a per-task bitmask, not object-capabilities.** Authority is
-  a bit per class/namespace (kernel-attested on every IPC message and attenuable
-  on delegation — so *not* Linux-style ambient caps), but not an unforgeable
-  per-object reference like seL4/CHERI. Per-bit revocation and a full delegation
-  graph are therefore not expressible yet; turning capabilities into
-  generation-stamped object handles is the single largest planned change. See
-  [SECURITY_MODEL.md](SECURITY_MODEL.md).
+- **The live capabilities are a per-task bitmask; the object-capability
+  primitive is built but not yet the substrate.** Today's task authority is a bit
+  per class/namespace (kernel-attested on every IPC message and attenuable on
+  delegation — so *not* Linux-style ambient caps), not an unforgeable per-object
+  reference like seL4/CHERI. The first-class alternative now exists and is proven
+  (`dezh_core::ocap` + the `cap-demo`: generation-stamped object handles with
+  per-object revocation and an attenuated delegation graph), but the live IPC /
+  Cairn plumbing has **not** been migrated onto it yet — that migration is the
+  single largest planned change. See [SECURITY_MODEL.md](SECURITY_MODEL.md).
 - **Confidentiality is read-access control only — no exfiltration defense.** An
   agent cannot read what it was not granted, but nothing stops it from leaking
   what it *was* granted (no information-flow control). Integrity + attribution

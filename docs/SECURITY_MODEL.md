@@ -94,15 +94,26 @@ coarser than the latter (bitmask classes, not per-object references). The honest
 label is *capability-secure in the no-ambient-authority sense*, not *object-
 capability*.
 
-**The path (the one big change).** Turn a capability into a first-class object —
-a generation-stamped handle to a specific resource — so that (a) revocation of a
-single capability falls out (bump the generation; every outstanding handle is
-invalidated at next use), and (b) delegation forms a real provenance graph. The
-intent lease/revocation above is the generation mechanism proven at the intent
-layer; extending generation-stamped handles to the capability model itself is
-the largest, most valuable single change on the roadmap — bigger than any new
-feature. Until it lands, capability revocation = drop the grant at the source,
-end the task, and roll back its effects.
+**The path (the one big change), now prototyped.** Turn a capability into a
+first-class object — a generation-stamped handle to a specific resource — so that
+(a) revocation of a single capability falls out (bump the generation; every
+outstanding handle is invalidated at next use), and (b) delegation forms a real
+provenance graph. This primitive is now **built and proven** in
+`dezh_core::ocap` (`Cap` = object + rights + generation; `CapTable` holds the
+live generation per object; `derive` attenuates rights along a delegation graph;
+`revoke` bumps a generation to invalidate every outstanding handle to *that*
+object). It is host-tested exhaustively and driven in the kernel by `cap-demo`:
+mint a handle, derive an attenuated child, use both, then revoke the object and
+watch the whole delegation subtree go stale at next use while a handle to a
+*different* object keeps working — per-object revocation a bitmask cannot
+express. A forged handle (guessed generation) is rejected.
+
+What remains is **migration**: the live task-capability plumbing (the bitmask
+threaded through IPC and the Cairn namespace bits) still uses the coarse model;
+moving it onto `ocap` handles is the largest, most valuable single change on the
+roadmap — bigger than any new feature. Until that migration lands, task-level
+revocation = drop the grant at the source, end the task, and roll back its
+effects; the object-capability semantics above are proven as the target.
 
 ## Reviewer Notes
 
