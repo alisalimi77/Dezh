@@ -475,6 +475,17 @@ def run_riscv64(qemu: str, kernel: Path) -> None:
                     "[nsrevoke-demo] PASS",
                 ],
             ),
+            # --- ocap gate now covers the UNTRUSTED AGENT path ----------------
+            # Revoking ns=lab refuses the built-in agent's Cairn write (it traps),
+            # and re-granting restores it - enforcement spans the agent path.
+            (
+                "agentrevoke-demo",
+                [
+                    "cairn_put DENIED: ns capability revoked (ocap generation stale)",
+                    "the agent's Cairn write was REFUSED by the ocap gate (agent trapped=true)",
+                    "[agentrevoke-demo] PASS",
+                ],
+            ),
             # --- Confidentiality / anti-exfiltration (DIFC) --------------------
             # Reading a secret taints the agent so it can no longer write to a
             # public sink - the exfiltration defense the effect ledger cannot give.

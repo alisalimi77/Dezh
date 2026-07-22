@@ -108,12 +108,24 @@ watch the whole delegation subtree go stale at next use while a handle to a
 *different* object keeps working — per-object revocation a bitmask cannot
 express. A forged handle (guessed generation) is rejected.
 
-What remains is **migration**: the live task-capability plumbing (the bitmask
-threaded through IPC and the Cairn namespace bits) still uses the coarse model;
-moving it onto `ocap` handles is the largest, most valuable single change on the
-roadmap — bigger than any new feature. Until that migration lands, task-level
+Migration has **started on the live plumbing**, not just the primitive. The
+Cairn **namespace** capability is now ocap-backed at the kernel chokepoint: the
+console holds a generation-stamped handle per namespace, and the ocap gate is
+enforced on **both** the operator console path (`cairn-commit`/`-get`/... via
+`ns_authority_live`) **and the untrusted agent path** (`KHost::cairn_put`/
+`cairn_get`). `ns-revoke` bumps a namespace's generation, and from that point a
+commit or an agent's write to that namespace is refused until `ns-grant`
+(`nsrevoke-demo`, `agentrevoke-demo`). So runtime revocation of a live namespace
+capability is real for every kernel-side path today.
+
+What **remains** is the deeper step: the daemon still attests authority per IPC
+message with the coarse **bitmask** (kernel-attested, so unforgeable, but not
+generation-checked at the object owner). Moving the daemon's own check to a
+persisted per-object generation — so revocation survives reboot and is enforced
+by the object owner itself — and migrating the remaining task-capability bits
+onto `ocap` handles, is the largest remaining change. Until then, task-bit-level
 revocation = drop the grant at the source, end the task, and roll back its
-effects; the object-capability semantics above are proven as the target.
+effects; the namespace capability already has full ocap revocation.
 
 ## Reviewer Notes
 

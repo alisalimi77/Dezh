@@ -51,6 +51,13 @@ impl dezh_core::ir::Host for KHost<'_> {
             kprintln!("  [ir] cairn_put: no namespace bound (app name has no Cairn namespace)");
             return false;
         };
+        // Object-capability namespace gate: an UNTRUSTED agent's write is refused
+        // if the namespace capability was revoked at runtime (ocap generation
+        // stale) — the same gate as the console, now on the agent path.
+        if !ns_authority_ok(ns) {
+            kprintln!("  [ir] cairn_put DENIED: ns capability revoked (ocap generation stale)");
+            return false;
+        }
         prepare_virtio_input_bytes(data);
         // IR/storage effects are reversible: undo moves the Cairn ref.
         run_virtio_client_ns_raw(
@@ -68,6 +75,10 @@ impl dezh_core::ir::Host for KHost<'_> {
     }
     fn cairn_get(&mut self, buf: &mut [u8]) -> Option<usize> {
         let (plan, ns) = self.cairn?;
+        if !ns_authority_ok(ns) {
+            kprintln!("  [ir] cairn_get DENIED: ns capability revoked (ocap generation stale)");
+            return None;
+        }
         let st = run_virtio_client_ns_raw(plan, cairn_req(BLK_REQ_CAIRN_GET, ns, 0), 0, task_ns_cap(ns));
         if st != 0 {
             return None;
@@ -3734,6 +3745,52 @@ fn run_exfil_demo() {
     }
 }
 
+/// Run the built-in Dezh-IR agent (a durable Cairn write+read) bound to
+/// namespace `ns`. Returns whether it completed — false if its Cairn write was
+/// refused (e.g. by the ocap namespace gate).
+fn run_builtin_agent(plan: &KernelPlan, ns: usize) -> bool {
+    let mut buf = [0u8; 512];
+    let prog = dezh_core::ir::demo_cairn(&mut buf);
+    let mut host = KHost {
+        caps: dezh_core::ir::CAP_PRINT | dezh_core::ir::CAP_WRITE | dezh_core::ir::CAP_READ,
+        cairn: Some((plan, ns)),
+        intent: 0,
+        derived: pkg::MCAP_PRINT | pkg::MCAP_CAIRN_READ | pkg::MCAP_CAIRN_WRITE,
+    };
+    dezh_core::ir::run(prog, &mut host).is_ok()
+}
+
+/// Prove the ocap namespace gate applies to the UNTRUSTED AGENT path, not just
+/// the operator console: revoke ns=lab, run the built-in agent bound to ns=lab
+/// (its write is refused by the gate so it traps), then re-grant and watch it
+/// succeed. (Uses ns=lab so ns=agent's provenance — asserted after reboot — is
+/// untouched.)
+fn run_agentrevoke_demo(plan: &KernelPlan) {
+    use dezh_core::ocap::{R_DELEGATE, R_READ, R_WRITE};
+    const LAB: usize = 1;
+    ns_authority_init();
+    unsafe { NS_HANDLE[LAB] = NS_TABLE.mint(LAB, R_READ | R_WRITE | R_DELEGATE) };
+    kprintln!("[agentrevoke-demo] the ocap namespace gate now covers the UNTRUSTED AGENT path (KHost), not just the console");
+    kprintln!("[agentrevoke-demo] 1/3 revoke ns=lab, then run the built-in agent bound to ns=lab:");
+    unsafe { NS_TABLE.revoke(LAB) };
+    let ran_revoked = run_builtin_agent(plan, LAB);
+    kprintln!(
+        "[agentrevoke-demo] 2/3 the agent's Cairn write was {} by the ocap gate (agent trapped={})",
+        if ran_revoked { "ALLOWED" } else { "REFUSED" },
+        !ran_revoked
+    );
+    kprintln!("[agentrevoke-demo] 3/3 re-grant ns=lab, run the agent again:");
+    unsafe { NS_HANDLE[LAB] = NS_TABLE.mint(LAB, R_READ | R_WRITE | R_DELEGATE) };
+    let ran_granted = run_builtin_agent(plan, LAB);
+    let pass = !ran_revoked && ran_granted;
+    record_event("kernel", "agentrevoke.demo", "ns:lab", if pass { "OK" } else { "fail" });
+    if pass {
+        kprintln!("[agentrevoke-demo] PASS: runtime namespace revocation refuses the agent's write and re-granting restores it -- ocap enforcement now spans the agent path");
+    } else {
+        kprintln!("[agentrevoke-demo] FAIL: revoked_run_ok={ran_revoked} granted_run_ok={ran_granted}");
+    }
+}
+
 fn run_bench_os() {
     kprintln!(
         "[bench-os] launching separate U-mode benchmark ELF ({} null syscalls)",
@@ -5161,6 +5218,13 @@ const COMMANDS: &[CommandSpec] = &[
         help: "proof: revoke a live namespace capability at runtime; the storage path refuses until re-granted",
     },
     CommandSpec {
+        name: "agentrevoke-demo",
+        cap: cap::SPAWN,
+        cap_name: "SPAWN",
+        group: "Intent",
+        help: "the ocap namespace gate covers the untrusted AGENT path: a revoked ns refuses the agent's write",
+    },
+    CommandSpec {
         name: "exfil-demo",
         cap: cap::INSPECT,
         cap_name: "INSPECT",
@@ -6216,6 +6280,7 @@ fn dispatch(cmd: &str, arg: &str, plan: &KernelPlan, memory: &[MemoryRegion], he
         "ns-revoke" => ns_revoke(arg),
         "ns-grant" => ns_grant(arg),
         "nsrevoke-demo" => run_nsrevoke_demo(plan),
+        "agentrevoke-demo" => run_agentrevoke_demo(plan),
         "exfil-demo" => run_exfil_demo(),
         "taintflow-demo" => run_taintflow_demo(plan),
         "taint" => taint_show(),
