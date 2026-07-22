@@ -320,6 +320,19 @@ def run_riscv64(qemu: str, kernel: Path) -> None:
                 ],
             ),
             ("events", "comp.demo"),
+            # --- Tbar provenance graph (W8 P5): actor -> intent -> effect ------
+            # Query the provenance of the sfar-demo mission (Ahd#4). Its head is
+            # the irreversible send rollback refused to undo; Tbar attributes it
+            # to its actor + intent + derived cap, unforgeably.
+            (
+                "tbar 4",
+                [
+                    "provenance graph for intent Ahd#4",
+                    "actor task1 -> intent Ahd#4 (derived print,cairn-read,cairn-write) -> effect ns=agent",
+                    "class=irreversible",
+                    "attributed to intent Ahd#4",
+                ],
+            ),
             ("deny", "Pol denial demo skipped here to keep running services alive"),
             (
                 "bench-pol",
@@ -371,6 +384,16 @@ def run_riscv64(qemu: str, kernel: Path) -> None:
                 ],
             ),
             ("events", "redteam"),
+            # --- Explainable denial (W8 P5): why-denied names the boundary -----
+            # After the adversary run, why-denied attributes the last denial to a
+            # real mechanism (the intent-derivation ceiling from escape 4).
+            (
+                "why-denied",
+                [
+                    "last denial: actor=redteam action=intent.derive",
+                    "boundary: intent-derivation ceiling",
+                ],
+            ),
             ("halt", "halting."),
         ]
         cursor = session.wait_for("dezh> ")

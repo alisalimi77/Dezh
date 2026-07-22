@@ -86,6 +86,9 @@ const REQ_SAND_INFO: usize = 50;
 // mission and refuses the rest with an explanation.
 const REQ_SFAR_PLAN: usize = 51;
 const REQ_SFAR_ROLLBACK: usize = 52;
+// Tbar (W8 P5): the queryable actor -> intent -> effect provenance graph for a
+// mission/intent. Same authority rule as Sfar (hold every touched namespace).
+const REQ_TBAR: usize = 53;
 
 const IPC_PROTO_V1: usize = 0xd1;
 const IPC_SERVICE_VIRTIO_BLOCK: usize = 1;
@@ -1213,6 +1216,84 @@ fn sfar_rollback(dma_base: usize, ahd: u32, sender_caps: usize, from: usize) -> 
     IPC_STATUS_OK
 }
 
+/// Tbar (W8 P5): render the queryable actor -> intent -> effect provenance graph
+/// for one intent (Ahd). Every effect the ledger carries names the actor that
+/// made it, the intent it was authorized under, and the derived capability — an
+/// unforgeable chain because the intent id and derived cap are stamped kernel->
+/// daemon on the commit path, not asserted by the actor. Same authority rule as
+/// Sfar: revealing an intent's cross-namespace effects requires holding every
+/// namespace it touched.
+fn tbar(dma_base: usize, ahd: u32, sender_caps: usize, from: usize) -> usize {
+    if ahd == 0 {
+        sys_print(b"  [tbar] ahd 0 is 'direct' (no intent to graph)\n");
+        return IPC_STATUS_BAD_REQUEST;
+    }
+    if !cairn_load_super(dma_base) {
+        return IPC_STATUS_IO_FAILURE;
+    }
+    let mut head = [CAIRN1_NONE; CAIRN1_NS_MAX];
+    let mut ns = 0usize;
+    while ns < CAIRN1_NS_MAX {
+        head[ns] = d_read_u32(cairn_ns_entry_off(ns) + 16);
+        ns += 1;
+    }
+    let touched = sfar_touched_ns(dma_base, ahd, &head);
+    if touched == 0 {
+        sys_print(b"  [tbar] no effects recorded for intent Ahd#");
+        print_num(ahd as usize);
+        sys_print(b"\n");
+        return IPC_STATUS_UNAVAILABLE;
+    }
+    if !sfar_authorized(touched, sender_caps, from) {
+        return IPC_STATUS_DENIED;
+    }
+    sys_print(b"  [tbar] provenance graph for intent Ahd#");
+    print_num(ahd as usize);
+    sys_print(b" (actor -> intent -> effect, unforgeable):\n");
+    let mut total = 0usize;
+    ns = 0;
+    while ns < CAIRN1_NS_MAX {
+        let mut cur = head[ns];
+        let mut guard = 0usize;
+        while cur != CAIRN1_NONE && guard < CAIRN1_COMMIT_SLOTS as usize {
+            guard += 1;
+            let st = rw(dma_base, CAIRN1_COMMIT_FIRST_SECTOR + cur as u64, false);
+            if st != 0 || !data_starts_with(b"DZC1") {
+                break;
+            }
+            let parent = d_read_u32(8);
+            if d_read_u32(CAIRN1_OFF_INTENT) == ahd {
+                sys_print(b"    actor task");
+                print_num(d_read_u32(24) as usize);
+                sys_print(b" -> intent Ahd#");
+                print_num(ahd as usize);
+                sys_print(b" (derived ");
+                print_mcaps(d_read_u32(CAIRN1_OFF_DERIVED));
+                sys_print(b") -> effect ns=");
+                print_ns_name(ns);
+                sys_print(b" slot=");
+                print_num(cur as usize);
+                sys_print(b" class=");
+                print_revclass(d_read_u8(CAIRN1_OFF_REVCLASS));
+                sys_print(b" status=");
+                print_status_name(d_read_u8(CAIRN1_OFF_STATUS));
+                sys_print(b" hash=");
+                print_hex(d_read_u64(16));
+                sys_print(b"\n");
+                total += 1;
+            }
+            cur = parent;
+        }
+        ns += 1;
+    }
+    sys_print(b"  [tbar] ");
+    print_num(total);
+    sys_print(b" effect(s) attributed to intent Ahd#");
+    print_num(ahd as usize);
+    sys_print(b"\n");
+    IPC_STATUS_OK
+}
+
 /// Load the head commit of `ns` into the data buffer. Returns the head slot
 /// or CAIRN1_NONE (with status left for the caller to map).
 fn cairn_load_head(dma_base: usize, ns: usize) -> Option<u32> {
@@ -2185,6 +2266,8 @@ fn daemon(dma_base: usize) -> ! {
             send_status(from, word, sfar_plan(dma_base, sand_intent, sender_caps, from));
         } else if op == REQ_SFAR_ROLLBACK {
             send_status(from, word, sfar_rollback(dma_base, sand_intent, sender_caps, from));
+        } else if op == REQ_TBAR {
+            send_status(from, word, tbar(dma_base, sand_intent, sender_caps, from));
         } else if op == REQ_FAULT_DEMO {
             sys_print(b"  [virtio-blk-daemon] FAULT-DEMO received; exiting with fault code\n");
             send_status(from, word, IPC_STATUS_OK);
@@ -2277,7 +2360,7 @@ fn client_request(daemon: usize, input_len: usize, req: usize) -> ! {
     // 40..47 (derived in bits 0..4, rev-class in bits 5..6 of that byte).
     let sand_intent = (req >> 24) & 0xffff;
     let sand_status_byte = (req >> 40) & 0xff;
-    if base >= REQ_CAIRN_INIT && base <= REQ_SFAR_ROLLBACK {
+    if base >= REQ_CAIRN_INIT && base <= REQ_TBAR {
         let arg = if base == REQ_CAIRN_COMMIT {
             (cairn_ns << 12) | input_len.min(0xfff)
         } else if base == REQ_CAIRN_ROLLBACK {
@@ -2287,8 +2370,8 @@ fn client_request(daemon: usize, input_len: usize, req: usize) -> ! {
         };
         let st = if base == REQ_CAIRN_COMMIT {
             client_send_meta(daemon, base, sand_intent, sand_status_byte, arg)
-        } else if base == REQ_SFAR_PLAN || base == REQ_SFAR_ROLLBACK {
-            // Sfar targets a mission: its Ahd id rides the request-id field.
+        } else if base == REQ_SFAR_PLAN || base == REQ_SFAR_ROLLBACK || base == REQ_TBAR {
+            // Sfar/Tbar target a mission: its Ahd id rides the request-id field.
             client_send_meta(daemon, base, sand_intent, 0, arg)
         } else {
             client_send(daemon, base, arg)
@@ -2313,6 +2396,8 @@ fn client_request(daemon: usize, input_len: usize, req: usize) -> ! {
             sys_print(b"  [vblk-client] sfar-plan status=");
         } else if base == REQ_SFAR_ROLLBACK {
             sys_print(b"  [vblk-client] sfar-rollback status=");
+        } else if base == REQ_TBAR {
+            sys_print(b"  [vblk-client] tbar status=");
         } else {
             sys_print(b"  [vblk-client] cairn-init status=");
         }

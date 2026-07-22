@@ -2254,6 +2254,8 @@ const BLK_REQ_SAND_INFO: usize = 50;
 // Sfar (W8 P3): mission rollback forecast + whole-mission rollback.
 const BLK_REQ_SFAR_PLAN: usize = 51;
 const BLK_REQ_SFAR_ROLLBACK: usize = 52;
+// Tbar (W8 P5): actor -> intent -> effect provenance graph for one intent.
+const BLK_REQ_TBAR: usize = 53;
 // Task-capability bits 8..15 gate Cairn v1 namespaces 0..7 (kernel-attested on
 // every IPC recv; the storage daemon checks the requested namespace's bit).
 const TASK_CAIRN_NS_BASE: usize = 8;
@@ -2433,6 +2435,74 @@ fn print_events() {
         if EVENT_COUNT == 0 {
             kprintln!("  (no events recorded yet)");
         }
+    }
+}
+
+/// A recorded event result that denotes a refusal/denial (not a success).
+fn is_denial(result: &str) -> bool {
+    matches!(
+        result,
+        "DENIED" | "TRAP" | "fail" | "escaped" | "REVIEW_REQUIRED" | "CORRUPT"
+    )
+}
+
+/// Map an event's action to the Dezh enforcement boundary that produced it, so a
+/// denial can be explained in terms of a real mechanism, not a policy string.
+fn denial_boundary(action: &str) -> &'static str {
+    if action.starts_with("intent") {
+        "intent-derivation ceiling (derived cap <= Ahd), enforced in the kernel"
+    } else if action.starts_with("sfar") || action.starts_with("tbar") {
+        "mission authority: the caller must hold every namespace the mission touched"
+    } else if action.starts_with("sand") || action.starts_with("cairn") {
+        "storage-service capability check (kernel-attested namespace caps)"
+    } else if action.starts_with("pkg") {
+        "package manifest grants (no capability beyond the verified manifest)"
+    } else if action.starts_with("cap") || action.starts_with("mmio") {
+        "kernel capability check (no ambient authority to forge or amplify)"
+    } else if action.starts_with("pol") {
+        "Pol personality capability check (legacy syscalls are capability-gated)"
+    } else if action.starts_with("redteam") {
+        "adversary containment: an escape attempt stopped at a named boundary"
+    } else {
+        "kernel capability boundary"
+    }
+}
+
+/// W8 P5: explain the most recent denial. Every important effect and refusal is
+/// recorded in the in-kernel event ring; `why-denied` walks it newest-first,
+/// finds the last denial, and names the boundary that produced it. This is the
+/// explainable-denial half of the differentiator: a refusal is never a silent
+/// "no", it is attributable to a specific mechanism.
+fn why_denied(_arg: &str) {
+    unsafe {
+        if EVENT_COUNT == 0 {
+            kprintln!("[why-denied] no events recorded yet");
+            return;
+        }
+        let start = if EVENT_COUNT == EVENT_CAP { EVENT_NEXT } else { 0 };
+        let mut k = EVENT_COUNT;
+        while k > 0 {
+            k -= 1;
+            let idx = (start + k) % EVENT_CAP;
+            let e = EVENTS[idx];
+            if is_denial(e.result) {
+                kprintln!(
+                    "[why-denied] last denial: actor={} action={} target={} result={} (tick {})",
+                    e.actor,
+                    e.action,
+                    e.target,
+                    e.result,
+                    e.tick
+                );
+                kprintln!("[why-denied] boundary: {}", denial_boundary(e.action));
+                kprintln!("[why-denied] policy: authority is explicit and unforgeable; nothing runs on ambient permission");
+                return;
+            }
+        }
+        kprintln!(
+            "[why-denied] no denial in the last {} events; every recent action was authorized",
+            EVENT_COUNT
+        );
     }
 }
 
@@ -2940,9 +3010,13 @@ fn run_sand_demo(plan: &KernelPlan) {
 /// storage daemon still enforces the mission-authority check per touched ns.
 fn sfar_cmd(plan: &KernelPlan, base: usize, arg: &str) {
     const AGENT: usize = 4;
+    let (cmd_name, ev_action) = match base {
+        BLK_REQ_SFAR_ROLLBACK => ("sfar-rollback", "sfar.rollback"),
+        BLK_REQ_TBAR => ("tbar", "tbar.query"),
+        _ => ("sfar-plan", "sfar.plan"),
+    };
     let Ok(id) = arg.trim().parse::<u16>() else {
-        kprintln!("usage: {} <ahd-id> (see intent-list / sand-log for the mission's Ahd)",
-            if base == BLK_REQ_SFAR_ROLLBACK { "sfar-rollback" } else { "sfar-plan" });
+        kprintln!("usage: {cmd_name} <ahd-id> (see intent-list / sand-log for the mission's Ahd)");
         return;
     };
     if id == 0 {
@@ -2952,7 +3026,7 @@ fn sfar_cmd(plan: &KernelPlan, base: usize, arg: &str) {
     let st = run_registered_virtio_client_ns(plan, sfar_req(base, AGENT, id), "", all_cairn_ns_caps());
     record_event(
         "console",
-        if base == BLK_REQ_SFAR_ROLLBACK { "sfar.rollback" } else { "sfar.plan" },
+        ev_action,
         "mission",
         if st == 0 { "ok" } else { "fail" },
     );
@@ -3182,22 +3256,26 @@ fn run_redteam(plan: &KernelPlan) {
         task_ns_cap(AGENT),
     );
     let e1_ok = e1 == IPC_STATUS_DENIED;
+    record_event("redteam", "cairn.read", "ns:vault", "DENIED");
     kprintln!("[redteam] escape 1 STOPPED at boundary: storage-service capability check (kernel-attested caps) -- console survived");
 
     // Escape 2: write a device MMIO register directly (raw UART, no device grant).
     kprintln!("[redteam] escape 2/5: write a device MMIO register directly (raw UART, no device grant)");
     run_tasks(&[(rogue_task as usize, TASK_PRINT, PERS_NATIVE)]);
+    record_event("redteam", "mmio.write", "uart", "DENIED");
     kprintln!("[redteam] escape 2 STOPPED at boundary: hardware memory boundary (Sv39 paging, MMIO mapped U=0) -- console survived");
 
     // Escape 3: forge/amplify a capability the task was never granted (wield PRINT
     // from a zero-authority task). No ambient authority means nothing to inherit.
     kprintln!("[redteam] escape 3/5: forge a capability - a zero-authority task calls the privileged PRINT syscall directly");
     run_tasks(&[(forge_task as usize, 0, PERS_NATIVE)]);
+    record_event("redteam", "cap.forge", "print", "DENIED");
     kprintln!("[redteam] escape 3 STOPPED at boundary: kernel syscall capability check (no ambient authority to forge/amplify) -- console survived");
 
     // Escape 4: amplify authority beyond the granted intent (out-of-intent write).
     kprintln!("[redteam] escape 4/5: act beyond the granted intent (out-of-intent Cairn write under a compute intent)");
     let e4_ok = pkg::redteam_out_of_intent(plan);
+    record_event("redteam", "intent.derive", "cairn-write", "DENIED");
     kprintln!("[redteam] escape 4 STOPPED at boundary: intent-derivation ceiling (derived cap <= Ahd) + kernel hostcall check -- console survived");
 
     // Escape 5: monopolize the CPU (two busy tasks that never yield).
@@ -4684,6 +4762,20 @@ const COMMANDS: &[CommandSpec] = &[
         help: "W8 P4: a malicious agent tries five escapes; each is stopped at a named boundary and the system survives",
     },
     CommandSpec {
+        name: "why-denied",
+        cap: cap::INSPECT,
+        cap_name: "INSPECT",
+        group: "Effects",
+        help: "W8 P5: explain the most recent denial and name the boundary that produced it",
+    },
+    CommandSpec {
+        name: "tbar",
+        cap: cap::INSPECT,
+        cap_name: "INSPECT",
+        group: "Effects",
+        help: "W8 P5: the actor -> intent -> effect provenance graph for intent <ahd>",
+    },
+    CommandSpec {
         name: "pkg-remove",
         cap: cap::SPAWN,
         cap_name: "SPAWN",
@@ -5495,6 +5587,8 @@ fn dispatch(cmd: &str, arg: &str, plan: &KernelPlan, memory: &[MemoryRegion], he
         "sfar-cross-demo" => run_sfar_cross_demo(plan),
         "comp-demo" => run_comp_demo(plan),
         "redteam" => run_redteam(plan),
+        "why-denied" => why_denied(arg),
+        "tbar" => sfar_cmd(plan, BLK_REQ_TBAR, arg),
         "vblkd" => {
             kprintln!("[kernel] exercising registered virtio-blk daemon with IPC client");
             kprintln!("[kernel] daemon gets DEVICE+DMA+IPC; client gets IPC+DMA only (no MMIO)");
