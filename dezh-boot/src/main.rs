@@ -2813,6 +2813,110 @@ fn run_virtio_blk_daemon_demo(plan: &KernelPlan) {
     refresh_virtio_service_state();
 }
 
+// --- Namespace authority as an object-capability (ocap migration) -------------
+//
+// The Cairn namespace capability is the first live authority migrated onto
+// `dezh_core::ocap`: the operator console holds a generation-stamped handle per
+// namespace, and `ns-revoke` bumps that namespace's generation so the held
+// handle goes stale and further console operations on the live storage path are
+// refused — real runtime revocation of a live capability, which the coarse
+// task-capability bitmask cannot express. (The bitmask still gates the U-mode
+// client → daemon hop; migrating that hop too is the remaining work.)
+
+static mut NS_TABLE: dezh_core::ocap::CapTable<8> = dezh_core::ocap::CapTable::new();
+static mut NS_HANDLE: [Option<dezh_core::ocap::Cap>; 8] = [None; 8];
+static mut NS_INIT: bool = false;
+
+fn ns_authority_init() {
+    use dezh_core::ocap::{R_DELEGATE, R_READ, R_WRITE};
+    unsafe {
+        if NS_INIT {
+            return;
+        }
+        let mut i = 0usize;
+        while i < CAIRN_NS_NAMES.len() {
+            NS_HANDLE[i] = NS_TABLE.mint(i, R_READ | R_WRITE | R_DELEGATE);
+            i += 1;
+        }
+        NS_INIT = true;
+    }
+}
+
+/// Quiet check: does the operator still hold a live capability for namespace
+/// `ns` (its handle's generation still matches the object's live generation)?
+fn ns_authority_ok(ns: usize) -> bool {
+    use dezh_core::ocap::{CapCheck, R_READ};
+    ns_authority_init();
+    unsafe { NS_HANDLE[ns].map(|h| NS_TABLE.check(&h, R_READ)) == Some(CapCheck::Ok) }
+}
+
+/// Console gate: like [`ns_authority_ok`] but prints an explainable denial when
+/// the namespace capability has been revoked.
+fn ns_authority_live(ns: usize) -> bool {
+    if ns_authority_ok(ns) {
+        return true;
+    }
+    let name = CAIRN_NS_NAMES.get(ns).copied().unwrap_or("?");
+    kprintln!("[cap] DENIED: namespace '{name}' capability was REVOKED (ns-grant {name} to re-mint) -- ocap generation stale");
+    false
+}
+
+fn ns_revoke(arg: &str) {
+    let Some((ns, _)) = cairn_parse_ns(arg) else {
+        return;
+    };
+    ns_authority_init();
+    unsafe { NS_TABLE.revoke(ns) };
+    kprintln!(
+        "[ns-revoke] namespace '{}' capability REVOKED (generation bumped); every held handle to it is now stale",
+        CAIRN_NS_NAMES[ns]
+    );
+    record_event("kernel", "ns.revoke", CAIRN_NS_NAMES[ns], "OK");
+}
+
+fn ns_grant(arg: &str) {
+    use dezh_core::ocap::{R_DELEGATE, R_READ, R_WRITE};
+    let Some((ns, _)) = cairn_parse_ns(arg) else {
+        return;
+    };
+    ns_authority_init();
+    unsafe { NS_HANDLE[ns] = NS_TABLE.mint(ns, R_READ | R_WRITE | R_DELEGATE) };
+    kprintln!(
+        "[ns-grant] namespace '{}' capability re-minted at the current generation",
+        CAIRN_NS_NAMES[ns]
+    );
+    record_event("kernel", "ns.grant", CAIRN_NS_NAMES[ns], "OK");
+}
+
+/// Prove the migration: a namespace capability revoked at runtime stops the live
+/// storage path (a commit is refused by the ocap check before it reaches the
+/// daemon), and re-granting restores it.
+fn run_nsrevoke_demo(plan: &KernelPlan) {
+    use dezh_core::ocap::{R_DELEGATE, R_READ, R_WRITE};
+    const CALC: usize = 2;
+    ns_authority_init();
+    kprintln!("[nsrevoke-demo] runtime revocation of a LIVE namespace capability (ocap generation), enforced on the storage path");
+    kprintln!("[nsrevoke-demo] 1/4 commit while the capability is live:");
+    cairn_cmd_commit(plan, "calc nsrev-before");
+    let live1 = ns_authority_ok(CALC);
+    kprintln!("[nsrevoke-demo] 2/4 ns-revoke calc (bump the generation):");
+    unsafe { NS_TABLE.revoke(CALC) };
+    kprintln!("[nsrevoke-demo] 3/4 commit after revoke -> the ocap check refuses it before it reaches the daemon:");
+    cairn_cmd_commit(plan, "calc nsrev-blocked");
+    let blocked = !ns_authority_ok(CALC);
+    kprintln!("[nsrevoke-demo] 4/4 ns-grant calc (re-mint) then commit again:");
+    unsafe { NS_HANDLE[CALC] = NS_TABLE.mint(CALC, R_READ | R_WRITE | R_DELEGATE) };
+    cairn_cmd_commit(plan, "calc nsrev-after");
+    let live2 = ns_authority_ok(CALC);
+    let pass = live1 && blocked && live2;
+    record_event("kernel", "nsrevoke.demo", "ns:calc", if pass { "OK" } else { "fail" });
+    if pass {
+        kprintln!("[nsrevoke-demo] PASS: a live namespace capability was revoked at runtime (generation bump) and re-granted -- what the bitmask model could not do");
+    } else {
+        kprintln!("[nsrevoke-demo] FAIL: live1={live1} blocked={blocked} live2={live2}");
+    }
+}
+
 // --- Cairn v1 console front-end -------------------------------------------------
 
 fn cairn_parse_ns<'a>(arg: &'a str) -> Option<(usize, &'a str)> {
@@ -2837,6 +2941,10 @@ fn cairn_cmd_commit(plan: &KernelPlan, arg: &str) {
         kprintln!("usage: cairn-commit <ns> <text>");
         return;
     }
+    if !ns_authority_live(ns) {
+        record_event("console", "cairn.commit", CAIRN_NS_NAMES[ns], "DENIED");
+        return;
+    }
     let st = run_registered_virtio_client_ns(
         plan,
         cairn_req(BLK_REQ_CAIRN_COMMIT, ns, 0),
@@ -2855,6 +2963,9 @@ fn cairn_cmd_simple(plan: &KernelPlan, base: usize, arg: &str) {
     let Some((ns, _)) = cairn_parse_ns(arg) else {
         return;
     };
+    if !ns_authority_live(ns) {
+        return;
+    }
     let _ = run_registered_virtio_client_ns(plan, cairn_req(base, ns, 0), "", task_ns_cap(ns));
 }
 
@@ -4873,6 +4984,27 @@ const COMMANDS: &[CommandSpec] = &[
         help: "object-capability primitive: attenuated delegation + per-object generation-stamped revocation",
     },
     CommandSpec {
+        name: "ns-revoke",
+        cap: cap::SPAWN,
+        cap_name: "SPAWN",
+        group: "Intent",
+        help: "revoke a namespace capability at runtime (ocap generation bump). ns-revoke <ns>",
+    },
+    CommandSpec {
+        name: "ns-grant",
+        cap: cap::SPAWN,
+        cap_name: "SPAWN",
+        group: "Intent",
+        help: "re-mint a namespace capability at the current generation. ns-grant <ns>",
+    },
+    CommandSpec {
+        name: "nsrevoke-demo",
+        cap: cap::SPAWN,
+        cap_name: "SPAWN",
+        group: "Intent",
+        help: "proof: revoke a live namespace capability at runtime; the storage path refuses until re-granted",
+    },
+    CommandSpec {
         name: "intent-list",
         cap: cap::INSPECT,
         cap_name: "INSPECT",
@@ -5897,6 +6029,9 @@ fn dispatch(cmd: &str, arg: &str, plan: &KernelPlan, memory: &[MemoryRegion], he
         "intent-revoke" => pkg::intent_revoke(arg),
         "lease-demo" => pkg::lease_demo(),
         "cap-demo" => run_cap_demo(),
+        "ns-revoke" => ns_revoke(arg),
+        "ns-grant" => ns_grant(arg),
+        "nsrevoke-demo" => run_nsrevoke_demo(plan),
         "intent-list" => pkg::intent_list(),
         "intent-run" => pkg::intent_run(plan, arg),
         "intent-demo" => pkg::intent_demo(plan),

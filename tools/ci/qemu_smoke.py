@@ -463,6 +463,18 @@ def run_riscv64(qemu: str, kernel: Path) -> None:
                     "[cap-demo] PASS",
                 ],
             ),
+            # --- ocap migration: a LIVE namespace capability revoked at runtime -
+            # The Cairn namespace capability is backed by ocap: revoking it bumps
+            # the generation so the operator's held handle goes stale and the
+            # storage path refuses further commits until re-granted.
+            (
+                "nsrevoke-demo",
+                [
+                    "runtime revocation of a LIVE namespace capability",
+                    "[cap] DENIED: namespace 'calc' capability was REVOKED",
+                    "[nsrevoke-demo] PASS",
+                ],
+            ),
             ("halt", "halting."),
         ]
         cursor = session.wait_for("dezh> ")
