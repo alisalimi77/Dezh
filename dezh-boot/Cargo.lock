@@ -8,6 +8,7 @@ version = "0.1.0"
 dependencies = [
  "dezh-core",
  "dezh-kernel",
+ "ed25519-compact",
 ]
 
 [[package]]

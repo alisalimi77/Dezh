@@ -13,6 +13,14 @@ publish = false
 dezh-kernel = { path = "../dezh-kernel" }
 dezh-core = { path = "../dezh-core" }
 
+# Host-side only: build.rs signs a demo package with the audited Ed25519 crate
+# (deterministic, fixed seed) and embeds the signed envelope for the sig-demo.
+# default-features off: signing uses from_seed + sign (deterministic, no RNG),
+# so we avoid pulling getrandom and its wasm/wit dependency tree into the lock.
+[build-dependencies]
+dezh-core = { path = "../dezh-core" }
+ed25519-compact = { version = "2", default-features = false }
+
 [[bin]]
 name = "dezh-boot"
 path = "src/main.rs"

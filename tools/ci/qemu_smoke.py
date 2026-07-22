@@ -320,6 +320,23 @@ def run_riscv64(qemu: str, kernel: Path) -> None:
                 ],
             ),
             ("events", "comp.demo"),
+            # --- Package signing (capability-native): verify + attenuate -------
+            # A build-time-signed package: valid Ed25519 signature from a trusted
+            # publisher installs, attenuated to the publisher's ceiling (ipc is
+            # dropped); tampered + revoked are refused.
+            (
+                "sig-demo",
+                [
+                    "trusted publisher 'demo-publisher' found",
+                    "signature VALID (Ed25519 over inner .dzp + counter)",
+                    "requested=print ipc cairn-read cairn-write | publisher ceiling=print cairn-read cairn-write | GRANTED=print cairn-read cairn-write",
+                    "dropped beyond publisher ceiling: ipc",
+                    "a flipped inner byte is REJECTED",
+                    "a revoked signer key is REFUSED",
+                    "[sig-demo] PASS",
+                ],
+            ),
+            ("events", "sig.demo"),
             # --- Tbar provenance graph (W8 P5): actor -> intent -> effect ------
             # Query the provenance of the sfar-demo mission (Ahd#4). Its head is
             # the irreversible send rollback refused to undo; Tbar attributes it

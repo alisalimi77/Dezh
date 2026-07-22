@@ -4757,6 +4757,13 @@ const COMMANDS: &[CommandSpec] = &[
         help: "receive a .dzp package over the UART (base64 lines, '.' ends)",
     },
     CommandSpec {
+        name: "sig-demo",
+        cap: cap::SPAWN,
+        cap_name: "SPAWN",
+        group: "Packages",
+        help: "package signing: verify a signed pkg, attenuate to the publisher ceiling, refuse tampered/revoked",
+    },
+    CommandSpec {
         name: "pkg-list",
         cap: cap::INSPECT,
         cap_name: "INSPECT",
@@ -5815,6 +5822,7 @@ fn dispatch(cmd: &str, arg: &str, plan: &KernelPlan, memory: &[MemoryRegion], he
         }
         "install" => install_command(plan, arg),
         "pkg-recv" => pkg::pkg_recv(plan),
+        "sig-demo" => pkg::sig_demo(plan),
         "pkg-list" => pkg::pkg_list(plan),
         "pkg-info" => pkg::pkg_info(plan, arg),
         "pkg-run" => pkg::pkg_run(plan, arg),

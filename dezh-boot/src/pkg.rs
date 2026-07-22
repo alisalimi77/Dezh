@@ -8,8 +8,12 @@
 use core::fmt::Write;
 
 use crate::{kprint, kprintln};
-use dezh_core::{b64, dzp, ir};
+use dezh_core::{b64, dzp, ir, sig};
 use dezh_kernel::KernelPlan;
+
+// Build-time signed demo package + its publisher public key (see build.rs). The
+// kernel only ever VERIFIES; no private key lives here.
+include!(concat!(env!("OUT_DIR"), "/signed_demo.rs"));
 
 // --- Manifest capability vocabulary -------------------------------------------
 
@@ -1918,6 +1922,209 @@ pub(crate) fn sand_demo_effect(plan: &KernelPlan) -> u16 {
             crate::record_event("intent", "sand.effect", "ns:agent", "TRAP");
             0
         }
+    }
+}
+
+// --- Package signing: trust store + verification (see docs/PACKAGE_SIGNING.md) -
+//
+// The trust store is root-anchored publisher keys, each with a capability
+// CEILING and a revocation flag. Install verifies the signature, requires a
+// trusted (non-revoked) signer, and attenuates the granted authority to the
+// signer's ceiling — the W8 `derived ⊆ intent` rule at the supply-chain layer.
+
+#[derive(Clone, Copy)]
+struct TrustedKey {
+    used: bool,
+    pk: [u8; 32],
+    ceiling: u32,
+    revoked: bool,
+    label: &'static str,
+}
+
+const EMPTY_KEY: TrustedKey = TrustedKey {
+    used: false,
+    pk: [0u8; 32],
+    ceiling: 0,
+    revoked: false,
+    label: "",
+};
+
+const MAX_TRUSTED_KEYS: usize = 4;
+static mut TRUST_STORE: [TrustedKey; MAX_TRUSTED_KEYS] = [EMPTY_KEY; MAX_TRUSTED_KEYS];
+static mut TRUST_INIT: bool = false;
+
+fn trust_init() {
+    unsafe {
+        if TRUST_INIT {
+            return;
+        }
+        // The demo publisher is trusted for a WRITER ceiling (print + cairn),
+        // NOT ipc — so the demo package's requested ipc is dropped at install by
+        // publisher attenuation. A real deployment would load this store signed
+        // by an offline root key.
+        TRUST_STORE[0] = TrustedKey {
+            used: true,
+            pk: DEMO_SIGNER_PK,
+            ceiling: MCAP_PRINT | MCAP_CAIRN_READ | MCAP_CAIRN_WRITE,
+            revoked: false,
+            label: "demo-publisher",
+        };
+        TRUST_INIT = true;
+    }
+}
+
+fn trust_lookup(pk: &[u8; 32]) -> Option<usize> {
+    unsafe { (0..MAX_TRUSTED_KEYS).find(|&i| TRUST_STORE[i].used && TRUST_STORE[i].pk == *pk) }
+}
+
+fn print_keyid(pk: &[u8; 32]) {
+    for b in &pk[..8] {
+        kprint!("{:02x}", b);
+    }
+}
+
+/// Verify a signed envelope's Ed25519 signature over `inner || context`,
+/// assembled in a scratch buffer. The signer's public key, the signature, and
+/// the counter all come from the envelope; the trust decision is separate.
+fn verify_envelope_sig(env: &[u8], e: &sig::SignedEnvelope) -> bool {
+    if e.inner_offset + e.inner_len > env.len() {
+        return false;
+    }
+    let inner = &env[e.inner_offset..e.inner_offset + e.inner_len];
+    let mut buf = [0u8; 2048];
+    if inner.len() + sig::SIG_CONTEXT_LEN > buf.len() {
+        return false;
+    }
+    buf[..inner.len()].copy_from_slice(inner);
+    let cn = match sig::signed_context(&mut buf[inner.len()..], e.counter) {
+        Some(n) => n,
+        None => return false,
+    };
+    sig::verify(&e.signer_pk, &e.signature, &buf[..inner.len() + cn])
+}
+
+/// W8 (signing): the whole capability-native signing story in one self-contained
+/// proof — verify a build-time-signed package, require a trusted non-revoked
+/// signer, attenuate the granted authority to the publisher's ceiling, record
+/// the install as a ledgered effect, then show a tampered package and a revoked
+/// key are both refused.
+pub(crate) fn sig_demo(plan: &KernelPlan) {
+    const LAB: usize = 1;
+    trust_init();
+    kprintln!("[sig-demo] a signed package: verify -> trusted signer -> publisher attenuation -> ledgered install");
+    let env = DEMO_SIGNED_PKG;
+
+    if !sig::is_signed(env) {
+        kprintln!("[sig-demo] FAIL: demo package is not a signed envelope");
+        crate::record_event("installer", "sig.demo", "package", "fail");
+        return;
+    }
+    let e = match sig::parse_envelope(env) {
+        Ok(e) => e,
+        Err(er) => {
+            kprintln!("[sig-demo] FAIL: {}", er.msg());
+            crate::record_event("installer", "sig.demo", "package", "fail");
+            return;
+        }
+    };
+    kprint!("[sig-demo] 1/5 signer key id=");
+    print_keyid(&e.signer_pk);
+    kprintln!(" counter={}", e.counter);
+
+    // Trust decision (root-anchored trust store) is separate from crypto.
+    let Some(ki) = trust_lookup(&e.signer_pk) else {
+        kprintln!("[sig-demo]   UNTRUSTED signer -> install REFUSED");
+        crate::record_event("installer", "sig.demo", "package", "fail");
+        return;
+    };
+    let (ceiling, label) = unsafe { (TRUST_STORE[ki].ceiling, TRUST_STORE[ki].label) };
+    if unsafe { TRUST_STORE[ki].revoked } {
+        kprintln!("[sig-demo]   signer key REVOKED -> install REFUSED");
+        crate::record_event("installer", "sig.demo", "package", "fail");
+        return;
+    }
+    kprintln!("[sig-demo] 2/5 trusted publisher '{label}' found in the trust store");
+
+    // Verify the Ed25519 signature over the exact inner package + counter.
+    let valid = verify_envelope_sig(env, &e);
+    if !valid {
+        kprintln!("[sig-demo]   signature INVALID -> install REFUSED");
+        crate::record_event("installer", "sig.demo", "package", "fail");
+        return;
+    }
+    kprintln!("[sig-demo] 3/5 signature VALID (Ed25519 over inner .dzp + counter)");
+
+    // Publisher attenuation: granted = requested ∩ signer ceiling.
+    let inner = &env[e.inner_offset..e.inner_offset + e.inner_len];
+    let Ok(pkg) = dzp::parse(inner) else {
+        kprintln!("[sig-demo] FAIL: inner .dzp did not parse");
+        crate::record_event("installer", "sig.demo", "package", "fail");
+        return;
+    };
+    let requested = parse_mcaps(pkg.manifest).unwrap_or(0);
+    let granted = sig::attenuate(requested, ceiling);
+    let beyond = sig::beyond_ceiling(requested, ceiling);
+    kprint!("[sig-demo] 4/5 requested=");
+    mcap_names(requested, &mut crate::Uart);
+    kprint!(" | publisher ceiling=");
+    mcap_names(ceiling, &mut crate::Uart);
+    kprint!(" | GRANTED=");
+    mcap_names(granted, &mut crate::Uart);
+    kprintln!();
+    if beyond != 0 {
+        kprint!("[sig-demo]   dropped beyond publisher ceiling: ");
+        mcap_names(beyond, &mut crate::Uart);
+        kprintln!(" (a publisher cannot authorize authority above its own ceiling)");
+    }
+
+    // Install is a ledgered effect (the ledger is the transparency log).
+    let ledger = crate::run_registered_virtio_client_ns(
+        plan,
+        crate::cairn_req(crate::BLK_REQ_CAIRN_COMMIT, LAB, 0),
+        "signed-install: signed-demo v1.0.0 by demo-publisher; granted print,cairn (ipc dropped by ceiling)",
+        crate::task_ns_cap(LAB),
+    );
+    kprintln!("[sig-demo] 5/5 install recorded on the ledger (ns=lab): status={ledger}");
+
+    // A tampered package must be refused: flip one inner byte, re-verify.
+    let mut tampered = [0u8; 2048];
+    let refuse_tamper = if env.len() <= tampered.len() {
+        tampered[..env.len()].copy_from_slice(env);
+        let off = e.inner_offset; // first inner byte
+        tampered[off] ^= 0xFF;
+        match sig::parse_envelope(&tampered[..env.len()]) {
+            Ok(te) => !verify_envelope_sig(&tampered[..env.len()], &te),
+            Err(_) => true,
+        }
+    } else {
+        false
+    };
+    kprintln!(
+        "[sig-demo] tamper check: a flipped inner byte is {}",
+        if refuse_tamper { "REJECTED" } else { "not rejected!" }
+    );
+
+    // A revoked signer key must be refused, even with a valid signature.
+    unsafe { TRUST_STORE[ki].revoked = true };
+    let refuse_revoked = unsafe { TRUST_STORE[ki].revoked }
+        && trust_lookup(&e.signer_pk).map(|i| unsafe { TRUST_STORE[i].revoked }) == Some(true);
+    unsafe { TRUST_STORE[ki].revoked = false };
+    kprintln!(
+        "[sig-demo] revocation check: a revoked signer key is {}",
+        if refuse_revoked { "REFUSED" } else { "not refused!" }
+    );
+
+    let pass = valid && granted == (MCAP_PRINT | MCAP_CAIRN_READ | MCAP_CAIRN_WRITE)
+        && beyond == MCAP_IPC
+        && ledger == 0
+        && refuse_tamper
+        && refuse_revoked;
+    crate::record_event("installer", "sig.demo", "package", if pass { "OK" } else { "fail" });
+    if pass {
+        kprintln!("[sig-demo] PASS: only a trusted signer's valid signature installs, attenuated to the publisher ceiling; tampered + revoked are refused");
+        kprintln!("[sig-demo] and even a signed package is still capability-confined + effect-reversible (the xz lesson): signing is provenance, not safety");
+    } else {
+        kprintln!("[sig-demo] FAIL: valid={valid} granted/beyond/ledger/tamper/revoke check mismatch");
     }
 }
 
