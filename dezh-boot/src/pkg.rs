@@ -1499,7 +1499,10 @@ fn print_ahd_kinds() {
     kprintln!();
 }
 
-const MAX_AHD: usize = 8;
+// Intent sessions are runtime-only (an Ahd is opened for a run, never persisted).
+// The cap is generous so a long console session / flagship narrative that opens
+// several intents in a row does not run out; ids keep incrementing regardless.
+const MAX_AHD: usize = 16;
 
 #[derive(Clone, Copy)]
 struct AhdSlot {

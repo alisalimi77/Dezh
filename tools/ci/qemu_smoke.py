@@ -394,6 +394,23 @@ def run_riscv64(qemu: str, kernel: Path) -> None:
                     "boundary: intent-derivation ceiling",
                 ],
             ),
+            # --- Flagship narrative (W8 P7): the whole night in one story ------
+            # A coding agent loose overnight under one intent: mixed effects
+            # across two namespaces, forecast + provenance in the morning, an
+            # honest rollback (retract / compensate / refuse-with-reason), and a
+            # contained escape. Collapses P1-P5 into a single command.
+            (
+                "overnight",
+                [
+                    "opened the agent's intent Ahd",
+                    "reversible=2 compensatable=1 irreversible=1 unknown=0 confidence=partial",
+                    "effect(s) attributed to intent Ahd",
+                    "reversible effects retracted=2 compensations performed=1 refused_irreversible=1",
+                    "kernel DENIED the out-of-intent Cairn write",
+                    "boundary: intent-derivation ceiling",
+                    "[overnight] PASS: the whole night is accounted for",
+                ],
+            ),
             ("halt", "halting."),
         ]
         cursor = session.wait_for("dezh> ")

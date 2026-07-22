@@ -3300,6 +3300,97 @@ fn run_redteam(plan: &KernelPlan) {
     }
 }
 
+/// W8 P7 flagship: the whole differentiator in one story — "leave a coding agent
+/// loose on your machine overnight." The agent runs under a single intent, makes
+/// a mission of mixed effects across two namespaces (reversible writes, a
+/// compensatable external action with a registered compensation, one irreversible
+/// external send), and also *tries to escape* its intent. In the morning the
+/// operator forecasts the rollback, sees the provenance, undoes the night
+/// honestly (retract, compensate, refuse-with-reason), and asks why the escape
+/// was denied. This collapses P1 (intent) + P2 (Sand) + P3 (mission/compensation/
+/// multi-ns) + P4 (adversary) + P5 (why-denied/Tbar) into a single narrative.
+fn run_overnight(plan: &KernelPlan) {
+    const LAB: usize = 1;
+    const CALC: usize = 2;
+    let derived = pkg::MCAP_PRINT | pkg::MCAP_CAIRN_READ | pkg::MCAP_CAIRN_WRITE;
+    let both = task_ns_cap(LAB) | task_ns_cap(CALC);
+    kprintln!("[overnight] you leave a coding agent loose overnight under ONE intent; in the morning you account for and undo its night");
+
+    let Some((id, _ceiling)) = pkg::open_intent("writer") else {
+        kprintln!("[overnight] FAIL: no free intent slot");
+        record_event("console", "overnight", "mission", "fail");
+        return;
+    };
+    kprintln!("[overnight] 1/6 opened the agent's intent Ahd#{id} (a writer ceiling) and turned it loose");
+
+    kprintln!("[overnight] 2/6 the agent's night: an irreversible deploy + two reversible writes (ns=lab), one compensatable external action (ns=calc)");
+    // ns=lab, bottom -> top: the irreversible external send FIRST so it sits
+    // below the reversible writes and blocks the ref from moving past it.
+    let e_irrev = run_registered_virtio_client_ns(
+        plan,
+        cairn_req_intent(BLK_REQ_CAIRN_COMMIT, LAB, id, derived, SAND_REV_IRREVERSIBLE),
+        "prod.deploy:web@v9 [modeled irreversible external send]",
+        task_ns_cap(LAB),
+    );
+    let e_r1 = run_registered_virtio_client_ns(
+        plan,
+        cairn_req_intent(BLK_REQ_CAIRN_COMMIT, LAB, id, derived, SAND_REV_REVERSIBLE),
+        "wrote build cache",
+        task_ns_cap(LAB),
+    );
+    let e_r2 = run_registered_virtio_client_ns(
+        plan,
+        cairn_req_intent(BLK_REQ_CAIRN_COMMIT, LAB, id, derived, SAND_REV_REVERSIBLE),
+        "updated changelog",
+        task_ns_cap(LAB),
+    );
+    // ns=calc: a compensatable external action shipping its inverse after 0x1f.
+    let e_comp = run_registered_virtio_client_ns(
+        plan,
+        cairn_req_intent(BLK_REQ_CAIRN_COMMIT, CALC, id, derived, SAND_REV_COMPENSATABLE),
+        "created api-key:tmp/42 [modeled compensatable]\u{1f}revoke api-key:tmp/42",
+        task_ns_cap(CALC),
+    );
+
+    kprintln!("[overnight] 3/6 morning: FORECAST the rollback before touching anything, and read the provenance");
+    let plan_st =
+        run_registered_virtio_client_ns(plan, sfar_req(BLK_REQ_SFAR_PLAN, LAB, id), "", both);
+    let tbar_st = run_registered_virtio_client_ns(plan, sfar_req(BLK_REQ_TBAR, LAB, id), "", both);
+
+    kprintln!("[overnight] 4/6 undo the night honestly: retract the reversible writes, run the compensation, REFUSE the irreversible deploy with a reason");
+    let rb_st =
+        run_registered_virtio_client_ns(plan, sfar_req(BLK_REQ_SFAR_ROLLBACK, LAB, id), "", both);
+
+    kprintln!("[overnight] 5/6 the agent also TRIED to escape its intent (a write beyond the ceiling); the kernel denied it");
+    let esc_ok = pkg::redteam_out_of_intent(plan);
+    record_event("overnight", "intent.derive", "cairn-write", "DENIED");
+
+    kprintln!("[overnight] 6/6 why was the escape denied? name the boundary:");
+    why_denied("");
+
+    let pass = e_irrev == 0
+        && e_r1 == 0
+        && e_r2 == 0
+        && e_comp == 0
+        && plan_st == 0
+        && tbar_st == 0
+        && rb_st == 0
+        && esc_ok;
+    record_event(
+        "console",
+        "overnight",
+        "mission",
+        if pass { "accounted" } else { "fail" },
+    );
+    if pass {
+        kprintln!("[overnight] PASS: the whole night is accounted for - reversibles undone, the compensatable action compensated, the irreversible deploy refused with a reason, and the escape contained");
+    } else {
+        kprintln!(
+            "[overnight] FAIL: effects={e_irrev},{e_r1},{e_r2},{e_comp} plan={plan_st} tbar={tbar_st} rollback={rb_st} escape_ok={esc_ok}"
+        );
+    }
+}
+
 fn run_bench_os() {
     kprintln!(
         "[bench-os] launching separate U-mode benchmark ELF ({} null syscalls)",
@@ -4776,6 +4867,13 @@ const COMMANDS: &[CommandSpec] = &[
         help: "W8 P5: the actor -> intent -> effect provenance graph for intent <ahd>",
     },
     CommandSpec {
+        name: "overnight",
+        cap: cap::SPAWN,
+        cap_name: "SPAWN",
+        group: "Effects",
+        help: "W8 P7 flagship: leave a coding agent loose overnight, then account for and undo its night",
+    },
+    CommandSpec {
         name: "pkg-remove",
         cap: cap::SPAWN,
         cap_name: "SPAWN",
@@ -5589,6 +5687,7 @@ fn dispatch(cmd: &str, arg: &str, plan: &KernelPlan, memory: &[MemoryRegion], he
         "redteam" => run_redteam(plan),
         "why-denied" => why_denied(arg),
         "tbar" => sfar_cmd(plan, BLK_REQ_TBAR, arg),
+        "overnight" => run_overnight(plan),
         "vblkd" => {
             kprintln!("[kernel] exercising registered virtio-blk daemon with IPC client");
             kprintln!("[kernel] daemon gets DEVICE+DMA+IPC; client gets IPC+DMA only (no MMIO)");

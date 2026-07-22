@@ -193,26 +193,34 @@ they structurally cannot — attributing and reversing a whole agent mission.
   irreversible external send + two reversible writes → forecast "partial" →
   rollback undoes the two writes and refuses the send ("already happened in the
   outside world"). CI proves the outcome and that the refused effect + its
-  provenance survive a reboot. **Remaining for a later slice:** a
-  `compensatable` effect with a *registered compensating action* (rollback runs
-  the compensation rather than refusing), and mission authority that spans every
-  namespace it touched (this slice gates on the demo's single `agent` namespace).
-- **The adversary (`redteam`).** A malicious agent that *tries to escape* —
-  cross-namespace read, raw MMIO write, capability forgery/amplification,
-  out-of-intent action, CPU monopoly — each stopped at a named boundary with
-  `why-denied`; system survives. Acceptance: every escape attempt reaches a
-  named denial in CI.
-- **Explainable denial + provenance.** `why-denied <last|id>`, `cap-tree` /
-  `cap-audit` / `component-info`, and **Tbar**, a queryable
-  `actor → intent → effect` provenance graph.
-- **Credibility layer.** Per-effect ledger overhead measured into BENCH.md
-  (D015); a documented head-to-head where gVisor/Firecracker/wasmtime cannot
-  cleanly undo a whole mission but Dezh can (Dezh side reproducible in CI); and
-  `docs/THREAT_MODEL.md` (trusted base, what is defended, what is explicitly
-  not — side channels, malicious kernel, hardware, no-IOMMU DMA).
-- **One flagship narrative.** All the above collapse into a single story —
-  "leave a coding agent loose on your machine overnight" — with a transcript
-  and a CI smoke leg.
+  provenance survive a reboot. **Slice 2 — DONE.** `comp-demo` proves a
+  `compensatable` effect with a *registered compensating action* is undone by
+  running and recording that action (`status=compensation` on the ledger) rather
+  than refused; `sfar-cross-demo` proves mission authority spans every namespace
+  a mission touched (a rollback holding authority over only one of two namespaces
+  is refused, naming the missing one).
+- **The adversary (`redteam`). — DONE (P4).** A malicious agent *tries to escape*
+  five ways — cross-namespace read, raw MMIO write, capability forgery/
+  amplification, out-of-intent action, CPU monopoly — each stopped at a named
+  boundary (storage capability check / hardware paging / kernel syscall check /
+  intent-derivation ceiling / preemptive scheduler); the system survives every
+  one. CI asserts all five named boundaries.
+- **Explainable denial + provenance. — DONE (P5).** `why-denied` walks the event
+  ring and names the boundary that produced the last denial; **Tbar** (`tbar
+  <ahd>`) renders the queryable `actor → intent → effect` provenance graph,
+  unforgeable because the intent id + derived cap are stamped kernel→daemon.
+- **Credibility layer. — DONE (P6).** Per-effect ledger overhead documented in
+  BENCH.md (D015: the enrichment is +12 header bytes in the same commit sector,
+  zero extra I/O); `docs/THREAT_MODEL.md` states the trusted base, what is
+  defended (with the mechanism for each), and the explicit non-goals (side
+  channels, malicious kernel, hardware, no-IOMMU DMA), plus the head-to-head
+  where a user-space sandbox cannot cleanly undo a whole mission but Dezh can
+  (Dezh side reproducible in CI).
+- **One flagship narrative. — DONE (P7).** `overnight` collapses P1–P5 into a
+  single story — "leave a coding agent loose on your machine overnight" — with a
+  captured transcript (`docs/demo-transcript-overnight.md`) and a CI smoke leg.
+
+**W8 is complete:** every part above is green in `tools/ci/qemu_smoke.py`.
 
 Post-MVP horizon (recorded, deliberately not started in W8): explicit system
 generations / time-travel, multi-agent attenuated sub-delegation with

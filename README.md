@@ -157,6 +157,14 @@ for scope and honest wording rules):
 | F2 | Cairn storage: versioned commits, capability-gated namespaces, rollback across reboot | **Reproducible today** (in CI) | `cairn-demo` console flow, exercised by [`tools/ci/qemu_smoke.py`](tools/ci/qemu_smoke.py) incl. a second-boot persistence phase |
 | F3 | Multi-ISA apps: the same Dezh-IR program on RISC-V and x86_64 kernels | **Reproducible today** (in CI) | x86_64 kernel installs and runs the byte-identical `.dzp` agent package; bytes pinned by a `dezh-core` test — [x86 smoke](tools/ci/qemu_smoke.py) |
 | F4 | Pol compatibility: unmodified static Linux binary, capability-gated | **Reproducible today** (in CI) | `linux-elf` runs a real static Linux/RISC-V ELF ([`linux-guest`](dezh-boot/linux-guest/)); the same bytes also run on real riscv64 Linux |
+| W8 | Intent → effect runtime: run an agent under one intent, account for every effect, and undo a whole mission honestly (retract / compensate / refuse-with-reason), with a contained escape | **Reproducible today** (in CI) | `overnight` collapses it into one story → [transcript](docs/demo-transcript-overnight.md); parts: `sfar-demo` `comp-demo` `sfar-cross-demo` `redteam` `why-denied` `tbar` in [`tools/ci/qemu_smoke.py`](tools/ci/qemu_smoke.py) |
+
+**The W8 intent/effect runtime is complete** — intent as the only path to
+authority (`Ahd`), the unbypassable effect ledger (`Sand`), honest whole-mission
+rollback with compensation and multi-namespace authority (`Sfar`), a five-escape
+adversary (`redteam`), and explainable denial + provenance (`why-denied` /
+`Tbar`). See the [threat model](docs/THREAT_MODEL.md) for what is and is not
+defended.
 
 ## System Shape
 
