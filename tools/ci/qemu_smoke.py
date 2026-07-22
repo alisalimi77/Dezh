@@ -419,6 +419,19 @@ def run_riscv64(qemu: str, kernel: Path) -> None:
                     "denial(s) recorded; each attributable to a named boundary",
                 ],
             ),
+            # --- Leases + revocation (W8): bounded / withdrawable intent --------
+            # A lease of 1 authorizes exactly one run then auto-revokes; a revoked
+            # intent authorizes nothing. Provenance outlives the authority.
+            (
+                "lease-demo",
+                [
+                    "with lease=1",
+                    "use #1 -> AUTHORIZED",
+                    "use #2 -> DENIED (lease exhausted, intent auto-revoked)",
+                    "use after revoke -> DENIED",
+                    "[lease-demo] PASS",
+                ],
+            ),
             ("halt", "halting."),
         ]
         cursor = session.wait_for("dezh> ")

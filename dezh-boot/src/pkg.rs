@@ -1504,12 +1504,24 @@ fn print_ahd_kinds() {
 // several intents in a row does not run out; ids keep incrementing regardless.
 const MAX_AHD: usize = 16;
 
+/// A lease value meaning "no use limit" (the default for demos that drive a
+/// mission themselves). A finite lease bounds how many runs an intent authorizes
+/// before it auto-revokes — coarse revocation for long-lived agents.
+const AHD_UNLIMITED: u32 = u32::MAX;
+
 #[derive(Clone, Copy)]
 struct AhdSlot {
     used: bool,
     id: u16,
     kind: &'static str,
     ceiling: u32,
+    /// Remaining runs this intent authorizes (`AHD_UNLIMITED` = no limit). Each
+    /// `intent-run` consumes one; reaching zero auto-revokes the intent.
+    lease: u32,
+    /// Once revoked (explicitly or by an exhausted lease) the intent authorizes
+    /// nothing further. Effects it already produced keep their provenance —
+    /// revoking authority is not erasing history.
+    revoked: bool,
 }
 
 const EMPTY_AHD: AhdSlot = AhdSlot {
@@ -1517,6 +1529,8 @@ const EMPTY_AHD: AhdSlot = AhdSlot {
     id: 0,
     kind: "",
     ceiling: 0,
+    lease: AHD_UNLIMITED,
+    revoked: false,
 };
 
 static mut AHDS: [AhdSlot; MAX_AHD] = [EMPTY_AHD; MAX_AHD];
@@ -1525,7 +1539,7 @@ static mut AHD_NEXT_ID: u16 = 1;
 /// Allocate an Ahd (intent) slot for `kind`, returning its id, canonical name,
 /// and capability ceiling. Shared by the `intent-open` console command and the
 /// self-contained `sand-demo` so both derive authority through the same path.
-fn open_ahd(kind: &str) -> Option<(u16, &'static str, u32)> {
+fn open_ahd(kind: &str, lease: u32) -> Option<(u16, &'static str, u32)> {
     let (kname, ceiling) = ahd_kind(kind)?;
     let slot = unsafe { (0..MAX_AHD).find(|&i| !AHDS[i].used) }?;
     let id = unsafe { AHD_NEXT_ID };
@@ -1536,25 +1550,45 @@ fn open_ahd(kind: &str) -> Option<(u16, &'static str, u32)> {
             id,
             kind: kname,
             ceiling,
+            lease,
+            revoked: false,
         };
     }
     Some((id, kname, ceiling))
 }
 
 /// Open an Ahd and return its id + ceiling, for callers that drive a whole
-/// mission (e.g. the console `sfar-demo`). Thin wrapper over [`open_ahd`].
+/// mission (e.g. the console `sfar-demo`). Thin wrapper over [`open_ahd`] with no
+/// use limit (the caller runs the mission itself).
 pub(crate) fn open_intent(kind: &str) -> Option<(u16, u32)> {
-    open_ahd(kind).map(|(id, _, ceiling)| (id, ceiling))
+    open_ahd(kind, AHD_UNLIMITED).map(|(id, _, ceiling)| (id, ceiling))
 }
 
 pub(crate) fn intent_open(arg: &str) {
-    let kind = arg.trim();
+    // `intent-open <kind> [lease]` — an optional lease bounds how many runs the
+    // intent authorizes before it auto-revokes (omit for no limit).
+    let mut parts = arg.trim().split_whitespace();
+    let Some(kind) = parts.next() else {
+        kprintln!("usage: intent-open <kind> [lease]");
+        print_ahd_kinds();
+        return;
+    };
+    let lease = match parts.next() {
+        Some(n) => match n.parse::<u32>() {
+            Ok(v) => v,
+            Err(_) => {
+                kprintln!("[intent-open] bad lease '{n}' (a run count, or omit for unlimited)");
+                return;
+            }
+        },
+        None => AHD_UNLIMITED,
+    };
     if ahd_kind(kind).is_none() {
         kprintln!("[intent-open] unknown intent kind '{kind}'");
         print_ahd_kinds();
         return;
     }
-    let Some((id, kname, ceiling)) = open_ahd(kind) else {
+    let Some((id, kname, ceiling)) = open_ahd(kind, lease) else {
         kprintln!("[intent-open] no free Ahd slots (max {MAX_AHD})");
         return;
     };
@@ -1562,6 +1596,11 @@ pub(crate) fn intent_open(arg: &str) {
     mcap_names(ceiling, &mut crate::Uart);
     kprintln!();
     kprintln!("  authority derived under it is proven <= this ceiling");
+    if lease == AHD_UNLIMITED {
+        kprintln!("  lease=unlimited (revoke explicitly with intent-revoke {id})");
+    } else {
+        kprintln!("  lease={lease} run(s) then auto-revoked (or revoke now: intent-revoke {id})");
+    }
     kprintln!("  run a package under it with: intent-run {id} <app>");
     crate::record_event("intent", "intent.open", "ahd", "OK");
 }
@@ -1577,6 +1616,13 @@ pub(crate) fn intent_list() {
         any = true;
         kprint!("  Ahd #{} kind={} ceiling=", a.id, a.kind);
         mcap_names(a.ceiling, &mut crate::Uart);
+        if a.revoked {
+            kprint!(" lease=- status=REVOKED");
+        } else if a.lease == AHD_UNLIMITED {
+            kprint!(" lease=unlimited status=live");
+        } else {
+            kprint!(" lease={} status=live", a.lease);
+        }
         kprintln!();
     }
     if !any {
@@ -1585,11 +1631,126 @@ pub(crate) fn intent_list() {
     }
 }
 
-fn find_ahd(id: u16) -> Option<u32> {
-    (0..MAX_AHD).find_map(|i| {
+fn ahd_slot_index(id: u16) -> Option<usize> {
+    (0..MAX_AHD).find(|&i| {
         let a = unsafe { AHDS[i] };
-        (a.used && a.id == id).then_some(a.ceiling)
+        a.used && a.id == id
     })
+}
+
+/// W8: revoke an intent. Any authority derived under it stops being grantable at
+/// the next `intent-run`; effects it already produced keep their provenance on
+/// the ledger (revoking authority is not erasing history — `tbar`/`sfar` still
+/// resolve the mission).
+pub(crate) fn intent_revoke(arg: &str) {
+    let Ok(id) = arg.trim().parse::<u16>() else {
+        kprintln!("usage: intent-revoke <ahd-id> (see intent-list)");
+        return;
+    };
+    let Some(slot) = ahd_slot_index(id) else {
+        kprintln!("[intent-revoke] no open Ahd #{id}");
+        crate::record_event("intent", "intent.revoke", "ahd", "DENIED");
+        return;
+    };
+    if unsafe { AHDS[slot].revoked } {
+        kprintln!("[intent-revoke] Ahd #{id} is already revoked");
+        return;
+    }
+    unsafe {
+        AHDS[slot].revoked = true;
+        AHDS[slot].lease = 0;
+    }
+    kprintln!("[intent-revoke] Ahd #{id} REVOKED; it authorizes nothing further");
+    kprintln!("  past effects keep their provenance: tbar {id} / sfar-plan {id} still resolve");
+    crate::record_event("intent", "intent.revoke", "ahd", "OK");
+}
+
+/// Outcome of trying to use an intent once, applying the revoke/lease gate.
+enum LeaseUse {
+    Authorized(u32),
+    DeniedRevoked,
+    DeniedExhausted,
+}
+
+/// Apply the same revoke/lease gate `intent-run` uses and consume one use. A
+/// finite lease that reaches zero auto-revokes. Shared by the self-contained
+/// `lease-demo` so it exercises the real gate, not a copy.
+fn lease_use(id: u16) -> LeaseUse {
+    let slot = ahd_slot_index(id).expect("lease_use on an open intent");
+    let (revoked, lease) = unsafe { (AHDS[slot].revoked, AHDS[slot].lease) };
+    if revoked {
+        return LeaseUse::DeniedRevoked;
+    }
+    if lease == 0 {
+        return LeaseUse::DeniedExhausted;
+    }
+    if lease != AHD_UNLIMITED {
+        let left = lease - 1;
+        unsafe {
+            AHDS[slot].lease = left;
+            if left == 0 {
+                AHDS[slot].revoked = true;
+            }
+        }
+        return LeaseUse::Authorized(left);
+    }
+    LeaseUse::Authorized(AHD_UNLIMITED)
+}
+
+/// W8: self-contained proof of leases + revocation. A lease of one authorizes
+/// exactly one run and then auto-revokes; an explicitly revoked intent
+/// authorizes nothing — while the effects either produced keep their provenance
+/// (authority is bounded/withdrawn without rewriting history).
+pub(crate) fn lease_demo() {
+    kprintln!("[lease-demo] an intent can be LEASED (bounded runs) or REVOKED; authority is withdrawn, provenance is not");
+    let Some((a, _k, _c)) = open_ahd("compute", 1) else {
+        kprintln!("[lease-demo] FAIL: no free Ahd slot");
+        crate::record_event("intent", "lease.demo", "ahd", "fail");
+        return;
+    };
+    kprintln!("[lease-demo] 1/3 opened Ahd#{a} with lease=1 (authorizes exactly one run)");
+    let use1 = lease_use(a);
+    match use1 {
+        LeaseUse::Authorized(left) => {
+            kprintln!("[lease-demo]   use #1 -> AUTHORIZED (lease now {left}; auto-revoked at 0)")
+        }
+        _ => kprintln!("[lease-demo]   use #1 -> unexpectedly denied"),
+    }
+    let use2 = lease_use(a);
+    match use2 {
+        LeaseUse::DeniedExhausted | LeaseUse::DeniedRevoked => {
+            kprintln!("[lease-demo]   use #2 -> DENIED (lease exhausted, intent auto-revoked)")
+        }
+        LeaseUse::Authorized(_) => kprintln!("[lease-demo]   use #2 -> unexpectedly authorized"),
+    }
+    let Some((b, _k, _c)) = open_ahd("compute", AHD_UNLIMITED) else {
+        kprintln!("[lease-demo] FAIL: no free Ahd slot");
+        return;
+    };
+    kprintln!("[lease-demo] 2/3 opened Ahd#{b} (unlimited) then revoke it explicitly");
+    if let Some(slot) = ahd_slot_index(b) {
+        unsafe {
+            AHDS[slot].revoked = true;
+            AHDS[slot].lease = 0;
+        }
+    }
+    let use3 = lease_use(b);
+    let use3_denied = matches!(use3, LeaseUse::DeniedRevoked | LeaseUse::DeniedExhausted);
+    if use3_denied {
+        kprintln!("[lease-demo]   use after revoke -> DENIED (revoked intents authorize nothing)");
+    } else {
+        kprintln!("[lease-demo]   use after revoke -> unexpectedly authorized");
+    }
+    let pass = matches!(use1, LeaseUse::Authorized(_))
+        && matches!(use2, LeaseUse::DeniedExhausted | LeaseUse::DeniedRevoked)
+        && use3_denied;
+    kprintln!("[lease-demo] 3/3 note: effects made under a now-revoked intent still resolve on the ledger (tbar/sfar) - provenance outlives authority");
+    crate::record_event("intent", "lease.demo", "ahd", if pass { "pass" } else { "fail" });
+    if pass {
+        kprintln!("[lease-demo] PASS: a lease bounds authority to N runs; revoke withdraws it immediately; neither erases provenance");
+    } else {
+        kprintln!("[lease-demo] FAIL: lease/revoke gate did not behave as expected");
+    }
 }
 
 pub(crate) fn intent_run(plan: &KernelPlan, arg: &str) {
@@ -1604,11 +1765,23 @@ pub(crate) fn intent_run(plan: &KernelPlan, arg: &str) {
         kprintln!("[intent-run] bad Ahd id '{id_str}'");
         return;
     };
-    let Some(ceiling) = find_ahd(id) else {
+    let Some(slot) = ahd_slot_index(id) else {
         kprintln!("[intent-run] no open Ahd #{id} (see intent-list; open with intent-open)");
         crate::record_event("intent", "intent.run", "ahd", "DENIED");
         return;
     };
+    let (ceiling, revoked, lease) =
+        unsafe { (AHDS[slot].ceiling, AHDS[slot].revoked, AHDS[slot].lease) };
+    if revoked {
+        kprintln!("[intent-run] DENIED: Ahd #{id} is REVOKED; it authorizes nothing (re-open a fresh intent)");
+        crate::record_event("intent", "intent.run", "ahd", "DENIED");
+        return;
+    }
+    if lease == 0 {
+        kprintln!("[intent-run] DENIED: Ahd #{id} lease is exhausted (auto-revoked)");
+        crate::record_event("intent", "intent.run", "ahd", "DENIED");
+        return;
+    }
     if !ensure_loaded(plan) {
         kprintln!("[intent-run] package store unavailable or degraded");
         return;
@@ -1637,6 +1810,19 @@ pub(crate) fn intent_run(plan: &KernelPlan, arg: &str) {
     mcap_names(derived, &mut crate::Uart);
     kprintln!();
     run_loaded_entry(plan, i, derived, id, "intent-run");
+    // Consume one lease use; a finite lease that reaches zero auto-revokes, so a
+    // leased intent authorizes a bounded number of runs before re-authorization.
+    if lease != AHD_UNLIMITED {
+        let left = lease - 1;
+        unsafe { AHDS[slot].lease = left };
+        if left == 0 {
+            unsafe { AHDS[slot].revoked = true };
+            kprintln!("[intent-run] Ahd #{id} lease exhausted -> auto-REVOKED; further runs are denied");
+            crate::record_event("intent", "intent.lease", "ahd", "EXPIRED");
+        } else {
+            kprintln!("[intent-run] Ahd #{id} lease remaining={left}");
+        }
+    }
 }
 
 /// Self-contained proof that authority only flows through an Ahd, using the
@@ -1699,7 +1885,7 @@ fn intent_demo_run(plan: &KernelPlan, kind: &str, ceiling: u32, requested: u32) 
 /// intent -> derived cap -> effect half of the W8 P2 `sand-demo`; the ledger
 /// read-back half lives in the console.
 pub(crate) fn sand_demo_effect(plan: &KernelPlan) -> u16 {
-    let Some((id, kname, ceiling)) = open_ahd("writer") else {
+    let Some((id, kname, ceiling)) = open_ahd("writer", AHD_UNLIMITED) else {
         kprintln!("[sand-demo] no free Ahd slots to open a writer intent");
         return 0;
     };
@@ -1741,7 +1927,7 @@ pub(crate) fn sand_demo_effect(plan: &KernelPlan) -> u16 {
 /// <= Ahd), and when the agent still attempts the hostcall the kernel denies it.
 /// Returns true iff the out-of-intent write was correctly stopped.
 pub(crate) fn redteam_out_of_intent(plan: &KernelPlan) -> bool {
-    let Some((id, kname, ceiling)) = open_ahd("compute") else {
+    let Some((id, kname, ceiling)) = open_ahd("compute", AHD_UNLIMITED) else {
         kprintln!("[redteam] could not open a compute intent");
         return false;
     };

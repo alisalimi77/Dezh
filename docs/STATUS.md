@@ -39,9 +39,15 @@ true today, so a reviewer never has to guess.
 - **Pol is a small syscall subset.** `write`, `exit`/`exit_group` are serviced;
   everything else returns a clean `-ENOSYS`. No threads, no dynamic linking, no
   file system. It proves the mechanism, not broad Linux compatibility.
-- **No runtime revocation** of an already-delegated, still-in-use capability.
-  Attenuation, task-death, and rollback cover the common cases; a lease/generation
-  scheme is designed but not built. See [SECURITY_MODEL.md](SECURITY_MODEL.md).
+- **Intent-level leases + revocation exist; in-flight capability clawback does
+  not.** An intent (`Ahd`) can be opened with a **lease** (a bounded run count
+  that auto-revokes on exhaustion) or revoked explicitly (`intent-revoke`); a
+  revoked or exhausted intent authorizes nothing further, while the effects it
+  already produced keep their provenance (`tbar`/`sfar` still resolve). This
+  gives coarse, honest revocation for long-lived agents (`lease-demo`). What is
+  still **not** done is clawing back a capability already handed to and running
+  inside another task mid-execution; attenuation, task-death, and rollback cover
+  the common cases. See [SECURITY_MODEL.md](SECURITY_MODEL.md).
 - **No IOMMU.** DMA isolation for the block daemon is a bounce-window
   convention, not hardware-enforced. Accelerator/DMA isolation (D017) is a
   hypothesis, not implemented.
