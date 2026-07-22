@@ -3578,6 +3578,50 @@ fn run_cap_demo() {
     }
 }
 
+/// Confidentiality / anti-exfiltration demo (DIFC, the #4 gap): reading a secret
+/// raises the actor's taint, after which it may not write to a less-secret sink —
+/// so a granted secret cannot be leaked. Model lives in `dezh_core::difc`
+/// (host-tested); this drives it in the kernel. Honest scope: this is the DIFC
+/// *primitive*; enforcing it across every real channel (esp. networking) is the
+/// remaining work.
+fn run_exfil_demo() {
+    use dezh_core::difc::{Taint, PUBLIC};
+    const SECRET_VAULT: u32 = 1 << 0;
+    fn verdict(ok: bool) -> &'static str {
+        if ok {
+            "ALLOWED"
+        } else {
+            "DENIED (would leak a secret to a lower sink)"
+        }
+    }
+
+    kprintln!("[exfil-demo] confidentiality: reading a secret taints the actor; a tainted actor cannot write to a public sink");
+    let mut agent = Taint::new();
+
+    kprintln!("[exfil-demo] 1/3 agent (untainted) reads ns=note (public), then sends to a public sink:");
+    agent.observe(PUBLIC);
+    let public_after_public = agent.may_flow_to(PUBLIC);
+    kprintln!("[exfil-demo]   send public data -> public sink: {}", verdict(public_after_public));
+
+    kprintln!("[exfil-demo] 2/3 agent reads ns=vault (SECRET) -> its taint rises");
+    agent.observe(SECRET_VAULT);
+    let to_secret = agent.may_flow_to(SECRET_VAULT);
+    kprintln!("[exfil-demo]   send to a SECRET sink (write-up/equal): {}", verdict(to_secret));
+
+    kprintln!("[exfil-demo] 3/3 the exfiltration attempt: agent tries to send to a PUBLIC sink");
+    let exfil = agent.may_flow_to(PUBLIC);
+    kprintln!("[exfil-demo]   send secret-tainted data -> public sink: {}", verdict(exfil));
+
+    let pass = public_after_public && to_secret && !exfil;
+    record_event("kernel", "exfil.demo", "confidentiality", if pass { "OK" } else { "fail" });
+    if pass {
+        kprintln!("[exfil-demo] PASS: once tainted by a secret, the agent cannot write down to a public sink -- exfiltration is refused by information flow, not by rollback");
+        kprintln!("[exfil-demo] this is the confidentiality primitive; the effect ledger handles integrity, DIFC handles leakage");
+    } else {
+        kprintln!("[exfil-demo] FAIL: public={public_after_public} secret={to_secret} exfil_blocked={}", !exfil);
+    }
+}
+
 fn run_bench_os() {
     kprintln!(
         "[bench-os] launching separate U-mode benchmark ELF ({} null syscalls)",
@@ -5005,6 +5049,13 @@ const COMMANDS: &[CommandSpec] = &[
         help: "proof: revoke a live namespace capability at runtime; the storage path refuses until re-granted",
     },
     CommandSpec {
+        name: "exfil-demo",
+        cap: cap::INSPECT,
+        cap_name: "INSPECT",
+        group: "Effects",
+        help: "confidentiality (DIFC): reading a secret taints an agent so it cannot leak it to a public sink",
+    },
+    CommandSpec {
         name: "intent-list",
         cap: cap::INSPECT,
         cap_name: "INSPECT",
@@ -6032,6 +6083,7 @@ fn dispatch(cmd: &str, arg: &str, plan: &KernelPlan, memory: &[MemoryRegion], he
         "ns-revoke" => ns_revoke(arg),
         "ns-grant" => ns_grant(arg),
         "nsrevoke-demo" => run_nsrevoke_demo(plan),
+        "exfil-demo" => run_exfil_demo(),
         "intent-list" => pkg::intent_list(),
         "intent-run" => pkg::intent_run(plan, arg),
         "intent-demo" => pkg::intent_demo(plan),

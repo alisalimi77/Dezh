@@ -9,6 +9,7 @@
 #![no_std]
 
 pub mod b64;
+pub mod difc;
 pub mod dzp;
 pub mod ir;
 pub mod ocap;

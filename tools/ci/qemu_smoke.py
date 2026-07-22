@@ -475,6 +475,17 @@ def run_riscv64(qemu: str, kernel: Path) -> None:
                     "[nsrevoke-demo] PASS",
                 ],
             ),
+            # --- Confidentiality / anti-exfiltration (DIFC) --------------------
+            # Reading a secret taints the agent so it can no longer write to a
+            # public sink - the exfiltration defense the effect ledger cannot give.
+            (
+                "exfil-demo",
+                [
+                    "agent reads ns=vault (SECRET) -> its taint rises",
+                    "send secret-tainted data -> public sink: DENIED (would leak a secret to a lower sink)",
+                    "[exfil-demo] PASS",
+                ],
+            ),
             ("halt", "halting."),
         ]
         cursor = session.wait_for("dezh> ")

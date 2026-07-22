@@ -72,11 +72,14 @@ true today, so a reviewer never has to guess.
   per-object revocation and an attenuated delegation graph), but the live IPC /
   Cairn plumbing has **not** been migrated onto it yet — that migration is the
   single largest planned change. See [SECURITY_MODEL.md](SECURITY_MODEL.md).
-- **Confidentiality is read-access control only — no exfiltration defense.** An
-  agent cannot read what it was not granted, but nothing stops it from leaking
-  what it *was* granted (no information-flow control). Integrity + attribution
-  are strong; confidentiality of already-granted data is weak. See
-  [THREAT_MODEL.md](THREAT_MODEL.md) §5.
+- **Confidentiality: the DIFC primitive exists; pervasive enforcement does not.**
+  Read access is capability-gated, and the information-flow-control primitive is
+  now built (`dezh_core::difc` + the `exfil-demo`: reading a secret taints the
+  agent so it cannot write down to a public sink — the exfiltration defense the
+  effect ledger cannot give). What is not done is enforcing that taint across
+  every real channel — storage, IPC, and networking (which does not exist yet).
+  Integrity + attribution are strong; confidentiality has the mechanism but not
+  yet end-to-end enforcement. See [THREAT_MODEL.md](THREAT_MODEL.md) §5.
 - **W8 effect-runtime honesty.** External effects (`email.send`, `prod.deploy`,
   a compensatable `api-key`) are **modeled**, not wired to real connectors — the
   point proven is the *mechanism* (attribution, honest rollback, compensation),
