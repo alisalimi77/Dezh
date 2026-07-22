@@ -51,13 +51,16 @@ true today, so a reviewer never has to guess.
 - **No IOMMU.** DMA isolation for the block daemon is a bounce-window
   convention, not hardware-enforced. Accelerator/DMA isolation (D017) is a
   hypothesis, not implemented.
-- **Unsigned packages — a known structural gap, not just missing polish.** `.dzp`
-  packages are CRC-checked and manifest-verified, not cryptographically signed.
-  For a system whose thesis is "no authority without explicit provenance," an
-  unsigned package is a real tension: install-time provenance is currently
-  operator trust + checksum, not a verified signature. Signed manifests
-  (provenance of *who authored the authority a package requests*) are the first
-  item on the hardening roadmap, ahead of broad features.
+- **Package signing — the mechanism is built; the distribution layer is not.**
+  `.dzp` packages can be wrapped in a signed `DZSP` envelope whose Ed25519
+  signature binds the *authority* the package requests, and the kernel verifies
+  it against a root-anchored trust store, attenuating the grant to the
+  publisher's ceiling (`granted = requested ∩ ceiling`) and refusing tampered or
+  revoked-key packages — proven end to end by `sig-demo` (see
+  [PACKAGE_SIGNING.md](PACKAGE_SIGNING.md)). What is **not** done yet: a stand-
+  alone developer signing CLI, a root-signed trust store loaded from disk with
+  key rotation (today it is kernel-embedded), and verifying packages on the live
+  `pkg-recv` upload path. No online PKI / certificate-transparency service.
 - No production installer, no SMP, no side-channel hardening, no formal
   verification.
 - **W8 effect-runtime honesty.** External effects (`email.send`, `prod.deploy`,

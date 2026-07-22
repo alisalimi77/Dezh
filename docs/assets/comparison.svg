@@ -96,9 +96,9 @@
 <text x="586.0" y="455.0" fill="#3fb950" font-size="18" font-weight="700" text-anchor="middle">✔</text>
 <text x="678.0" y="455.0" fill="#3fb950" font-size="18" font-weight="700" text-anchor="middle">✔</text>
 <text x="770.0" y="455.0" fill="#f85149" font-size="18" font-weight="700" text-anchor="middle">✗</text>
-<text x="24" y="488.0" fill="#e6edf3" font-size="13">Signed packages</text>
+<text x="24" y="488.0" fill="#e6edf3" font-size="13">Signed packages (+ publisher attenuation)</text>
 <rect x="356" y="466" width="92" height="34" fill="#1f6feb" opacity="0.10"/>
-<text x="402.0" y="489.0" fill="#f85149" font-size="18" font-weight="700" text-anchor="middle">✗</text>
+<text x="402.0" y="489.0" fill="#3fb950" font-size="18" font-weight="700" text-anchor="middle">✔</text>
 <text x="494.0" y="489.0" fill="#f85149" font-size="18" font-weight="700" text-anchor="middle">✗</text>
 <text x="586.0" y="489.0" fill="#d29922" font-size="18" font-weight="700" text-anchor="middle">~</text>
 <text x="678.0" y="489.0" fill="#3fb950" font-size="18" font-weight="700" text-anchor="middle">✔</text>

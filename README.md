@@ -111,11 +111,14 @@ mean the same thing on any backend. See
   <img src="docs/assets/comparison.svg" alt="Honest capability-comparison matrix: Dezh vs seL4, Genode, Fuchsia, gVisor" width="820">
 </p>
 
-The matrix is deliberately honest: Dezh concedes formal verification to seL4,
-IOMMU-enforced DMA to Genode/Fuchsia, and signed packages to Fuchsia. What it
-uniquely holds is the **effect / mission / intent / agent** row group — the axis
-this project is about. Full lineage and per-system detail in
-[Related Work and Novelty](docs/RELATED_WORK.md).
+The matrix is deliberately honest: Dezh concedes formal verification to seL4 and
+IOMMU-enforced DMA to Genode/Fuchsia. What it uniquely holds is the **effect /
+mission / intent / agent** row group — the axis this project is about — and
+package signing here is capability-native: a signature binds the *authority* a
+package requests, and a publisher key can only authorize capabilities within its
+own ceiling (`granted = requested ∩ signer_ceiling`). Full lineage and
+per-system detail in [Related Work and Novelty](docs/RELATED_WORK.md); the
+signing design in [Package Signing](docs/PACKAGE_SIGNING.md).
 
 ```mermaid
 flowchart LR

@@ -132,18 +132,31 @@ substrate has no ambient authority.**
 
 ## 8. Implementation phases
 
-- **P1 — crypto core.** Ed25519 verify via the audited RustCrypto crate, wrapped
-  in `dezh-core`, host-tested (known-answer vectors), building for the bare-metal
-  target. *No hand-rolled crypto.*
-- **P2 — signed `.dzp`.** The `SIG_MSG` canonicalization + an appended signature
-  block; an SDK signing tool; the packer/parser round-trip pinned by a test.
-- **P3 — kernel enforcement.** Trust store (root-anchored publisher keys +
-  ceilings + revocation), install-time verify, `granted = requested ∩ ceiling`,
-  install-as-Sand-effect, a `sig-demo` (a good signature installs attenuated; a
-  tampered payload/manifest is rejected; a beyond-ceiling request is attenuated;
-  a revoked key is refused), and CI legs.
+- **P1 — crypto core. DONE.** Ed25519 verify via the reputable, zero-dependency,
+  `no_std` `ed25519-compact` crate, wrapped in `dezh-core::sig`; host-tested;
+  builds for both bare-metal targets. `attenuate`/`beyond_ceiling` are the
+  publisher-ceiling algebra, proved a subset exhaustively over the 8-bit space.
+  *No hand-rolled crypto.*
+- **P2 — signed `.dzp`. DONE.** The `DZSP` envelope wraps an unsigned inner
+  `.dzp` (so the core format and F3 byte-pinning are untouched); the signed
+  message is `inner || "DZSIG1" || counter`; `parse_envelope`/`pack_envelope` with
+  a full sign→pack→parse→verify round-trip test.
+- **P3 — kernel enforcement. DONE.** A build-time signer (`build.rs`, fixed seed,
+  deterministic) embeds a signed demo package + its publisher key; the kernel
+  trust store holds root-anchored publisher keys with ceilings + revocation;
+  `sig-demo` verifies the signature, requires a trusted non-revoked signer,
+  attenuates `granted = requested ∩ ceiling` (the demo's `ipc` is dropped),
+  records the install as a ledgered Sand effect, and refuses a tampered package
+  and a revoked key. A CI leg asserts all of it.
 
 Each phase is a separate, CI-green commit, in the disciplined style of W8.
+
+**Still open (honest):** a stand-alone developer signing CLI (today only the
+build-time signer exists); a *root-signed* trust store loaded from disk with key
+rotation (today the store is kernel-embedded); and wiring signature enforcement
+into the live `pkg-recv` install path so uploaded packages are verified too
+(today `sig-demo` proves the mechanism end to end on an embedded package). These
+are additive; the mechanism and the capability-native attenuation are built.
 
 ### Explicit non-goals (honest scope)
 
