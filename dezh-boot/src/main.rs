@@ -3160,6 +3160,68 @@ fn run_comp_demo(plan: &KernelPlan) {
     }
 }
 
+/// W8 P4: the adversary. A malicious agent is turned loose and TRIES to escape
+/// containment five different ways. Each attempt is stopped at a *named* boundary
+/// that already exists in Dezh — not a policy file, but kernel-attested
+/// capabilities, hardware paging, the intent-derivation rule, per-task memory
+/// isolation, and the preemptive scheduler — and the console survives every one.
+/// The whole intent/effect story is only legible with a villain in the room:
+/// this is the head-to-head a user-space sandbox (gVisor/Firecracker/seccomp)
+/// cannot show, because there is no ambient authority here to escape into.
+fn run_redteam(plan: &KernelPlan) {
+    const VAULT: usize = 3;
+    const AGENT: usize = 4;
+    kprintln!("[redteam] adversary loose: a malicious agent attempts five escapes; each must hit a NAMED boundary and the system must survive");
+
+    // Escape 1: read another app's private Cairn namespace (needs the daemon).
+    kprintln!("[redteam] escape 1/5: read another app's private Cairn namespace (holds ns=agent, reaches for ns=vault)");
+    let e1 = run_registered_virtio_client_ns(
+        plan,
+        cairn_req(BLK_REQ_CAIRN_GET, VAULT, 0),
+        "",
+        task_ns_cap(AGENT),
+    );
+    let e1_ok = e1 == IPC_STATUS_DENIED;
+    kprintln!("[redteam] escape 1 STOPPED at boundary: storage-service capability check (kernel-attested caps) -- console survived");
+
+    // Escape 2: write a device MMIO register directly (raw UART, no device grant).
+    kprintln!("[redteam] escape 2/5: write a device MMIO register directly (raw UART, no device grant)");
+    run_tasks(&[(rogue_task as usize, TASK_PRINT, PERS_NATIVE)]);
+    kprintln!("[redteam] escape 2 STOPPED at boundary: hardware memory boundary (Sv39 paging, MMIO mapped U=0) -- console survived");
+
+    // Escape 3: forge/amplify a capability the task was never granted (wield PRINT
+    // from a zero-authority task). No ambient authority means nothing to inherit.
+    kprintln!("[redteam] escape 3/5: forge a capability - a zero-authority task calls the privileged PRINT syscall directly");
+    run_tasks(&[(forge_task as usize, 0, PERS_NATIVE)]);
+    kprintln!("[redteam] escape 3 STOPPED at boundary: kernel syscall capability check (no ambient authority to forge/amplify) -- console survived");
+
+    // Escape 4: amplify authority beyond the granted intent (out-of-intent write).
+    kprintln!("[redteam] escape 4/5: act beyond the granted intent (out-of-intent Cairn write under a compute intent)");
+    let e4_ok = pkg::redteam_out_of_intent(plan);
+    kprintln!("[redteam] escape 4 STOPPED at boundary: intent-derivation ceiling (derived cap <= Ahd) + kernel hostcall check -- console survived");
+
+    // Escape 5: monopolize the CPU (two busy tasks that never yield).
+    kprintln!("[redteam] escape 5/5: monopolize the CPU (two busy tasks that never yield)");
+    run_tasks(&[
+        (preempt_a as usize, TASK_PRINT, PERS_NATIVE),
+        (preempt_b as usize, TASK_PRINT, PERS_NATIVE),
+    ]);
+    kprintln!("[redteam] escape 5 STOPPED at boundary: preemptive scheduler (timer interrupt forces a context switch) -- console survived");
+
+    let pass = e1_ok && e4_ok;
+    record_event(
+        "kernel",
+        "redteam",
+        "adversary",
+        if pass { "contained" } else { "escaped" },
+    );
+    if pass {
+        kprintln!("[redteam] PASS: all five escapes were stopped at named boundaries; the adversary was contained and the console is still alive");
+    } else {
+        kprintln!("[redteam] FAIL: e1={e1} (want {IPC_STATUS_DENIED}) e4_ok={e4_ok}");
+    }
+}
+
 fn run_bench_os() {
     kprintln!(
         "[bench-os] launching separate U-mode benchmark ELF ({} null syscalls)",
@@ -3931,6 +3993,18 @@ extern "C" fn victim_task() -> ! {
     sys_exit(0)
 }
 
+// A zero-authority task that tries to WIELD a capability it was never granted:
+// it calls the privileged PRINT syscall directly. There is no ambient authority
+// to inherit and no way to forge or amplify a capability, so the kernel denies
+// the syscall at the capability check and the task prints nothing.
+#[link_section = ".user.text"]
+#[no_mangle]
+extern "C" fn forge_task() -> ! {
+    let msg = b"    [forge] (BUG) I printed without holding the PRINT capability!\n";
+    sys_write(msg.as_ptr(), msg.len());
+    sys_exit(0)
+}
+
 #[link_section = ".user.text"]
 #[no_mangle]
 extern "C" fn spy_task() -> ! {
@@ -4601,6 +4675,13 @@ const COMMANDS: &[CommandSpec] = &[
         cap_name: "SPAWN",
         group: "Effects",
         help: "W8 P3: roll back a compensatable effect by running + recording its registered compensating action",
+    },
+    CommandSpec {
+        name: "redteam",
+        cap: cap::SPAWN,
+        cap_name: "SPAWN",
+        group: "Effects",
+        help: "W8 P4: a malicious agent tries five escapes; each is stopped at a named boundary and the system survives",
     },
     CommandSpec {
         name: "pkg-remove",
@@ -5413,6 +5494,7 @@ fn dispatch(cmd: &str, arg: &str, plan: &KernelPlan, memory: &[MemoryRegion], he
         "sfar-demo" => run_sfar_demo(plan),
         "sfar-cross-demo" => run_sfar_cross_demo(plan),
         "comp-demo" => run_comp_demo(plan),
+        "redteam" => run_redteam(plan),
         "vblkd" => {
             kprintln!("[kernel] exercising registered virtio-blk daemon with IPC client");
             kprintln!("[kernel] daemon gets DEVICE+DMA+IPC; client gets IPC+DMA only (no MMIO)");

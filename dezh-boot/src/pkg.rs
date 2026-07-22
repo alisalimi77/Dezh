@@ -1732,6 +1732,61 @@ pub(crate) fn sand_demo_effect(plan: &KernelPlan) -> u16 {
     }
 }
 
+/// redteam escape (W8 P4): a malicious agent under a `compute` intent tries to
+/// AMPLIFY its authority by writing to Cairn — beyond what the intent grants.
+/// The intent-derivation ceiling drops the write capability (derived cap proven
+/// <= Ahd), and when the agent still attempts the hostcall the kernel denies it.
+/// Returns true iff the out-of-intent write was correctly stopped.
+pub(crate) fn redteam_out_of_intent(plan: &KernelPlan) -> bool {
+    let Some((id, kname, ceiling)) = open_ahd("compute") else {
+        kprintln!("[redteam] could not open a compute intent");
+        return false;
+    };
+    let requested = MCAP_PRINT | MCAP_CAIRN_READ | MCAP_CAIRN_WRITE;
+    let derived = requested & ceiling;
+    let beyond = requested & !ceiling;
+    kprint!("[redteam] agent under Ahd#{id} kind={kname} requests=");
+    mcap_names(requested, &mut crate::Uart);
+    kprintln!();
+    if beyond != 0 {
+        kprint!("[redteam] beyond-intent dropped by the derivation ceiling: ");
+        mcap_names(beyond, &mut crate::Uart);
+        kprintln!(" (derived cap proven <= Ahd)");
+    }
+    // The Cairn binding follows the DERIVED caps: with no write/read cap there
+    // is no namespace to reach — authority never exceeds the intent.
+    let cairn = if derived & (MCAP_CAIRN_READ | MCAP_CAIRN_WRITE) != 0 {
+        crate::cairn_ns_id("agent").map(|ns| (plan, ns))
+    } else {
+        None
+    };
+    let mut buf = [0u8; 512];
+    let prog = ir::demo_cairn(&mut buf);
+    let mut host = crate::KHost {
+        caps: ir_caps_from(derived),
+        cairn,
+        intent: id,
+        derived,
+    };
+    match ir::run(prog, &mut host) {
+        Ok(()) => {
+            kprintln!("[redteam] (BUG) the out-of-intent write was NOT stopped");
+            false
+        }
+        Err(t) => {
+            if t == ir::Trap::MissingCapability {
+                kprintln!(
+                    "[redteam] kernel DENIED the out-of-intent Cairn write: {}",
+                    t.msg()
+                );
+            } else {
+                kprintln!("[redteam] agent trapped before the write: {}", t.msg());
+            }
+            true
+        }
+    }
+}
+
 // --- Inspect / remove / recovery ----------------------------------------------
 
 pub(crate) fn pkg_list(plan: &KernelPlan) {

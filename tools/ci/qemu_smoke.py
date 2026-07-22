@@ -348,6 +348,29 @@ def run_riscv64(qemu: str, kernel: Path) -> None:
                     "virtio-blk daemon demo done; back in the console",
                 ],
             ),
+            # --- The adversary (W8 P4): five escapes, five named boundaries ----
+            # A malicious agent tries to escape containment five ways; each is
+            # stopped at a real, named boundary and the console survives. Runs
+            # last (its rogue/spy/preempt tasks reset the task table) so escape 1
+            # still finds the live storage daemon.
+            (
+                "redteam",
+                [
+                    "escape 1/5",
+                    "DENIED: ns=vault requires capability CAIRN_NS_3",
+                    "escape 1 STOPPED at boundary: storage-service capability check",
+                    "DENIED: faulted on 0x10000000 (outside its grant)",
+                    "escape 2 STOPPED at boundary: hardware memory boundary",
+                    "holds no PRINT capability",
+                    "escape 3 STOPPED at boundary: kernel syscall capability check",
+                    "beyond-intent dropped by the derivation ceiling: cairn-read cairn-write",
+                    "kernel DENIED the out-of-intent Cairn write",
+                    "escape 4 STOPPED at boundary: intent-derivation ceiling",
+                    "escape 5 STOPPED at boundary: preemptive scheduler",
+                    "[redteam] PASS: all five escapes were stopped at named boundaries",
+                ],
+            ),
+            ("events", "redteam"),
             ("halt", "halting."),
         ]
         cursor = session.wait_for("dezh> ")
