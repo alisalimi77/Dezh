@@ -2267,6 +2267,20 @@ const fn task_ns_cap(ns: usize) -> usize {
     1 << (TASK_CAIRN_NS_BASE + ns)
 }
 
+/// The full Cairn v1 namespace-capability set (bits 8..12). The console acts as
+/// the operator/mission owner: a Sfar plan/rollback it drives may touch any
+/// namespace, so it presents authority for all of them and the storage daemon
+/// still enforces the mission-authority check per touched namespace.
+const fn all_cairn_ns_caps() -> usize {
+    let mut caps = 0usize;
+    let mut ns = 0usize;
+    while ns < CAIRN_NS_NAMES.len() {
+        caps |= task_ns_cap(ns);
+        ns += 1;
+    }
+    caps
+}
+
 /// Pack a Cairn request for the virtio-blk client: base op | ns << 8 | steps << 12.
 fn cairn_req(base: usize, ns: usize, steps: usize) -> usize {
     base | (ns << 8) | (steps.min(0xfff) << 12)
@@ -2921,8 +2935,9 @@ fn run_sand_demo(plan: &KernelPlan) {
 }
 
 /// Sfar console front-end: `sfar-plan <ahd>` (rollback forecast) and
-/// `sfar-rollback <ahd>` (whole-mission retraction). Slice-1 missions are
-/// namespace-scoped to ns=agent; the gate uses that namespace's capability.
+/// `sfar-rollback <ahd>` (whole-mission retraction). A mission may span several
+/// namespaces, so the operator console presents authority for all of them; the
+/// storage daemon still enforces the mission-authority check per touched ns.
 fn sfar_cmd(plan: &KernelPlan, base: usize, arg: &str) {
     const AGENT: usize = 4;
     let Ok(id) = arg.trim().parse::<u16>() else {
@@ -2934,7 +2949,7 @@ fn sfar_cmd(plan: &KernelPlan, base: usize, arg: &str) {
         kprintln!("[sfar] Ahd #0 is 'direct' (no mission); open one with intent-open");
         return;
     }
-    let st = run_registered_virtio_client_ns(plan, sfar_req(base, AGENT, id), "", task_ns_cap(AGENT));
+    let st = run_registered_virtio_client_ns(plan, sfar_req(base, AGENT, id), "", all_cairn_ns_caps());
     record_event(
         "console",
         if base == BLK_REQ_SFAR_ROLLBACK { "sfar.rollback" } else { "sfar.plan" },
@@ -3008,6 +3023,71 @@ fn run_sfar_demo(plan: &KernelPlan) {
         kprintln!("[sfar-demo] Dezh does not over-promise rollback: unknown/irreversible effects are never silently 'undone'");
     } else {
         kprintln!("[sfar-demo] FAIL: effects={e_irrev},{e1},{e2} plan={plan_st} rollback={rb_st} (expected all 0)");
+    }
+}
+
+/// W8 P3 (slice 2): mission authority spans EVERY namespace a mission touched.
+/// One intent writes reversible effects into two namespaces (lab + calc). The
+/// forecast sees both; a rollback presented with authority over only ONE of them
+/// is refused by the storage daemon — which names the missing namespace — and a
+/// rollback with authority over BOTH retracts the whole mission. This closes the
+/// slice-1 gap where whole-mission rollback was gated on a single namespace.
+fn run_sfar_cross_demo(plan: &KernelPlan) {
+    const LAB: usize = 1;
+    const CALC: usize = 2;
+    let derived = pkg::MCAP_PRINT | pkg::MCAP_CAIRN_READ | pkg::MCAP_CAIRN_WRITE;
+    kprintln!("[sfar-cross-demo] a mission's effects can span namespaces; rollback authority must cover all of them");
+    let Some((id, _ceiling)) = pkg::open_intent("writer") else {
+        kprintln!("[sfar-cross-demo] FAIL: no free intent slot");
+        record_event("console", "sfar.cross", "mission", "fail");
+        return;
+    };
+    kprintln!("[sfar-cross-demo] 1/4 mission Ahd#{id}: one reversible effect to ns=lab and one to ns=calc");
+    let e_lab = run_registered_virtio_client_ns(
+        plan,
+        cairn_req_intent(BLK_REQ_CAIRN_COMMIT, LAB, id, derived, SAND_REV_REVERSIBLE),
+        "cross-mission-lab",
+        task_ns_cap(LAB),
+    );
+    let e_calc = run_registered_virtio_client_ns(
+        plan,
+        cairn_req_intent(BLK_REQ_CAIRN_COMMIT, CALC, id, derived, SAND_REV_REVERSIBLE),
+        "cross-mission-calc",
+        task_ns_cap(CALC),
+    );
+    kprintln!("[sfar-cross-demo] 2/4 forecast (authority over both): the mission spans ns=lab + ns=calc");
+    let plan_st = run_registered_virtio_client_ns(
+        plan,
+        sfar_req(BLK_REQ_SFAR_PLAN, LAB, id),
+        "",
+        task_ns_cap(LAB) | task_ns_cap(CALC),
+    );
+    kprintln!("[sfar-cross-demo] 3/4 rollback with authority over ns=lab ONLY: the daemon must refuse and name ns=calc");
+    let partial_st = run_registered_virtio_client_ns(
+        plan,
+        sfar_req(BLK_REQ_SFAR_ROLLBACK, LAB, id),
+        "",
+        task_ns_cap(LAB),
+    );
+    kprintln!("[sfar-cross-demo] 4/4 rollback with authority over BOTH namespaces: the whole mission is retracted");
+    let full_st = run_registered_virtio_client_ns(
+        plan,
+        sfar_req(BLK_REQ_SFAR_ROLLBACK, LAB, id),
+        "",
+        task_ns_cap(LAB) | task_ns_cap(CALC),
+    );
+    let pass = e_lab == 0
+        && e_calc == 0
+        && plan_st == 0
+        && partial_st == IPC_STATUS_DENIED
+        && full_st == 0;
+    record_event("console", "sfar.cross", "mission", if pass { "pass" } else { "fail" });
+    if pass {
+        kprintln!("[sfar-cross-demo] PASS: mission authority spans every namespace; partial-authority rollback refused, full-authority rollback retracted the mission");
+    } else {
+        kprintln!(
+            "[sfar-cross-demo] FAIL: effects={e_lab},{e_calc} plan={plan_st} partial={partial_st} full={full_st} (expected 0,0,0,1,0)"
+        );
     }
 }
 
@@ -4440,6 +4520,13 @@ const COMMANDS: &[CommandSpec] = &[
         help: "W8 P3 flagship: an agent mission with a mix of effect classes, forecast, then honest rollback",
     },
     CommandSpec {
+        name: "sfar-cross-demo",
+        cap: cap::SPAWN,
+        cap_name: "SPAWN",
+        group: "Effects",
+        help: "W8 P3: a mission spanning two namespaces; rollback needs authority over every one it touched",
+    },
+    CommandSpec {
         name: "pkg-remove",
         cap: cap::SPAWN,
         cap_name: "SPAWN",
@@ -5248,6 +5335,7 @@ fn dispatch(cmd: &str, arg: &str, plan: &KernelPlan, memory: &[MemoryRegion], he
         "sfar-plan" => sfar_cmd(plan, BLK_REQ_SFAR_PLAN, arg),
         "sfar-rollback" => sfar_cmd(plan, BLK_REQ_SFAR_ROLLBACK, arg),
         "sfar-demo" => run_sfar_demo(plan),
+        "sfar-cross-demo" => run_sfar_cross_demo(plan),
         "vblkd" => {
             kprintln!("[kernel] exercising registered virtio-blk daemon with IPC client");
             kprintln!("[kernel] daemon gets DEVICE+DMA+IPC; client gets IPC+DMA only (no MMIO)");

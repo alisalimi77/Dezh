@@ -803,11 +803,66 @@ fn sand_info(dma_base: usize, ns: usize) -> usize {
     }
 }
 
+/// Scan the LIVE chains and return a bitmask of the namespaces that carry at
+/// least one effect belonging to mission `ahd`. Reads commit sectors into the
+/// data buffer, so callers must have already snapshotted the live heads.
+fn sfar_touched_ns(dma_base: usize, ahd: u32, head: &[u32; CAIRN1_NS_MAX]) -> u32 {
+    let mut touched = 0u32;
+    let mut ns = 0usize;
+    while ns < CAIRN1_NS_MAX {
+        let mut cur = head[ns];
+        let mut guard = 0usize;
+        while cur != CAIRN1_NONE && guard < CAIRN1_COMMIT_SLOTS as usize {
+            guard += 1;
+            let st = rw(dma_base, CAIRN1_COMMIT_FIRST_SECTOR + cur as u64, false);
+            if st != 0 || !data_starts_with(b"DZC1") {
+                break;
+            }
+            let parent = d_read_u32(8);
+            if d_read_u32(CAIRN1_OFF_INTENT) == ahd {
+                touched |= 1 << ns;
+            }
+            cur = parent;
+        }
+        ns += 1;
+    }
+    touched
+}
+
+/// Mission authority is all-or-nothing: a Sfar plan/rollback may only proceed if
+/// the caller holds the namespace capability for EVERY namespace the mission
+/// touched. A partial rollback (undo what you can reach, silently skip the rest)
+/// would be dishonest, so if any touched namespace is unauthorized we refuse the
+/// whole mission and name exactly what is missing (D020 explainable denial).
+fn sfar_authorized(touched: u32, sender_caps: usize, from: usize) -> bool {
+    let mut ok = true;
+    let mut ns = 0usize;
+    while ns < CAIRN1_NS_MAX {
+        if touched & (1 << ns) != 0
+            && sender_caps & (1usize << (TASK_CAIRN_NS_BASE + ns)) == 0
+        {
+            if ok {
+                sys_print(b"  [sfar] DENIED: mission authority requires the capability for every namespace it touched\n");
+            }
+            sys_print(b"  [sfar] missing capability CAIRN_NS_");
+            print_num(ns);
+            sys_print(b" (ns=");
+            print_ns_name(ns);
+            sys_print(b") for task=");
+            print_num(from);
+            sys_print(b"\n");
+            ok = false;
+        }
+        ns += 1;
+    }
+    ok
+}
+
 /// Sfar rollback FORECAST (W8 P3): scan every commit, tally the effects that
 /// belong to mission `ahd` by reversibility class, and report what a rollback
 /// could and could not undo — BEFORE touching anything. Confidence is honest:
 /// any irreversible/unknown effect drops it to "partial", never "full".
-fn sfar_plan(dma_base: usize, ahd: u32) -> usize {
+fn sfar_plan(dma_base: usize, ahd: u32, sender_caps: usize, from: usize) -> usize {
     if ahd == 0 {
         sys_print(b"  [sfar] a mission is the effects under one intent; ahd 0 is 'direct' (no mission)\n");
         return IPC_STATUS_BAD_REQUEST;
@@ -823,6 +878,11 @@ fn sfar_plan(dma_base: usize, ahd: u32) -> usize {
     while ns < CAIRN1_NS_MAX {
         head[ns] = d_read_u32(cairn_ns_entry_off(ns) + 16);
         ns += 1;
+    }
+    // Mission authority spans every namespace the mission touched.
+    let touched = sfar_touched_ns(dma_base, ahd, &head);
+    if touched != 0 && !sfar_authorized(touched, sender_caps, from) {
+        return IPC_STATUS_DENIED;
     }
     let mut reversible = 0usize;
     let mut compensatable = 0usize;
@@ -893,7 +953,7 @@ fn sfar_plan(dma_base: usize, ahd: u32) -> usize {
 /// Authority note: this is an operator/mission-owner action gated on the passed
 /// namespace capability. A mission spanning namespaces the caller does not hold
 /// is out of scope for this slice (single-namespace missions are the demo).
-fn sfar_rollback(dma_base: usize, ahd: u32) -> usize {
+fn sfar_rollback(dma_base: usize, ahd: u32, sender_caps: usize, from: usize) -> usize {
     if ahd == 0 {
         sys_print(b"  [sfar] refusing: ahd 0 is 'direct' (no mission to roll back)\n");
         return IPC_STATUS_BAD_REQUEST;
@@ -910,6 +970,13 @@ fn sfar_rollback(dma_base: usize, ahd: u32) -> usize {
         new_head[ns] = d_read_u32(e + 16);
         count[ns] = d_read_u32(e + 20);
         ns += 1;
+    }
+    // Mission authority spans every namespace the mission touched: refuse the
+    // whole rollback (before mutating anything) if the caller cannot authorize
+    // even one of them.
+    let touched = sfar_touched_ns(dma_base, ahd, &new_head);
+    if touched != 0 && !sfar_authorized(touched, sender_caps, from) {
+        return IPC_STATUS_DENIED;
     }
     let mut refused_irrev = 0usize;
     let mut refused_comp = 0usize;
@@ -1951,19 +2018,12 @@ fn daemon(dma_base: usize) -> ! {
             };
             send_status(from, word, st);
         } else if op == REQ_SFAR_PLAN {
-            let st = if cairn_ns_allowed(cairn_ns, sender_caps, from) {
-                sfar_plan(dma_base, sand_intent)
-            } else {
-                IPC_STATUS_DENIED
-            };
-            send_status(from, word, st);
+            // Mission authority is checked per-touched-namespace inside sfar_plan
+            // (a mission may span more than the one namespace named in the
+            // request), so there is no single-namespace pre-check here.
+            send_status(from, word, sfar_plan(dma_base, sand_intent, sender_caps, from));
         } else if op == REQ_SFAR_ROLLBACK {
-            let st = if cairn_ns_allowed(cairn_ns, sender_caps, from) {
-                sfar_rollback(dma_base, sand_intent)
-            } else {
-                IPC_STATUS_DENIED
-            };
-            send_status(from, word, st);
+            send_status(from, word, sfar_rollback(dma_base, sand_intent, sender_caps, from));
         } else if op == REQ_FAULT_DEMO {
             sys_print(b"  [virtio-blk-daemon] FAULT-DEMO received; exiting with fault code\n");
             send_status(from, word, IPC_STATUS_OK);

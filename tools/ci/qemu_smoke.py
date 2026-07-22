@@ -291,6 +291,20 @@ def run_riscv64(qemu: str, kernel: Path) -> None:
             # only the irreversible send is still standing.
             ("sfar-plan 4", "reversible=0 compensatable=0 irreversible=1"),
             ("events", "sfar.demo"),
+            # --- Sfar mission authority spans every namespace (W8 P3 slice 2) ---
+            # A mission across ns=lab + ns=calc: a rollback holding authority over
+            # only ns=lab is refused (naming ns=calc); full authority undoes it.
+            (
+                "sfar-cross-demo",
+                [
+                    "one reversible effect to ns=lab and one to ns=calc",
+                    "reversible=2 compensatable=0 irreversible=0 unknown=0 confidence=full",
+                    "DENIED: mission authority requires the capability for every namespace it touched",
+                    "missing capability CAIRN_NS_2 (ns=calc)",
+                    "reversible effects retracted=2 refused_irreversible=0",
+                    "[sfar-cross-demo] PASS",
+                ],
+            ),
             ("deny", "Pol denial demo skipped here to keep running services alive"),
             (
                 "bench-pol",
