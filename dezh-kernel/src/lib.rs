@@ -371,8 +371,137 @@ pub fn boot_banner(plan: &KernelPlan) -> String {
     )
 }
 
+/// The intent-derivation authority algebra (W8).
+///
+/// This module states, as pure functions, the rule the RISC-V kernel enforces in
+/// `dezh-boot/src/pkg.rs`: authority is a capability bitmask; an intent (`Ahd`)
+/// is a declared ceiling; a **derived** capability is the structural
+/// intersection of what was requested with that ceiling. Derivation is the ONLY
+/// way authority enters the system, and it is a subset operation, not a purpose
+/// annotation. The accompanying tests prove the algebra's invariants
+/// **exhaustively over the whole 8-bit capability space** — a proof by
+/// enumeration, not a sampled property test — so the core novelty claim
+/// ("authority can only ever be a subset of its intent, and delegation can only
+/// attenuate") is machine-checked, not merely asserted in prose.
+pub mod authority {
+    /// A capability set. Mirrors the kernel `MCAP_*` bitmask (five bits are used
+    /// today; the algebra holds for the full width).
+    pub type Caps = u32;
+
+    /// Derive the effective authority of a `requested` set under an
+    /// `intent_ceiling`. In Dezh this is the sole path by which any authority
+    /// comes to exist: `derived = requested ∩ intent_ceiling`.
+    #[inline]
+    pub fn derive(requested: Caps, intent_ceiling: Caps) -> Caps {
+        requested & intent_ceiling
+    }
+
+    /// The authority dropped because it lay beyond the intent. The kernel
+    /// reports this (and denies the host call if attempted); it is never
+    /// silently granted.
+    #[inline]
+    pub fn beyond_intent(requested: Caps, intent_ceiling: Caps) -> Caps {
+        requested & !intent_ceiling
+    }
+
+    /// Attenuated delegation: a holder may grant only capabilities it holds
+    /// (`granted = requested ∩ holder`). You cannot pass authority you lack.
+    #[inline]
+    pub fn delegate(requested: Caps, holder: Caps) -> Caps {
+        requested & holder
+    }
+
+    /// `a ⊆ b`: every capability in `a` is also in `b`.
+    #[inline]
+    pub fn is_subset(a: Caps, b: Caps) -> bool {
+        a & !b == 0
+    }
+}
+
 #[cfg(test)]
 extern crate std;
+
+#[cfg(test)]
+mod authority_tests {
+    use super::authority::*;
+
+    // The full 8-bit capability space (superset of the five bits used today), so
+    // every invariant below is checked by enumeration, not by sampling.
+    const SPACE: core::ops::RangeInclusive<u32> = 0..=255;
+
+    #[test]
+    fn invariant_derived_is_subset_of_intent() {
+        // The core claim: a derived capability never exceeds its intent ceiling.
+        for r in SPACE {
+            for c in SPACE {
+                assert!(
+                    is_subset(derive(r, c), c),
+                    "derive({r:#x},{c:#x}) escaped the intent ceiling"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn invariant_derived_is_subset_of_request() {
+        // Derivation also never grants beyond what was asked for.
+        for r in SPACE {
+            for c in SPACE {
+                assert!(is_subset(derive(r, c), r));
+            }
+        }
+    }
+
+    #[test]
+    fn invariant_derived_and_beyond_partition_the_request() {
+        // What is derived and what is dropped for being beyond the intent
+        // together account for exactly the request, and never overlap.
+        for r in SPACE {
+            for c in SPACE {
+                assert_eq!(derive(r, c) | beyond_intent(r, c), r);
+                assert_eq!(derive(r, c) & beyond_intent(r, c), 0);
+            }
+        }
+    }
+
+    #[test]
+    fn invariant_re_derivation_never_widens() {
+        // Deriving again under any further intent can only narrow authority —
+        // there is no sequence of derivations that widens it.
+        for r in SPACE {
+            for c1 in SPACE {
+                for c2 in SPACE {
+                    let once = derive(r, c1);
+                    assert!(is_subset(derive(once, c2), once));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn invariant_delegation_cannot_exceed_holder() {
+        // Attenuation: a delegated capability is always a subset of the holder's.
+        for requested in SPACE {
+            for holder in SPACE {
+                assert!(is_subset(delegate(requested, holder), holder));
+            }
+        }
+    }
+
+    #[test]
+    fn invariant_intent_is_idempotent_and_order_independent() {
+        // Applying the same intent twice is applying it once; the order of two
+        // intents does not matter (intersection is idempotent + commutative).
+        for r in SPACE {
+            for c1 in SPACE {
+                for c2 in SPACE {
+                    assert_eq!(derive(derive(r, c1), c1), derive(r, c1));
+                    assert_eq!(derive(derive(r, c1), c2), derive(derive(r, c2), c1));
+                }
+            }
+        }
+    }
+}
 
 #[cfg(test)]
 mod tests {

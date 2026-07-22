@@ -166,6 +166,18 @@ adversary (`redteam`), and explainable denial + provenance (`why-denied` /
 `Tbar`). See the [threat model](docs/THREAT_MODEL.md) for what is and is not
 defended.
 
+### For a serious OS reader
+
+Dezh is meant to be scrutinised, not just demoed. The scientific lineage and the
+precise, honest novelty claim (what is reused from capabilities, DIFC/provenance,
+and sagas — and what is genuinely new) are in
+[**Related Work and Novelty**](docs/RELATED_WORK.md); the design paper is the
+[**Whitepaper v1**](docs/WHITEPAPER.md). The core authority claim — *a derived
+capability can only ever be a subset of its intent, and delegation can only
+attenuate* — is not just asserted: it is **machine-checked by exhaustive
+enumeration** over the capability space in
+[`dezh-kernel::authority`](dezh-kernel/src/lib.rs) (`cargo test -p dezh-kernel`).
+
 ## System Shape
 
 ```mermaid

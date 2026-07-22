@@ -21,8 +21,11 @@ This page is the primary navigation point for Dezh OS public review.
   registry, user-space driver path, package lifecycle.
 - [Architecture Diagrams](ARCHITECTURE_DIAGRAMS.md): Mermaid diagrams for the
   major system flows.
-- [Whitepaper](WHITEPAPER.md): thesis, threat model direction, and research
-  framing.
+- [Whitepaper](WHITEPAPER.md): the v1 design paper — thesis, system model,
+  mechanisms, evaluation, novelty, and limitations.
+- [Related Work and Novelty](RELATED_WORK.md): where Dezh sits in the literature
+  (capabilities, DIFC/provenance, sagas), what is reused, and the precise,
+  honest novelty claim.
 - [Security Model](SECURITY_MODEL.md): capability boundaries, known gaps, and
   review focus.
 - [Threat Model](THREAT_MODEL.md): what Dezh defends, what it does not, the
