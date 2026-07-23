@@ -291,22 +291,16 @@ fn clear_dma() {
 }
 
 fn init(dma_base: usize) -> bool {
-    let mut found = 0usize;
-    let mut i = 0usize;
-    while i < MMIO_COUNT {
-        let base = MMIO_WINDOW + i * MMIO_STRIDE;
-        let magic = unsafe { core::ptr::read_volatile((base + VR_MAGIC) as *const u32) };
-        let dev = unsafe { core::ptr::read_volatile((base + VR_DEVICE_ID) as *const u32) };
-        if magic == VIRTIO_MAGIC && dev == VIRTIO_ID_BLOCK {
-            found = base;
-            break;
-        }
-        i += 1;
-    }
-    if found == 0 {
+    // The kernel discovered the block device and granted exactly its page at
+    // MMIO_WINDOW. This daemon does NOT scan the transport window - it never had
+    // authority over the other devices, and probing them would fault.
+    let base = MMIO_WINDOW;
+    let magic = unsafe { core::ptr::read_volatile((base + VR_MAGIC) as *const u32) };
+    let dev = unsafe { core::ptr::read_volatile((base + VR_DEVICE_ID) as *const u32) };
+    if magic != VIRTIO_MAGIC || dev != VIRTIO_ID_BLOCK {
         return false;
     }
-    unsafe { MMIO_BASE = found };
+    unsafe { MMIO_BASE = base };
     w32(VR_STATUS, 0);
     w32(VR_STATUS, ST_ACK);
     w32(VR_STATUS, ST_ACK | ST_DRIVER);

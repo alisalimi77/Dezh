@@ -917,6 +917,7 @@ const VIRTIO_MMIO_STRIDE: usize = 0x1000;
 const VIRTIO_MMIO_COUNT: usize = 8;
 const VIRTIO_MMIO_MAGIC: u32 = 0x7472_6976;
 const VIRTIO_DEVICE_ID_NET: u32 = 1;
+const VIRTIO_DEVICE_ID_BLOCK: u32 = 2;
 const VIRTIO_MMIO_OFF_DEVICE_ID: usize = 0x008;
 /// Where a Marz daemon sees its granted NIC page (one device, not the window).
 const DEV_VIRTIO_NET_VA: usize = 0x5002_0000;
@@ -1490,20 +1491,23 @@ fn build_address_space(spec: &ProcessSpec, kind: TaskKind) -> Option<AddressSpac
             return None;
         }
     }
+    // Per-device grant: the kernel finds the block device and maps ONLY its page.
+    // (This used to map the whole virtio-mmio transport window, handing the block
+    // daemon authority over every other device on the bus.)
     if spec.map_virtio_blk && spec.caps & TASK_DEVICE_VIRTIO_BLK != 0 {
-        let mut i = 0usize;
-        while i < VIRTIO_MMIO_COUNT {
-            if !map_page(
-                root,
-                DEV_VIRTIO_BLK_VA + i * VIRTIO_MMIO_STRIDE,
-                VIRTIO_BLK_MMIO_PA + i * VIRTIO_MMIO_STRIDE,
-                PTE_U | PTE_R | PTE_W,
-                &mut resources,
-            ) {
-                reclaim_resources(&mut resources);
-                return None;
-            }
-            i += 1;
+        let Some(blk_pa) = find_virtio_mmio(VIRTIO_DEVICE_ID_BLOCK) else {
+            reclaim_resources(&mut resources);
+            return None;
+        };
+        if !map_page(
+            root,
+            DEV_VIRTIO_BLK_VA,
+            blk_pa,
+            PTE_U | PTE_R | PTE_W,
+            &mut resources,
+        ) {
+            reclaim_resources(&mut resources);
+            return None;
         }
     }
     // Marz: grant exactly ONE device page — the NIC the kernel discovered — under
