@@ -1,6 +1,6 @@
 # Marz — the guarded egress boundary
 
-**Marz** (مرز, *border*) is the boundary an effect crosses to leave the machine.
+**Marz** (*border*) is the boundary an effect crosses to leave the machine.
 Crossing it is irreversible: once bytes are on the wire, no ledger can call them
 back. So Marz is where Dezh's whole stack has to hold at once — capability,
 intent, information flow, and effect accountability.
