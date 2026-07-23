@@ -574,7 +574,15 @@ def run_riscv64(qemu: str, kernel: Path) -> None:
             # survives a power cycle.
             ("ns-revoke calc", "namespace 'calc' REVOKED (persisted)"),
             # Devices now report completion instead of being polled blind.
-            ("irq-stat", "external device interrupts serviced = "),
+            (
+                "irq-stat",
+                [
+                    "external device interrupts serviced = ",
+                    # The drivers sleep on hardware now; a nonzero wake count is
+                    # the proof they are not busy-waiting.
+                    "woken by a device interrupt (not by spinning) = ",
+                ],
+            ),
             ("halt", "halting."),
         ]
         cursor = session.wait_for("dezh> ")

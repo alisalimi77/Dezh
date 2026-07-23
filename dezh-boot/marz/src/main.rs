@@ -16,6 +16,7 @@ use core::arch::asm;
 
 const SYS_EXIT: usize = 0;
 const SYS_PRINT: usize = 1;
+const SYS_IRQ_WAIT: usize = 10;
 
 /// The granted NIC page. One device, mapped by the kernel at a fixed VA.
 const NIC_VA: usize = 0x5002_0000;
@@ -89,6 +90,13 @@ fn sys_print(s: &[u8]) {
             in("a0") s.as_ptr() as usize, in("a1") s.len(), in("a7") SYS_PRINT,
             lateout("a0") _, lateout("a1") _);
     }
+}
+
+/// Sleep until a device interrupt is serviced (see the block daemon).
+fn sys_irq_wait(prev: usize) -> usize {
+    let out: usize;
+    unsafe { asm!("ecall", inout("a0") prev => out, in("a7") SYS_IRQ_WAIT) };
+    out
 }
 
 fn sys_exit(code: usize) -> ! {
@@ -307,13 +315,15 @@ fn transmit(dma_pa: usize, frame_len: usize) -> bool {
     core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
 
     let before = rd16(used + 2);
+    let mut seen = sys_irq_wait(usize::MAX);
     w32(VR_QUEUE_NOTIFY, Q_TX);
-    // Bounded wait: the device consumes a transmit buffer promptly.
-    let mut spins = 0u32;
+    // Block on the NIC rather than spinning; bounded so a silent device cannot
+    // wedge the daemon forever.
+    let mut waits = 0u32;
     while rd16(used + 2) == before {
-        core::hint::spin_loop();
-        spins += 1;
-        if spins > 20_000_000 {
+        seen = sys_irq_wait(seen);
+        waits += 1;
+        if waits > 10_000 {
             return false;
         }
     }

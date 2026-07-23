@@ -499,6 +499,10 @@ const SYS_SEND: usize = 6; // IPC: send payload + granted capability to a task
 const SYS_RECV: usize = 7; // IPC: block until a message, receive payload + caps
 const SYS_PRINTNUM: usize = 8; // print a decimal number (kernel-side formatting)
 const SYS_RECV_TIMEOUT: usize = 9; // IPC: receive with a tick deadline
+// Block until a device interrupt is serviced. The caller passes the last count
+// it saw; if the count already moved the call returns at once, which closes the
+// race between submitting a request and waiting for it.
+const SYS_IRQ_WAIT: usize = 10;
 const SYS_DENIED: usize = usize::MAX; // result sentinel for "capability not held"
 
 // --- Per-task capabilities (what the running U-mode task is allowed to do). --
@@ -940,6 +944,8 @@ const VR_INTERRUPT_ACK: usize = 0x064;
 const SCAUSE_EXTERNAL: usize = 9;
 
 static EXT_IRQS: AtomicU64 = AtomicU64::new(0);
+/// Tasks woken by a device interrupt rather than by spinning.
+static IRQ_WAKEUPS: AtomicU64 = AtomicU64::new(0);
 
 /// Route the virtio device interrupts to this hart's S-mode context and unmask
 /// external interrupts. Devices assert their own line; the PLIC arbitrates.
@@ -976,6 +982,18 @@ fn plic_handle() -> u32 {
         }
         write_volatile(PLIC_S_CLAIM as *mut u32, irq);
         EXT_IRQS.fetch_add(1, Ordering::Relaxed);
+        // Anyone sleeping on a device becomes runnable again.
+        let mut i = 0usize;
+        while i < MAX_TASKS {
+            if TIRQ_WAITING[i] {
+                TIRQ_WAITING[i] = false;
+                if TSTATE[i] == TaskState::Blocked {
+                    TSTATE[i] = TaskState::Ready;
+                }
+                IRQ_WAKEUPS.fetch_add(1, Ordering::Relaxed);
+            }
+            i += 1;
+        }
         irq
     }
 }
@@ -984,6 +1002,10 @@ fn irq_stat() {
     kprintln!(
         "irq: external device interrupts serviced = {}",
         EXT_IRQS.load(Ordering::Relaxed)
+    );
+    kprintln!(
+        "irq: driver waits woken by a device interrupt (not by spinning) = {}",
+        IRQ_WAKEUPS.load(Ordering::Relaxed)
     );
     kprintln!("  source: PLIC context 1 (hart 0, S-mode); virtio slots raise IRQ 1..8");
     kprintln!("  before this, every device wait was a busy-loop; devices can now report completion");
@@ -1906,6 +1928,8 @@ static mut TRECV_LEN: [usize; MAX_TASKS] = [0; MAX_TASKS];
 
 static mut FRAMES: [[usize; 32]; MAX_TASKS] = [[0; 32]; MAX_TASKS];
 static mut TSTATE: [TaskState; MAX_TASKS] = [TaskState::Unused; MAX_TASKS];
+/// Tasks parked until a device interrupt arrives (see `SYS_IRQ_WAIT`).
+static mut TIRQ_WAITING: [bool; MAX_TASKS] = [false; MAX_TASKS];
 static mut TCAPS: [usize; MAX_TASKS] = [0; MAX_TASKS];
 static mut TPERS: [u8; MAX_TASKS] = [0; MAX_TASKS];
 static mut TSATP: [usize; MAX_TASKS] = [0; MAX_TASKS]; // each task's address space (satp)
@@ -2087,7 +2111,39 @@ unsafe fn pick_next() -> Option<usize> {
 
 /// Pick the next Ready task and return its frame, or longjmp back to the console
 /// if every task is finished.
+/// Only tasks parked on a DEVICE may make the kernel idle. A task blocked on
+/// IPC is waiting for another task, not for hardware - idling for it would wait
+/// for an interrupt that is never coming.
+unsafe fn any_irq_waiting() -> bool {
+    (0..MAX_TASKS).any(|i| TIRQ_WAITING[i] && TSTATE[i] == TaskState::Blocked)
+}
+
+/// Idle until hardware makes someone runnable. We service the PLIC by hand
+/// rather than relying on interrupt delivery: on trap entry the hardware clears
+/// `sstatus.SIE`, so a pending interrupt would wake `wfi` but never be taken,
+/// and the blocked task would never be woken. Claiming it here closes that hole.
+unsafe fn idle_until_device() {
+    const IDLE_LIMIT: u64 = 50_000_000;
+    let mut spins = 0u64;
+    while pick_next().is_none() && any_irq_waiting() {
+        asm!("wfi");
+        plic_handle();
+        spins += 1;
+        if spins > IDLE_LIMIT {
+            // A device that never reports back must not wedge the machine.
+            break;
+        }
+    }
+}
+
 unsafe fn schedule_or_return() -> *const usize {
+    // Nothing ready but something blocked means work is pending on a device:
+    // wait for it instead of abandoning the run. This is what makes blocking on
+    // I/O possible at all - without it the kernel returns from the task loop and
+    // orphans the sleeping driver.
+    if pick_next().is_none() && any_irq_waiting() {
+        idle_until_device();
+    }
     match pick_next() {
         Some(i) => {
             CURRENT = i;
@@ -2346,6 +2402,20 @@ extern "C" fn utrap_handler(frame_ptr: *mut usize) -> *const usize {
                     TRECV_PTR[cur] = frame[F_A0];
                     TRECV_LEN[cur] = frame[F_A1];
                     TRECV_DEADLINE[cur] = TICKS.load(Ordering::Relaxed).saturating_add(timeout);
+                    frame[F_SEPC] -= 4;
+                    TSTATE[cur] = TaskState::Blocked;
+                    return schedule_or_return();
+                }
+                SYS_IRQ_WAIT => {
+                    // Restartable: park the task and rewind past the ecall, so on
+                    // wake it re-runs, sees the advanced count, and returns.
+                    let prev = frame[F_A0];
+                    let now = EXT_IRQS.load(Ordering::Relaxed) as usize;
+                    if now != prev {
+                        frame[F_A0] = now;
+                        return frame_ptr;
+                    }
+                    TIRQ_WAITING[cur] = true;
                     frame[F_SEPC] -= 4;
                     TSTATE[cur] = TaskState::Blocked;
                     return schedule_or_return();

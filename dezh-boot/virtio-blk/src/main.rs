@@ -14,6 +14,7 @@ const SYS_PRINT: usize = 1;
 const SYS_SEND: usize = 6;
 const SYS_RECV: usize = 7;
 const SYS_PRINTNUM: usize = 8;
+const SYS_IRQ_WAIT: usize = 10;
 
 const OP_DISK: usize = 1;
 const OP_BWRITE: usize = 2;
@@ -266,6 +267,14 @@ fn sys_recv() -> (usize, usize, usize) {
     (word, from, sender_caps)
 }
 
+/// Sleep until a device interrupt is serviced. `prev` is the last count seen, so
+/// a completion that already happened returns immediately instead of parking.
+fn sys_irq_wait(prev: usize) -> usize {
+    let out: usize;
+    unsafe { asm!("ecall", inout("a0") prev => out, in("a7") SYS_IRQ_WAIT) };
+    out
+}
+
 fn r32(off: usize) -> u32 {
     unsafe { core::ptr::read_volatile((MMIO_BASE + off) as *const u32) }
 }
@@ -354,9 +363,12 @@ fn rw(dma_base: usize, sector: u64, write: bool) -> u8 {
         core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
         let used = dma(USED_OFF);
         let before = core::ptr::read_volatile((used + 2) as *const u16);
+        // Block on the device instead of burning the CPU: the kernel parks this
+        // task and runs something else until the disk reports completion.
+        let mut seen = sys_irq_wait(usize::MAX);
         w32(VR_QUEUE_NOTIFY, 0);
         while core::ptr::read_volatile((used + 2) as *const u16) == before {
-            core::hint::spin_loop();
+            seen = sys_irq_wait(seen);
         }
         core::ptr::read_volatile(status as *const u8)
     }
