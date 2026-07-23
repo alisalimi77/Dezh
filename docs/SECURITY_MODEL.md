@@ -69,12 +69,15 @@ bitmask bits, not per-object revocable references.
 
 ## What kind of capability is this? (bitmask vs object-capability)
 
-Being precise, because it is the most important honest caveat: a Dezh **task
-capability is a bit in a per-task bitmask** (print, IPC, a Cairn namespace,
-device, block), not an unforgeable reference to one specific object as in a true
-object-capability system (seL4, CHERI). So the granularity is coarse: authority
-is per *class/namespace*, not per *object instance*, and per-bit revocation and a
-full delegation graph are not expressible yet.
+Being precise, because it was the most important honest caveat. Dezh **started**
+with authority as a bit in a per-task bitmask (print, IPC, a Cairn namespace,
+device, block) rather than an unforgeable reference to one object as in seL4 or
+CHERI. That is no longer the whole story: the authorities that name real objects
+— **namespaces, devices, egress destinations** — are now generation-stamped
+handles with per-object revocation and attenuated delegation (see the migration
+below). What remains a plain bit is the process-level authority that names no
+object (`print`, `time`, `ipc`), and the per-message attestation the storage
+daemon uses.
 
 Two things keep this from being "just Linux capabilities," though:
 
@@ -89,10 +92,11 @@ Two things keep this from being "just Linux capabilities," though:
   attenuable this way.
 
 So Dezh sits **between** Linux capabilities and seL4/CHERI object-capabilities:
-stronger than the former (no ambient authority, attenuable, kernel-attested),
-coarser than the latter (bitmask classes, not per-object references). The honest
-label is *capability-secure in the no-ambient-authority sense*, not *object-
-capability*.
+far stronger than the former (no ambient authority, attenuable, kernel-attested,
+and now per-object revocable for every authority that names an object), and still
+short of the latter, whose object references are the *only* form authority takes
+and are enforced by the kernel (or hardware) on every use rather than at
+kernel-side chokepoints.
 
 **The path (the one big change), now prototyped.** Turn a capability into a
 first-class object — a generation-stamped handle to a specific resource — so that
