@@ -117,8 +117,14 @@ one — and the DIFC gate is what stands in the way.
   arms the transmit queue, builds a real Ethernet + IPv4 + UDP frame and sends
   it. `marz-send` drives it; CI asserts the frame in QEMU's packet capture, so
   the claim is verified **on the wire**, not from a print.
-- **M2 — the gate.** Per-destination egress capability derived from an intent;
-  the DIFC declassification check on export; refusal paths with named reasons.
+- **M2 — the gate. DONE.** Egress authority names a **destination**, not "the
+  network": each destination carries an address and a secrecy label, and the gate
+  requires (a) the capability for *that* destination and (b) a flow the
+  destination may legally receive (`taint(actor) subset of label(destination)`).
+  Revoking one destination leaves the others intact. `marz-demo` proves both on
+  the wire, and CI counts frames in the capture: exactly the authorized sends
+  appear, and a refused send leaves **nothing** behind. (Deriving the destination
+  set from an intent ceiling is the remaining slice.)
 - **M3 — the effect.** Each send recorded as an irreversible Sand effect, visible
   in `tbar`, refused by `sfar-rollback`; a demo where a tainted agent's send is
   blocked and a permitted send is recorded.

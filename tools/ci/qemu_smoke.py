@@ -521,14 +521,17 @@ def run_riscv64(qemu: str, kernel: Path) -> None:
                     "granted ONLY this page (cap TASK_DEVICE_VIRTIO_NET)",
                 ],
             ),
+            # Marz M2: the gate. Two sends are authorized and reach the wire; two
+            # are refused (no destination capability / would export a secret) and
+            # must leave NOTHING behind - the pcap frame count proves it.
             (
-                "marz-send",
+                "marz-demo",
                 [
-                    "launching the egress daemon with ONLY the NIC page + DMA grant",
                     "[marz] virtio-net ready",
-                    "frame built: Ethernet+IPv4+UDP",
                     "EGRESS: frame left the machine",
-                    "egress complete: a real frame left the machine",
+                    "no capability for destination 'ops' -- egress authority names a destination",
+                    "would export secret-tainted data to a destination cleared for",
+                    "[marz-demo] PASS",
                 ],
             ),
             # --- DIFC ENFORCED on the real storage path -----------------------
@@ -570,12 +573,18 @@ def run_riscv64(qemu: str, kernel: Path) -> None:
 
     # Marz: the frame must exist in the capture, not merely in the transcript.
     blob = pcap_path.read_bytes()
-    if b"DEZH-MARZ-EGRESS-v0" not in blob:
+    sent = blob.count(b"DEZH-MARZ-EGRESS-v0")
+    if sent != 2:
         raise AssertionError(
-            f"egress frame not found in the packet capture ({len(blob)} bytes) - "
-            "the daemon claimed it sent, but nothing reached the wire"
+            f"expected exactly 2 egress frames on the wire (the two AUTHORIZED sends), "
+            f"found {sent} in a {len(blob)}-byte capture. More means a refused send "
+            "leaked; fewer means an authorized send never left."
         )
-    print(f"[marz] packet capture confirms egress: {len(blob)} bytes captured")
+    # The write-up send must have reached the destination cleared for secrets.
+    if bytes([10, 0, 2, 3]) not in blob:
+        raise AssertionError("no frame addressed to vault-sync (10.0.2.3) in the capture")
+    print(f"[marz] capture confirms the gate: {sent} authorized frames on the wire, "
+          f"refused sends left nothing ({len(blob)} bytes captured)")
 
     # Second boot on the SAME disk: Cairn v1 state must survive a reboot
     # (F2 acceptance: rollback-restored value + hash verify after power cycle).

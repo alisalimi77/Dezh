@@ -202,7 +202,7 @@ fn ip_checksum(off: usize, len: usize) -> u16 {
 /// Build one Ethernet + IPv4 + UDP frame carrying `payload` into the DMA window.
 /// Returns the frame length. Broadcast destination so the frame is unambiguous
 /// in a capture; source is QEMU user-net's guest address.
-fn build_frame(payload: &[u8]) -> usize {
+fn build_frame(payload: &[u8], dst_ip: [u8; 4], dst_port: u16) -> usize {
     let mut o = FRAME_OFF;
     // Ethernet: dst broadcast, src 52:54:00:12:34:56, ethertype IPv4.
     let mut i = 0;
@@ -236,7 +236,6 @@ fn build_frame(payload: &[u8]) -> usize {
     wr8(o + 10, 0);
     wr8(o + 11, 0); // checksum placeholder
     let src_ip = [10u8, 0, 2, 15];
-    let dst_ip = [10u8, 0, 2, 2];
     i = 0;
     while i < 4 {
         wr8(o + 12 + i, src_ip[i]);
@@ -251,8 +250,8 @@ fn build_frame(payload: &[u8]) -> usize {
     // UDP header: checksum 0 is legal over IPv4.
     wr8(o, 0x30);
     wr8(o + 1, 0x39); // src port 12345
-    wr8(o + 2, 0x22);
-    wr8(o + 3, 0xb8); // dst port 8888
+    wr8(o + 2, (dst_port >> 8) as u8);
+    wr8(o + 3, dst_port as u8);
     wr8(o + 4, (udp_len >> 8) as u8);
     wr8(o + 5, udp_len as u8);
     wr8(o + 6, 0);
@@ -301,7 +300,7 @@ fn transmit(dma_pa: usize, frame_len: usize) -> bool {
 }
 
 #[no_mangle]
-extern "C" fn main(_op: usize, dma_pa: usize, _a2: usize, _a3: usize) -> ! {
+extern "C" fn main(_op: usize, dma_pa: usize, dest: usize, _a3: usize) -> ! {
     sys_print(b"  [marz] egress daemon started; holds ONLY the granted NIC page + DMA\n");
     if !nic_init(dma_pa) {
         sys_print(b"  [marz] no virtio-net on the granted page (device init failed)\n");
@@ -309,8 +308,17 @@ extern "C" fn main(_op: usize, dma_pa: usize, _a2: usize, _a3: usize) -> ! {
     }
     sys_print(b"  [marz] virtio-net ready (no features negotiated, transmit queue armed)\n");
 
+    // The destination is chosen by the kernel gate, not by this daemon: it is
+    // part of the capability that authorized the send.
+    let dst_ip = [
+        (dest >> 24) as u8,
+        (dest >> 16) as u8,
+        (dest >> 8) as u8,
+        dest as u8,
+    ];
+    let dst_port = (dest >> 32) as u16;
     let payload = b"DEZH-MARZ-EGRESS-v0";
-    let frame_len = build_frame(payload);
+    let frame_len = build_frame(payload, dst_ip, dst_port);
     sys_print(b"  [marz] frame built: Ethernet+IPv4+UDP len=");
     print_num(frame_len);
     sys_print(b" payload=\"DEZH-MARZ-EGRESS-v0\"\n");

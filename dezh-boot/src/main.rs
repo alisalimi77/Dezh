@@ -939,36 +939,168 @@ fn find_virtio_mmio(want_id: u32) -> Option<usize> {
     None
 }
 
-/// Marz M1: launch the egress daemon. It receives exactly two grants — the one
-/// discovered NIC page and the DMA window — plus PRINT. No block authority, no
-/// other device, and it never scans for hardware.
-fn run_marz_send() {
+// --- Marz M2: the egress gate -------------------------------------------------
+//
+// Authority to send is NOT "network access": it is a capability for a specific
+// DESTINATION, and the destination carries a secrecy label so the DIFC rule
+// applies on export (the Flume lesson: leaving the system is a declassification).
+
+struct MarzDest {
+    name: &'static str,
+    ip: [u8; 4],
+    port: u16,
+    /// How secret this destination is cleared to receive.
+    label: dezh_core::difc::Label,
+}
+
+const MARZ_DESTS: [MarzDest; 2] = [
+    // A public collector: cleared for nothing secret.
+    MarzDest { name: "ops", ip: [10, 0, 2, 2], port: 8888, label: 0 },
+    // A destination cleared to receive vault-class secrets.
+    MarzDest { name: "vault-sync", ip: [10, 0, 2, 3], port: 9999, label: NS_SECRET_VAULT },
+];
+
+/// Egress capabilities live above the Cairn namespace bits.
+const MARZ_DEST_BASE: usize = 16;
+const fn marz_dest_cap(d: usize) -> usize {
+    1 << (MARZ_DEST_BASE + d)
+}
+
+/// The operator's per-destination egress authority. Revoking one destination
+/// leaves the others intact — the point of naming destinations in the capability.
+static mut OP_EGRESS: usize = marz_dest_cap(0) | marz_dest_cap(1);
+
+fn marz_dest_id(name: &str) -> Option<usize> {
+    MARZ_DESTS.iter().position(|d| d.name == name)
+}
+
+fn marz_dest_packed(d: &MarzDest) -> usize {
+    ((d.ip[0] as usize) << 24)
+        | ((d.ip[1] as usize) << 16)
+        | ((d.ip[2] as usize) << 8)
+        | (d.ip[3] as usize)
+        | ((d.port as usize) << 32)
+}
+
+/// The egress gate: a send needs (a) the capability for THAT destination, and
+/// (b) an information flow the destination may legally receive. Returns true if
+/// the send may proceed; prints a named reason otherwise.
+fn marz_gate(d: usize) -> bool {
+    let dest = &MARZ_DESTS[d];
+    if unsafe { OP_EGRESS } & marz_dest_cap(d) == 0 {
+        kprintln!(
+            "[marz] DENIED: no capability for destination '{}' -- egress authority names a destination, it is not 'network access'",
+            dest.name
+        );
+        return false;
+    }
+    if !unsafe { OP_TAINT.may_flow_to(dest.label) } {
+        kprintln!(
+            "[marz] DENIED: sending to '{}' would export secret-tainted data to a destination cleared for {:#x} (taint={:#x}) -- declassify first",
+            dest.name,
+            dest.label,
+            unsafe { OP_TAINT.secrecy() }
+        );
+        return false;
+    }
+    true
+}
+
+/// Marz: launch the egress daemon for an authorized destination. It receives
+/// exactly two grants — the one discovered NIC page and the DMA window — plus
+/// PRINT. No block authority, no other device, and it never scans for hardware.
+fn run_marz_send(arg: &str) {
+    let name = arg.trim();
+    let name = if name.is_empty() { "ops" } else { name };
+    let Some(d) = marz_dest_id(name) else {
+        kprintln!("[marz] unknown destination '{name}' (known: ops vault-sync)");
+        return;
+    };
     if find_virtio_mmio(VIRTIO_DEVICE_ID_NET).is_none() {
         kprintln!("[marz] no virtio-net device; nothing to send (see net-probe)");
         record_event("kernel", "marz.send", "virtio-net", "absent");
         return;
     }
-    kprintln!("[marz] launching the egress daemon with ONLY the NIC page + DMA grant");
+    if !marz_gate(d) {
+        record_event("kernel", "marz.send", MARZ_DESTS[d].name, "DENIED");
+        return;
+    }
+    let dest = &MARZ_DESTS[d];
+    kprintln!(
+        "[marz] authorized egress to '{}' ({}.{}.{}.{}:{}); launching the daemon with ONLY the NIC page + DMA",
+        dest.name, dest.ip[0], dest.ip[1], dest.ip[2], dest.ip[3], dest.port
+    );
     run_foreground_processes(&[ProcessSpec::new(
         MARZ_ELF,
         TASK_PRINT | TASK_DEVICE_VIRTIO_NET,
         0,
     )
-    .args(virtio_dma_pa(), 0, 0)
+    .args(virtio_dma_pa(), marz_dest_packed(dest), 0)
     .virtio_net()
     .virtio_dma()]);
     let st = unsafe { TEXIT[FIRST_FOREGROUND_TASK] };
     record_event(
         "kernel",
         "marz.send",
-        "egress",
+        dest.name,
         if st == 0 { "OK" } else { "fail" },
     );
     if st == 0 {
-        kprintln!("[marz] egress complete: a real frame left the machine (M1 = the device path)");
+        kprintln!("[marz] egress complete: a real frame left the machine for '{}'", dest.name);
     } else {
         kprintln!("[marz] egress failed (status={st})");
     }
+}
+
+fn marz_dest_authority(arg: &str, grant: bool) {
+    let Some(d) = marz_dest_id(arg.trim()) else {
+        kprintln!("[marz] unknown destination (known: ops vault-sync)");
+        return;
+    };
+    unsafe {
+        if grant {
+            OP_EGRESS |= marz_dest_cap(d);
+        } else {
+            OP_EGRESS &= !marz_dest_cap(d);
+        }
+    }
+    kprintln!(
+        "[marz] destination '{}' egress capability {}",
+        MARZ_DESTS[d].name,
+        if grant { "granted" } else { "REVOKED" }
+    );
+    record_event(
+        "kernel",
+        if grant { "marz.grant" } else { "marz.revoke" },
+        MARZ_DESTS[d].name,
+        "OK",
+    );
+}
+
+/// The Marz gate proven end to end: per-destination authority and the DIFC
+/// export rule, both enforced before anything reaches the wire.
+fn run_marz_demo(plan: &KernelPlan) {
+    declassify();
+    unsafe { OP_EGRESS = marz_dest_cap(0) | marz_dest_cap(1) };
+    kprintln!("[marz-demo] egress authority names a DESTINATION, and export obeys information flow");
+
+    kprintln!("[marz-demo] 1/4 authorized, untainted -> send to 'ops':");
+    run_marz_send("ops");
+
+    kprintln!("[marz-demo] 2/4 revoke ONLY 'ops' (vault-sync untouched) -> send refused:");
+    marz_dest_authority("ops", false);
+    run_marz_send("ops");
+    marz_dest_authority("ops", true);
+
+    kprintln!("[marz-demo] 3/4 read ns=vault (secret) -> the operator is tainted; a send to the PUBLIC 'ops' is exfiltration:");
+    cairn_cmd_simple(plan, BLK_REQ_CAIRN_GET, "vault");
+    run_marz_send("ops");
+
+    kprintln!("[marz-demo] 4/4 the same tainted data MAY go to 'vault-sync' (cleared for it):");
+    run_marz_send("vault-sync");
+    declassify();
+    kprintln!("[marz-demo] PASS: a destination capability is not network access, and a secret cannot be exported to a destination not cleared for it");
+    record_event("kernel", "marz.demo", "egress", "OK");
 }
 
 /// Marz M1 groundwork: report whether a NIC is present and which slot it owns.
@@ -5355,7 +5487,28 @@ const COMMANDS: &[CommandSpec] = &[
         cap: cap::SPAWN,
         cap_name: "SPAWN",
         group: "Effects",
-        help: "Marz M1: launch the egress daemon (NIC page + DMA only) and transmit one real frame",
+        help: "Marz: transmit one real frame to an authorized destination. marz-send <dest>",
+    },
+    CommandSpec {
+        name: "marz-grant",
+        cap: cap::SPAWN,
+        cap_name: "SPAWN",
+        group: "Effects",
+        help: "grant egress authority for one destination. marz-grant <dest>",
+    },
+    CommandSpec {
+        name: "marz-revoke",
+        cap: cap::SPAWN,
+        cap_name: "SPAWN",
+        group: "Effects",
+        help: "revoke egress authority for one destination (others untouched). marz-revoke <dest>",
+    },
+    CommandSpec {
+        name: "marz-demo",
+        cap: cap::SPAWN,
+        cap_name: "SPAWN",
+        group: "Effects",
+        help: "Marz M2: per-destination egress authority + the DIFC export rule, proven on the wire",
     },
     CommandSpec {
         name: "net-probe",
@@ -6422,7 +6575,10 @@ fn dispatch(cmd: &str, arg: &str, plan: &KernelPlan, memory: &[MemoryRegion], he
         "nsrevoke-demo" => run_nsrevoke_demo(plan),
         "agentrevoke-demo" => run_agentrevoke_demo(plan),
         "net-probe" => net_probe(),
-        "marz-send" => run_marz_send(),
+        "marz-send" => run_marz_send(arg),
+        "marz-grant" => marz_dest_authority(arg, true),
+        "marz-revoke" => marz_dest_authority(arg, false),
+        "marz-demo" => run_marz_demo(plan),
         "exfil-demo" => run_exfil_demo(),
         "taintflow-demo" => run_taintflow_demo(plan),
         "taint" => taint_show(),
