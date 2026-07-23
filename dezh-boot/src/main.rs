@@ -920,6 +920,15 @@ const VIRTIO_DEVICE_ID_NET: u32 = 1;
 const VIRTIO_MMIO_OFF_DEVICE_ID: usize = 0x008;
 /// Where a Marz daemon sees its granted NIC page (one device, not the window).
 const DEV_VIRTIO_NET_VA: usize = 0x5002_0000;
+/// Marz gets its OWN DMA window. Sharing one with the block daemon would let
+/// either corrupt the other's virtqueue - two devices, two grants.
+const MARZ_DMA_VA: usize = 0x5200_0000;
+const MARZ_DMA_SIZE: usize = 16 * 1024;
+static mut MARZ_DMA: DmaWindow = DmaWindow([0; MARZ_DMA_SIZE]);
+
+fn marz_dma_pa() -> usize {
+    core::ptr::addr_of!(MARZ_DMA) as usize
+}
 
 /// Scan the virtio-mmio window for a device of `want_id` and return its physical
 /// base. The kernel may read the window directly (it lives in the kernel-only
@@ -951,13 +960,27 @@ struct MarzDest {
     port: u16,
     /// How secret this destination is cleared to receive.
     label: dezh_core::difc::Label,
+    /// What the ledger records when a frame actually leaves for this destination.
+    record: &'static str,
 }
 
 const MARZ_DESTS: [MarzDest; 2] = [
     // A public collector: cleared for nothing secret.
-    MarzDest { name: "ops", ip: [10, 0, 2, 2], port: 8888, label: 0 },
+    MarzDest {
+        name: "ops",
+        ip: [10, 0, 2, 2],
+        port: 8888,
+        label: 0,
+        record: "egress -> ops 10.0.2.2:8888 [REAL external send, on the wire]",
+    },
     // A destination cleared to receive vault-class secrets.
-    MarzDest { name: "vault-sync", ip: [10, 0, 2, 3], port: 9999, label: NS_SECRET_VAULT },
+    MarzDest {
+        name: "vault-sync",
+        ip: [10, 0, 2, 3],
+        port: 9999,
+        label: NS_SECRET_VAULT,
+        record: "egress -> vault-sync 10.0.2.3:9999 [REAL external send, on the wire]",
+    },
 ];
 
 /// Egress capabilities live above the Cairn namespace bits.
@@ -1009,7 +1032,15 @@ fn marz_gate(d: usize) -> bool {
 /// Marz: launch the egress daemon for an authorized destination. It receives
 /// exactly two grants — the one discovered NIC page and the DMA window — plus
 /// PRINT. No block authority, no other device, and it never scans for hardware.
-fn run_marz_send(arg: &str) {
+fn run_marz_send(plan: &KernelPlan, arg: &str) {
+    marz_send_to(plan, arg, 0);
+}
+
+/// Send to `arg` under intent `ahd` (0 = direct). On success the send is
+/// recorded as an IRREVERSIBLE effect on the ledger: it already happened in the
+/// outside world, so rollback must refuse it.
+fn marz_send_to(plan: &KernelPlan, arg: &str, ahd: u16) {
+    const LAB: usize = 1;
     let name = arg.trim();
     let name = if name.is_empty() { "ops" } else { name };
     let Some(d) = marz_dest_id(name) else {
@@ -1035,9 +1066,8 @@ fn run_marz_send(arg: &str) {
         TASK_PRINT | TASK_DEVICE_VIRTIO_NET,
         0,
     )
-    .args(virtio_dma_pa(), marz_dest_packed(dest), 0)
-    .virtio_net()
-    .virtio_dma()]);
+    .args(marz_dma_pa(), marz_dest_packed(dest), 0)
+    .virtio_net()]);
     let st = unsafe { TEXIT[FIRST_FOREGROUND_TASK] };
     record_event(
         "kernel",
@@ -1045,11 +1075,24 @@ fn run_marz_send(arg: &str) {
         dest.name,
         if st == 0 { "OK" } else { "fail" },
     );
-    if st == 0 {
-        kprintln!("[marz] egress complete: a real frame left the machine for '{}'", dest.name);
-    } else {
+    if st != 0 {
         kprintln!("[marz] egress failed (status={st})");
+        return;
     }
+    kprintln!("[marz] egress complete: a real frame left the machine for '{}'", dest.name);
+    // The wire is not reversible. Record it as an irreversible effect so the
+    // ledger attributes it and rollback refuses it honestly.
+    let derived = pkg::MCAP_PRINT;
+    let led = run_registered_virtio_client_ns(
+        plan,
+        cairn_req_intent(BLK_REQ_CAIRN_COMMIT, LAB, ahd, derived, SAND_REV_IRREVERSIBLE),
+        dest.record,
+        task_ns_cap(LAB),
+    );
+    kprintln!(
+        "[marz] recorded on the ledger as IRREVERSIBLE (ns=lab, intent={}, status={led})",
+        if ahd == 0 { 0 } else { ahd }
+    );
 }
 
 fn marz_dest_authority(arg: &str, grant: bool) {
@@ -1077,6 +1120,49 @@ fn marz_dest_authority(arg: &str, grant: bool) {
     );
 }
 
+/// M3: a REAL external effect, end to end. A send under an intent leaves the
+/// machine, is recorded as irreversible, is attributed by the provenance graph,
+/// and is REFUSED by rollback - because it genuinely cannot be undone.
+fn run_marz_effect_demo(plan: &KernelPlan) {
+    declassify();
+    unsafe { OP_EGRESS = marz_dest_cap(0) | marz_dest_cap(1) };
+    kprintln!("[marz-effect-demo] a real send becomes an irreversible, attributable effect");
+    let Some((id, _ceiling)) = pkg::open_intent("writer") else {
+        kprintln!("[marz-effect-demo] FAIL: no free intent slot");
+        return;
+    };
+    kprintln!("[marz-effect-demo] 1/4 send to 'ops' under intent Ahd#{id} (a real frame on the wire):");
+    marz_send_to(plan, "ops", id);
+
+    kprintln!("[marz-effect-demo] 2/4 the rollback forecast for the mission:");
+    let mut idbuf = [0u8; 8];
+    let idstr = u16_to_str(id, &mut idbuf);
+    sfar_cmd(plan, BLK_REQ_SFAR_PLAN, idstr);
+
+    kprintln!("[marz-effect-demo] 3/4 provenance: who authorized what left the machine:");
+    sfar_cmd(plan, BLK_REQ_TBAR, idstr);
+
+    kprintln!("[marz-effect-demo] 4/4 roll the mission back - the send CANNOT be undone:");
+    sfar_cmd(plan, BLK_REQ_SFAR_ROLLBACK, idstr);
+    record_event("kernel", "marz.effect", "egress", "OK");
+    kprintln!("[marz-effect-demo] PASS: the wire is honest - a real external effect is attributed, classified irreversible, and rollback refuses it instead of pretending");
+}
+
+/// Render a u16 into `buf` and return it as a str (no allocator in the console).
+fn u16_to_str(v: u16, buf: &mut [u8; 8]) -> &str {
+    let mut n = v;
+    let mut i = buf.len();
+    loop {
+        i -= 1;
+        buf[i] = b'0' + (n % 10) as u8;
+        n /= 10;
+        if n == 0 {
+            break;
+        }
+    }
+    core::str::from_utf8(&buf[i..]).unwrap_or("0")
+}
+
 /// The Marz gate proven end to end: per-destination authority and the DIFC
 /// export rule, both enforced before anything reaches the wire.
 fn run_marz_demo(plan: &KernelPlan) {
@@ -1085,19 +1171,19 @@ fn run_marz_demo(plan: &KernelPlan) {
     kprintln!("[marz-demo] egress authority names a DESTINATION, and export obeys information flow");
 
     kprintln!("[marz-demo] 1/4 authorized, untainted -> send to 'ops':");
-    run_marz_send("ops");
+    run_marz_send(plan, "ops");
 
     kprintln!("[marz-demo] 2/4 revoke ONLY 'ops' (vault-sync untouched) -> send refused:");
     marz_dest_authority("ops", false);
-    run_marz_send("ops");
+    run_marz_send(plan, "ops");
     marz_dest_authority("ops", true);
 
     kprintln!("[marz-demo] 3/4 read ns=vault (secret) -> the operator is tainted; a send to the PUBLIC 'ops' is exfiltration:");
     cairn_cmd_simple(plan, BLK_REQ_CAIRN_GET, "vault");
-    run_marz_send("ops");
+    run_marz_send(plan, "ops");
 
     kprintln!("[marz-demo] 4/4 the same tainted data MAY go to 'vault-sync' (cleared for it):");
-    run_marz_send("vault-sync");
+    run_marz_send(plan, "vault-sync");
     declassify();
     kprintln!("[marz-demo] PASS: a destination capability is not network access, and a secret cannot be exported to a destination not cleared for it");
     record_event("kernel", "marz.demo", "egress", "OK");
@@ -1437,6 +1523,21 @@ fn build_address_space(spec: &ProcessSpec, kind: TaskKind) -> Option<AddressSpac
         ) {
             reclaim_resources(&mut resources);
             return None;
+        }
+        let marz_dma = core::ptr::addr_of!(MARZ_DMA) as usize;
+        let mut off = 0usize;
+        while off < MARZ_DMA_SIZE {
+            if !map_page(
+                root,
+                MARZ_DMA_VA + off,
+                marz_dma + off,
+                PTE_U | PTE_R | PTE_W,
+                &mut resources,
+            ) {
+                reclaim_resources(&mut resources);
+                return None;
+            }
+            off += 4096;
         }
     }
     if spec.map_virtio_dma
@@ -5504,6 +5605,13 @@ const COMMANDS: &[CommandSpec] = &[
         help: "revoke egress authority for one destination (others untouched). marz-revoke <dest>",
     },
     CommandSpec {
+        name: "marz-effect-demo",
+        cap: cap::SPAWN,
+        cap_name: "SPAWN",
+        group: "Effects",
+        help: "Marz M3: a real send recorded as an irreversible effect that rollback refuses",
+    },
+    CommandSpec {
         name: "marz-demo",
         cap: cap::SPAWN,
         cap_name: "SPAWN",
@@ -6575,10 +6683,11 @@ fn dispatch(cmd: &str, arg: &str, plan: &KernelPlan, memory: &[MemoryRegion], he
         "nsrevoke-demo" => run_nsrevoke_demo(plan),
         "agentrevoke-demo" => run_agentrevoke_demo(plan),
         "net-probe" => net_probe(),
-        "marz-send" => run_marz_send(arg),
+        "marz-send" => run_marz_send(plan, arg),
         "marz-grant" => marz_dest_authority(arg, true),
         "marz-revoke" => marz_dest_authority(arg, false),
         "marz-demo" => run_marz_demo(plan),
+        "marz-effect-demo" => run_marz_effect_demo(plan),
         "exfil-demo" => run_exfil_demo(),
         "taintflow-demo" => run_taintflow_demo(plan),
         "taint" => taint_show(),

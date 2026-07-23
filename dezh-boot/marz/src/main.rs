@@ -19,8 +19,9 @@ const SYS_PRINT: usize = 1;
 
 /// The granted NIC page. One device, mapped by the kernel at a fixed VA.
 const NIC_VA: usize = 0x5002_0000;
-/// The shared DMA window (virtual); its physical base arrives in a register.
-const DMA_VA: usize = 0x5100_0000;
+/// Marz's OWN DMA window (virtual); its physical base arrives in a register.
+/// It is not shared with the block daemon - two devices, two grants.
+const DMA_VA: usize = 0x5200_0000;
 
 const VIRTIO_MAGIC: u32 = 0x7472_6976;
 const VIRTIO_ID_NET: u32 = 1;
@@ -145,6 +146,23 @@ fn put_desc(i: usize, addr: u64, len: u32, flags: u16, next: u16) {
     wr16(e + 14, next);
 }
 
+/// Clear a virtqueue's memory. The DMA window is reused across daemon launches,
+/// so a fresh device init must start from a fresh ring — otherwise the device
+/// resets its own index to zero, sees a stale avail index, and processes buffers
+/// that were never offered.
+fn zero_ring(base: usize) {
+    let mut i = 0usize;
+    while i < 256 {
+        wr8(base + i, 0);
+        i += 1;
+    }
+    i = 0;
+    while i < 16 {
+        wr8(base + USED_OFF + i, 0);
+        i += 1;
+    }
+}
+
 /// Bring the NIC up: acknowledge, negotiate no features (legacy header, no
 /// offload), give both queues a valid ring, then DRIVER_OK.
 fn nic_init(dma_pa: usize) -> bool {
@@ -160,6 +178,9 @@ fn nic_init(dma_pa: usize) -> bool {
     w32(VR_GUEST_FEATURES_SEL, 0);
     w32(VR_GUEST_FEATURES, 0);
     w32(VR_GUEST_PAGE_SIZE, 4096);
+
+    zero_ring(TX_RING_OFF);
+    zero_ring(RX_RING_OFF);
 
     // Receive queue: a valid ring so the device sees every queue configured,
     // with no buffers offered (M1 is transmit-only).

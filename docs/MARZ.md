@@ -125,9 +125,11 @@ one — and the DIFC gate is what stands in the way.
   the wire, and CI counts frames in the capture: exactly the authorized sends
   appear, and a refused send leaves **nothing** behind. (Deriving the destination
   set from an intent ceiling is the remaining slice.)
-- **M3 — the effect.** Each send recorded as an irreversible Sand effect, visible
-  in `tbar`, refused by `sfar-rollback`; a demo where a tainted agent's send is
-  blocked and a permitted send is recorded.
+- **M3 — the effect. DONE.** Every authorized send is recorded as an
+  **irreversible** Sand effect carrying its actor, intent and destination, so
+  `tbar` attributes what left the machine and `sfar-plan` forecasts it honestly.
+  `sfar-rollback` **refuses** it - the wire cannot be undone and Dezh does not
+  pretend otherwise. `marz-effect-demo` shows the whole loop.
 - **Verification.** QEMU's packet capture (`-object filter-dump`) lets CI assert
   the permitted frame actually left **and that the refused one did not** — a real
   test, not a printed claim.

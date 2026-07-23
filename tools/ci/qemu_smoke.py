@@ -534,6 +534,18 @@ def run_riscv64(qemu: str, kernel: Path) -> None:
                     "[marz-demo] PASS",
                 ],
             ),
+            # Marz M3: a real send is an irreversible, attributable effect that
+            # rollback refuses - the wire cannot be undone and we do not pretend.
+            (
+                "marz-effect-demo",
+                [
+                    "recorded on the ledger as IRREVERSIBLE",
+                    "irreversible=1",
+                    "effect(s) attributed to intent Ahd#",
+                    "already happened in the outside world; cannot be undone",
+                    "[marz-effect-demo] PASS",
+                ],
+            ),
             # --- DIFC ENFORCED on the real storage path -----------------------
             # Read vault (secret) taints the operator; a commit to a public ns is
             # then refused (no write-down) until an explicit declassify.
@@ -573,10 +585,13 @@ def run_riscv64(qemu: str, kernel: Path) -> None:
 
     # Marz: the frame must exist in the capture, not merely in the transcript.
     blob = pcap_path.read_bytes()
+    # Authorized sends: marz-demo lands two (ops, vault-sync) and
+    # marz-effect-demo one (ops under an intent). Every refused send must leave
+    # nothing, so the count is exact.
     sent = blob.count(b"DEZH-MARZ-EGRESS-v0")
-    if sent != 2:
+    if sent != 3:
         raise AssertionError(
-            f"expected exactly 2 egress frames on the wire (the two AUTHORIZED sends), "
+            f"expected exactly 3 egress frames on the wire (the AUTHORIZED sends), "
             f"found {sent} in a {len(blob)}-byte capture. More means a refused send "
             "leaked; fewer means an authorized send never left."
         )
