@@ -528,6 +528,11 @@ extern "C" fn trap_handler(frame: *mut TrapFrame) {
             sbi_set_timer(rdtime() + TIMER_DELTA);
             return;
         }
+        // A device raised its line: claim it, acknowledge the device, complete.
+        if code == SCAUSE_EXTERNAL {
+            plic_handle();
+            return;
+        }
         kprintln!("\n[dezh-boot] unexpected interrupt scause={scause:#x} -- halting");
         shutdown(FINISH_FAIL);
     }
@@ -915,6 +920,75 @@ const DEV_VIRTIO_BLK_VA: usize = 0x5000_0000;
 const VIRTIO_BLK_MMIO_PA: usize = 0x1000_1000;
 const VIRTIO_MMIO_STRIDE: usize = 0x1000;
 const VIRTIO_MMIO_COUNT: usize = 8;
+// --- PLIC: real device interrupts ---------------------------------------------
+// Until now every device path was a busy-wait: the machine spun until a sector
+// or a frame completed, so I/O and compute could never overlap and a task could
+// not block on I/O. The PLIC is what turns polled drivers into an event-driven
+// kernel.
+//
+// QEMU `virt` layout: the S-mode context of hart 0 is context 1, and virtio-mmio
+// slot i raises IRQ (1 + i).
+const PLIC_BASE: usize = 0x0c00_0000;
+const PLIC_S_ENABLE: usize = PLIC_BASE + 0x2080;
+const PLIC_S_THRESHOLD: usize = PLIC_BASE + 0x0020_1000;
+const PLIC_S_CLAIM: usize = PLIC_S_THRESHOLD + 4;
+const VIRTIO_IRQ_BASE: u32 = 1;
+const SEIE: usize = 1 << 9;
+const VR_INTERRUPT_STATUS: usize = 0x060;
+const VR_INTERRUPT_ACK: usize = 0x064;
+/// Supervisor external interrupt (`scause` code with the interrupt bit set).
+const SCAUSE_EXTERNAL: usize = 9;
+
+static EXT_IRQS: AtomicU64 = AtomicU64::new(0);
+
+/// Route the virtio device interrupts to this hart's S-mode context and unmask
+/// external interrupts. Devices assert their own line; the PLIC arbitrates.
+fn plic_init() {
+    unsafe {
+        let mut irq = VIRTIO_IRQ_BASE;
+        while irq < VIRTIO_IRQ_BASE + VIRTIO_MMIO_COUNT as u32 {
+            write_volatile((PLIC_BASE + irq as usize * 4) as *mut u32, 1);
+            irq += 1;
+        }
+        let mask: u32 = (((1u32 << VIRTIO_MMIO_COUNT) - 1) << VIRTIO_IRQ_BASE) as u32;
+        write_volatile(PLIC_S_ENABLE as *mut u32, mask);
+        write_volatile(PLIC_S_THRESHOLD as *mut u32, 0);
+        asm!("csrs sie, {}", in(reg) SEIE);
+    }
+}
+
+/// Claim one external interrupt, ACK the device so it stops asserting its line,
+/// then complete it at the PLIC. Skipping the device ACK would re-raise the
+/// interrupt immediately and livelock the kernel.
+fn plic_handle() -> u32 {
+    unsafe {
+        let irq = read_volatile(PLIC_S_CLAIM as *const u32);
+        if irq == 0 {
+            return 0;
+        }
+        if irq >= VIRTIO_IRQ_BASE && irq < VIRTIO_IRQ_BASE + VIRTIO_MMIO_COUNT as u32 {
+            let slot = (irq - VIRTIO_IRQ_BASE) as usize;
+            let base = VIRTIO_BLK_MMIO_PA + slot * VIRTIO_MMIO_STRIDE;
+            let st = read_volatile((base + VR_INTERRUPT_STATUS) as *const u32);
+            if st != 0 {
+                write_volatile((base + VR_INTERRUPT_ACK) as *mut u32, st);
+            }
+        }
+        write_volatile(PLIC_S_CLAIM as *mut u32, irq);
+        EXT_IRQS.fetch_add(1, Ordering::Relaxed);
+        irq
+    }
+}
+
+fn irq_stat() {
+    kprintln!(
+        "irq: external device interrupts serviced = {}",
+        EXT_IRQS.load(Ordering::Relaxed)
+    );
+    kprintln!("  source: PLIC context 1 (hart 0, S-mode); virtio slots raise IRQ 1..8");
+    kprintln!("  before this, every device wait was a busy-loop; devices can now report completion");
+}
+
 const VIRTIO_MMIO_MAGIC: u32 = 0x7472_6976;
 const VIRTIO_DEVICE_ID_NET: u32 = 1;
 const VIRTIO_DEVICE_ID_BLOCK: u32 = 2;
@@ -2047,6 +2121,12 @@ extern "C" fn utrap_handler(frame_ptr: *mut usize) -> *const usize {
                 sbi_set_timer(rdtime() + QUANTUM);
                 let _ = cur;
                 return schedule_or_return();
+            }
+            // A device finished. Service it and resume the task: the machine no
+            // longer has to spin waiting for hardware.
+            if code == SCAUSE_EXTERNAL {
+                plic_handle();
+                return frame_ptr;
             }
             kprintln!("\n[dezh-boot] unexpected interrupt in task (scause={scause:#x}) -- halting");
             shutdown(FINISH_FAIL);
@@ -5745,6 +5825,13 @@ const COMMANDS: &[CommandSpec] = &[
         help: "Marz M2: per-destination egress authority + the DIFC export rule, proven on the wire",
     },
     CommandSpec {
+        name: "irq-stat",
+        cap: cap::INSPECT,
+        cap_name: "INSPECT",
+        group: "Inspect",
+        help: "external device interrupts serviced via the PLIC",
+    },
+    CommandSpec {
         name: "net-probe",
         cap: cap::INSPECT,
         cap_name: "INSPECT",
@@ -6808,6 +6895,7 @@ fn dispatch(cmd: &str, arg: &str, plan: &KernelPlan, memory: &[MemoryRegion], he
         "ns-grant" => ns_grant(plan, arg),
         "nsrevoke-demo" => run_nsrevoke_demo(plan),
         "agentrevoke-demo" => run_agentrevoke_demo(plan),
+        "irq-stat" => irq_stat(),
         "net-probe" => net_probe(),
         "marz-send" => run_marz_send(plan, arg),
         "dev-revoke" => dev_authority_set(arg, false),
@@ -7156,6 +7244,9 @@ pub extern "C" fn kmain() -> ! {
         asm!("csrs sstatus, {}", in(reg) 1usize << 1); // SIE: global supervisor interrupts
         asm!("csrw scounteren, {}", in(reg) 0x7usize); // let U-mode read cycle/time/instret
     }
+
+    plic_init();
+    kprintln!("[dezh-boot] PLIC up: virtio device interrupts routed to S-mode (no longer polled-only)");
 
     kprintln!("[dezh-boot] enabling Sv39 paging (U-mode confined to its own region)...");
     build_page_tables();

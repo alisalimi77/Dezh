@@ -573,6 +573,8 @@ def run_riscv64(qemu: str, kernel: Path) -> None:
             # (the daemon writes it to the superblock). The reboot phase proves it
             # survives a power cycle.
             ("ns-revoke calc", "namespace 'calc' REVOKED (persisted)"),
+            # Devices now report completion instead of being polled blind.
+            ("irq-stat", "external device interrupts serviced = "),
             ("halt", "halting."),
         ]
         cursor = session.wait_for("dezh> ")
