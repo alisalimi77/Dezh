@@ -546,6 +546,17 @@ def run_riscv64(qemu: str, kernel: Path) -> None:
                     "[marz-effect-demo] PASS",
                 ],
             ),
+            # Device authority sits above the finer gates: revoking the NIC stops
+            # every send regardless of destination capability.
+            (
+                "dev-demo",
+                [
+                    "device 'net' capability REVOKED (generation bumped)",
+                    "DENIED: device 'net' capability was REVOKED",
+                    "re-minted at the current generation",
+                    "[dev-demo] PASS",
+                ],
+            ),
             # --- DIFC ENFORCED on the real storage path -----------------------
             # Read vault (secret) taints the operator; a commit to a public ns is
             # then refused (no write-down) until an explicit declassify.
@@ -585,13 +596,13 @@ def run_riscv64(qemu: str, kernel: Path) -> None:
 
     # Marz: the frame must exist in the capture, not merely in the transcript.
     blob = pcap_path.read_bytes()
-    # Authorized sends: marz-demo lands two (ops, vault-sync) and
-    # marz-effect-demo one (ops under an intent). Every refused send must leave
-    # nothing, so the count is exact.
+    # Authorized sends: marz-demo lands two (ops, vault-sync), marz-effect-demo
+    # one (ops under an intent) and dev-demo one (after the device is re-granted).
+    # Every refused send must leave nothing, so the count is exact.
     sent = blob.count(b"DEZH-MARZ-EGRESS-v0")
-    if sent != 3:
+    if sent != 4:
         raise AssertionError(
-            f"expected exactly 3 egress frames on the wire (the AUTHORIZED sends), "
+            f"expected exactly 4 egress frames on the wire (the AUTHORIZED sends), "
             f"found {sent} in a {len(blob)}-byte capture. More means a refused send "
             "leaked; fewer means an authorized send never left."
         )

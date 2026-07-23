@@ -1053,6 +1053,12 @@ fn marz_send_to(plan: &KernelPlan, arg: &str, ahd: u16) {
         record_event("kernel", "marz.send", "virtio-net", "absent");
         return;
     }
+    // Device authority first: a revoked NIC stops every send, whatever
+    // destination authority the caller holds.
+    if !dev_authority_live(DEV_OBJ_NET) {
+        record_event("kernel", "marz.send", "device", "DENIED");
+        return;
+    }
     if !marz_gate(d) {
         record_event("kernel", "marz.send", MARZ_DESTS[d].name, "DENIED");
         return;
@@ -1188,6 +1194,101 @@ fn run_marz_demo(plan: &KernelPlan) {
     declassify();
     kprintln!("[marz-demo] PASS: a destination capability is not network access, and a secret cannot be exported to a destination not cleared for it");
     record_event("kernel", "marz.demo", "egress", "OK");
+}
+
+// --- Device authority as revocable ocap handles (ocap breadth) ---------------
+//
+// Namespaces already carry generation-stamped handles. Devices now do too: the
+// operator holds one handle per device, and revoking it makes every later grant
+// of that device refuse - a hardware kill-switch that sits ABOVE the finer gates
+// (a revoked NIC stops all egress regardless of destination authority).
+
+const DEV_OBJ_BLOCK: usize = 0;
+const DEV_OBJ_NET: usize = 1;
+const DEV_NAMES: [&str; 2] = ["block", "net"];
+
+static mut DEV_TABLE: dezh_core::ocap::CapTable<4> = dezh_core::ocap::CapTable::new();
+static mut DEV_HANDLE: [Option<dezh_core::ocap::Cap>; 4] = [None; 4];
+static mut DEV_INIT: bool = false;
+
+fn dev_authority_init() {
+    use dezh_core::ocap::{R_READ, R_WRITE};
+    unsafe {
+        if DEV_INIT {
+            return;
+        }
+        let mut i = 0usize;
+        while i < DEV_NAMES.len() {
+            DEV_HANDLE[i] = DEV_TABLE.mint(i, R_READ | R_WRITE);
+            i += 1;
+        }
+        DEV_INIT = true;
+    }
+}
+
+/// Does the operator still hold a live capability for this device?
+fn dev_authority_ok(obj: usize) -> bool {
+    use dezh_core::ocap::{CapCheck, R_READ};
+    dev_authority_init();
+    unsafe { DEV_HANDLE[obj].map(|h| DEV_TABLE.check(&h, R_READ)) == Some(CapCheck::Ok) }
+}
+
+fn dev_authority_live(obj: usize) -> bool {
+    if dev_authority_ok(obj) {
+        return true;
+    }
+    kprintln!(
+        "[cap] DENIED: device '{}' capability was REVOKED (dev-grant {} to re-mint) -- ocap generation stale",
+        DEV_NAMES[obj], DEV_NAMES[obj]
+    );
+    false
+}
+
+fn dev_name_id(name: &str) -> Option<usize> {
+    DEV_NAMES.iter().position(|n| *n == name)
+}
+
+fn dev_authority_set(arg: &str, grant: bool) {
+    use dezh_core::ocap::{R_READ, R_WRITE};
+    let Some(obj) = dev_name_id(arg.trim()) else {
+        kprintln!("[cap] unknown device (known: block net)");
+        return;
+    };
+    dev_authority_init();
+    unsafe {
+        if grant {
+            DEV_HANDLE[obj] = DEV_TABLE.mint(obj, R_READ | R_WRITE);
+        } else {
+            DEV_TABLE.revoke(obj);
+        }
+    }
+    kprintln!(
+        "[cap] device '{}' capability {}",
+        DEV_NAMES[obj],
+        if grant { "re-minted at the current generation" } else { "REVOKED (generation bumped)" }
+    );
+    record_event(
+        "kernel",
+        if grant { "dev.grant" } else { "dev.revoke" },
+        DEV_NAMES[obj],
+        "OK",
+    );
+}
+
+/// Device authority is revocable at runtime, above every finer gate.
+fn run_dev_demo(plan: &KernelPlan) {
+    dev_authority_init();
+    kprintln!("[dev-demo] device authority is a revocable ocap handle, above the per-destination gate");
+    kprintln!("[dev-demo] 1/3 revoke the NIC device capability:");
+    dev_authority_set("net", false);
+    kprintln!("[dev-demo] 2/3 egress to an otherwise-authorized destination is refused at the device:");
+    run_marz_send(plan, "ops");
+    kprintln!("[dev-demo] 3/3 re-grant the device; egress works again:");
+    dev_authority_set("net", true);
+    run_marz_send(plan, "ops");
+    let pass = dev_authority_ok(DEV_OBJ_NET);
+    record_event("kernel", "dev.demo", "device", if pass { "OK" } else { "fail" });
+    kprintln!("[dev-demo] PASS: revoking the device stops every send regardless of destination authority; re-granting restores it");
 }
 
 /// Marz M1 groundwork: report whether a NIC is present and which slot it owns.
@@ -5595,6 +5696,27 @@ const COMMANDS: &[CommandSpec] = &[
         help: "Marz: transmit one real frame to an authorized destination. marz-send <dest>",
     },
     CommandSpec {
+        name: "dev-revoke",
+        cap: cap::SPAWN,
+        cap_name: "SPAWN",
+        group: "Intent",
+        help: "revoke a device capability at runtime (ocap generation). dev-revoke <block|net>",
+    },
+    CommandSpec {
+        name: "dev-grant",
+        cap: cap::SPAWN,
+        cap_name: "SPAWN",
+        group: "Intent",
+        help: "re-mint a device capability. dev-grant <block|net>",
+    },
+    CommandSpec {
+        name: "dev-demo",
+        cap: cap::SPAWN,
+        cap_name: "SPAWN",
+        group: "Intent",
+        help: "device authority as a revocable ocap handle, above the per-destination gate",
+    },
+    CommandSpec {
         name: "marz-grant",
         cap: cap::SPAWN,
         cap_name: "SPAWN",
@@ -6688,6 +6810,9 @@ fn dispatch(cmd: &str, arg: &str, plan: &KernelPlan, memory: &[MemoryRegion], he
         "agentrevoke-demo" => run_agentrevoke_demo(plan),
         "net-probe" => net_probe(),
         "marz-send" => run_marz_send(plan, arg),
+        "dev-revoke" => dev_authority_set(arg, false),
+        "dev-grant" => dev_authority_set(arg, true),
+        "dev-demo" => run_dev_demo(plan),
         "marz-grant" => marz_dest_authority(arg, true),
         "marz-revoke" => marz_dest_authority(arg, false),
         "marz-demo" => run_marz_demo(plan),

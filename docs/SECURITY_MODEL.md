@@ -128,11 +128,24 @@ So the Cairn namespace capability has full ocap revocation at three layers: the
 console gate, the untrusted-agent (`KHost`) gate, and the persisted object-owner
 check.
 
-What **remains** is breadth: the daemon still attests the *other* authority per
-IPC message with the coarse **bitmask** (kernel-attested, so unforgeable, but
-namespace-level), and the remaining task-capability bits (print, IPC, device,
-block) are not yet `ocap` handles. Migrating those is the largest remaining
-change; the namespace capability is the worked example of the target model.
+**Breadth: the object-like authorities are now all ocap-backed.** Beyond
+namespaces, the two other authorities that name real objects have been migrated:
+
+- **Devices.** Each device is an object with a generation-stamped handle
+  (`dev-revoke` / `dev-grant`). Revoking one stops every use of that device
+  regardless of finer authority — a kill-switch above the per-destination gate
+  (`dev-demo`). The grants themselves are now **per-device**: the kernel finds
+  the block device and the NIC and maps only their own pages, so neither daemon
+  can reach the other's hardware. (The block grant previously mapped the whole
+  virtio-mmio window.)
+- **Egress destinations.** Authority names a destination, not "the network", and
+  destinations are revoked individually (`marz-revoke <dest>`).
+
+What deliberately stays a simple bit is the process-level authority that does not
+name an object: `print`, `time`, `ipc`. These are ambient-style permissions of a
+task, not references to a resource, so a generation-stamped handle would add
+ceremony without adding a revocable object. If they ever name objects (a specific
+console, a specific channel), they should migrate too.
 
 ## Reviewer Notes
 
