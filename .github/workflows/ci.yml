@@ -9,6 +9,8 @@ on:
     branches:
       - main
       - develop
+  # Allow re-running CI by hand (GitHub occasionally drops a push event).
+  workflow_dispatch:
 
 env:
   CARGO_TERM_COLOR: always
