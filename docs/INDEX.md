@@ -30,6 +30,9 @@ This page is the primary navigation point for Dezh OS public review.
   review focus.
 - [Threat Model](THREAT_MODEL.md): what Dezh defends, what it does not, the
   trusted computing base, and the head-to-head vs user-space sandboxes.
+- [Marz — the guarded egress boundary](MARZ.md): the network edge as a
+  per-destination, intent-derived capability, DIFC-checked on export and recorded
+  as an irreversible effect; with the prior-art comparison it is built against.
 - [Package Signing](PACKAGE_SIGNING.md): a capability-native signing design —
   the supply-chain mistakes studied (TUF, xz, Sigstore, code-signing) and how
   Dezh avoids them by signing the *authority*, attenuating publishers, and

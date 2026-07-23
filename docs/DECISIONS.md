@@ -69,7 +69,8 @@ reviewing the authority model, not a production package ecosystem.
 | `Ahd` | An intent token: the declared capability ceiling and the only path to authority (derived capability ⊆ Ahd). | W8, planned |
 | `Sand` | The effect ledger: records `actor → intent → effect` on Cairn (a deed/record; also stone/waypoint, Cairn-adjacent). | W8, planned |
 | `Sfar` | A mission: the set of effects produced under one Ahd; reversible as a single unit. | W8, planned |
-| `Tbar` | The provenance graph: a queryable `actor → intent → effect` lineage. | W8, planned |
+| `Tbar` | The provenance graph: a queryable `actor → intent → effect` lineage. | shipped (W8) |
+| `Marz` | The guarded egress boundary (مرز, *border*): the network edge where an effect leaves the machine and becomes irreversible — a per-destination, intent-derived capability, DIFC-checked on export, recorded as an irreversible effect. See [MARZ.md](MARZ.md). | designed, M1 in progress |
 
 ## Naming Policy
 
