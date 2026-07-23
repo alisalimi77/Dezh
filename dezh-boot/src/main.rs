@@ -900,6 +900,7 @@ impl TaskResources {
 /// embedded here. The loader maps it into a fresh address space at runtime.
 const USERPROG_ELF: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/userprog.elf"));
 const VIRTIO_BLK_ELF: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/virtio-blk.elf"));
+const MARZ_ELF: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/marz.elf"));
 const BENCH_ELF: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/dezh-bench.elf"));
 const NOTE_ELF: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/dezh-note.elf"));
 const LAB_ELF: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/dezh-lab.elf"));
@@ -936,6 +937,38 @@ fn find_virtio_mmio(want_id: u32) -> Option<usize> {
         i += 1;
     }
     None
+}
+
+/// Marz M1: launch the egress daemon. It receives exactly two grants — the one
+/// discovered NIC page and the DMA window — plus PRINT. No block authority, no
+/// other device, and it never scans for hardware.
+fn run_marz_send() {
+    if find_virtio_mmio(VIRTIO_DEVICE_ID_NET).is_none() {
+        kprintln!("[marz] no virtio-net device; nothing to send (see net-probe)");
+        record_event("kernel", "marz.send", "virtio-net", "absent");
+        return;
+    }
+    kprintln!("[marz] launching the egress daemon with ONLY the NIC page + DMA grant");
+    run_foreground_processes(&[ProcessSpec::new(
+        MARZ_ELF,
+        TASK_PRINT | TASK_DEVICE_VIRTIO_NET,
+        0,
+    )
+    .args(virtio_dma_pa(), 0, 0)
+    .virtio_net()
+    .virtio_dma()]);
+    let st = unsafe { TEXIT[FIRST_FOREGROUND_TASK] };
+    record_event(
+        "kernel",
+        "marz.send",
+        "egress",
+        if st == 0 { "OK" } else { "fail" },
+    );
+    if st == 0 {
+        kprintln!("[marz] egress complete: a real frame left the machine (M1 = the device path)");
+    } else {
+        kprintln!("[marz] egress failed (status={st})");
+    }
 }
 
 /// Marz M1 groundwork: report whether a NIC is present and which slot it owns.
@@ -976,6 +1009,7 @@ struct ProcessSpec {
     personality: u8,
     map_uart: bool,
     map_virtio_blk: bool,
+    map_virtio_net: bool,
     map_virtio_dma: bool,
 }
 
@@ -991,6 +1025,7 @@ impl ProcessSpec {
             personality: PERS_NATIVE,
             map_uart: false,
             map_virtio_blk: false,
+            map_virtio_net: false,
             map_virtio_dma: false,
         }
     }
@@ -1002,6 +1037,12 @@ impl ProcessSpec {
 
     const fn virtio_blk(mut self) -> Self {
         self.map_virtio_blk = true;
+        self
+    }
+
+    /// Grant ONLY the discovered virtio-net page (per-device, not the window).
+    const fn virtio_net(mut self) -> Self {
+        self.map_virtio_net = true;
         self
     }
 
@@ -1247,7 +1288,28 @@ fn build_address_space(spec: &ProcessSpec, kind: TaskKind) -> Option<AddressSpac
             i += 1;
         }
     }
-    if spec.map_virtio_dma && spec.caps & (TASK_BLOCK_READ | TASK_BLOCK_WRITE) != 0 {
+    // Marz: grant exactly ONE device page — the NIC the kernel discovered — under
+    // its own capability. Unlike the block grant above, the daemon never sees the
+    // rest of the virtio-mmio window.
+    if spec.map_virtio_net && spec.caps & TASK_DEVICE_VIRTIO_NET != 0 {
+        let Some(nic_pa) = find_virtio_mmio(VIRTIO_DEVICE_ID_NET) else {
+            reclaim_resources(&mut resources);
+            return None;
+        };
+        if !map_page(
+            root,
+            DEV_VIRTIO_NET_VA,
+            nic_pa,
+            PTE_U | PTE_R | PTE_W,
+            &mut resources,
+        ) {
+            reclaim_resources(&mut resources);
+            return None;
+        }
+    }
+    if spec.map_virtio_dma
+        && spec.caps & (TASK_BLOCK_READ | TASK_BLOCK_WRITE | TASK_DEVICE_VIRTIO_NET) != 0
+    {
         let dma_pa = core::ptr::addr_of!(VIRTIO_DMA) as usize;
         let mut off = 0usize;
         while off < VIRTIO_DMA_SIZE {
@@ -5289,6 +5351,13 @@ const COMMANDS: &[CommandSpec] = &[
         help: "the ocap namespace gate covers the untrusted AGENT path: a revoked ns refuses the agent's write",
     },
     CommandSpec {
+        name: "marz-send",
+        cap: cap::SPAWN,
+        cap_name: "SPAWN",
+        group: "Effects",
+        help: "Marz M1: launch the egress daemon (NIC page + DMA only) and transmit one real frame",
+    },
+    CommandSpec {
         name: "net-probe",
         cap: cap::INSPECT,
         cap_name: "INSPECT",
@@ -6353,6 +6422,7 @@ fn dispatch(cmd: &str, arg: &str, plan: &KernelPlan, memory: &[MemoryRegion], he
         "nsrevoke-demo" => run_nsrevoke_demo(plan),
         "agentrevoke-demo" => run_agentrevoke_demo(plan),
         "net-probe" => net_probe(),
+        "marz-send" => run_marz_send(),
         "exfil-demo" => run_exfil_demo(),
         "taintflow-demo" => run_taintflow_demo(plan),
         "taint" => taint_show(),

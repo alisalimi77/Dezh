@@ -75,6 +75,11 @@ class QemuSession:
 def run_riscv64(qemu: str, kernel: Path) -> None:
     disk = tempfile.NamedTemporaryFile(prefix="dezh-disk-", suffix=".img", delete=False)
     disk_path = Path(disk.name)
+    # Marz: capture every frame that actually leaves the machine, so the egress
+    # test asserts real wire output rather than a printed claim.
+    pcap = tempfile.NamedTemporaryFile(prefix="dezh-egress-", suffix=".pcap", delete=False)
+    pcap_path = Path(pcap.name)
+    pcap.close()
     try:
         disk.truncate(2 * 1024 * 1024)
     finally:
@@ -100,6 +105,8 @@ def run_riscv64(qemu: str, kernel: Path) -> None:
             "user,id=n0",
             "-device",
             "virtio-net-device,netdev=n0",
+            "-object",
+            f"filter-dump,id=f0,netdev=n0,file={pcap_path}",
         ],
         timeout=60,
     )
@@ -514,6 +521,16 @@ def run_riscv64(qemu: str, kernel: Path) -> None:
                     "granted ONLY this page (cap TASK_DEVICE_VIRTIO_NET)",
                 ],
             ),
+            (
+                "marz-send",
+                [
+                    "launching the egress daemon with ONLY the NIC page + DMA grant",
+                    "[marz] virtio-net ready",
+                    "frame built: Ethernet+IPv4+UDP",
+                    "EGRESS: frame left the machine",
+                    "egress complete: a real frame left the machine",
+                ],
+            ),
             # --- DIFC ENFORCED on the real storage path -----------------------
             # Read vault (secret) taints the operator; a commit to a public ns is
             # then refused (no write-down) until an explicit declassify.
@@ -550,6 +567,15 @@ def run_riscv64(qemu: str, kernel: Path) -> None:
         transcript = session.text()
         print(transcript)
         session.stop()
+
+    # Marz: the frame must exist in the capture, not merely in the transcript.
+    blob = pcap_path.read_bytes()
+    if b"DEZH-MARZ-EGRESS-v0" not in blob:
+        raise AssertionError(
+            f"egress frame not found in the packet capture ({len(blob)} bytes) - "
+            "the daemon claimed it sent, but nothing reached the wire"
+        )
+    print(f"[marz] packet capture confirms egress: {len(blob)} bytes captured")
 
     # Second boot on the SAME disk: Cairn v1 state must survive a reboot
     # (F2 acceptance: rollback-restored value + hash verify after power cycle).
@@ -611,10 +637,11 @@ def run_riscv64(qemu: str, kernel: Path) -> None:
         transcript = session.text()
         print(transcript)
         session.stop()
-        try:
-            os.unlink(disk_path)
-        except OSError:
-            pass
+        for tmp in (disk_path, pcap_path):
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
 
 
 def run_x86_64(qemu: str, kernel: Path, iso: Path | None = None) -> None:

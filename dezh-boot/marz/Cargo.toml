@@ -1,0 +1,20 @@
+# Marz - the guarded egress boundary daemon. A separate RISC-V ELF loaded into
+# its own U-mode address space by dezh-boot, holding ONLY the granted virtio-net
+# MMIO page plus a DMA window. It never scans for devices and never touches the
+# block device. See docs/MARZ.md.
+[package]
+name = "marz"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[[bin]]
+name = "marz"
+path = "src/main.rs"
+
+[profile.release]
+panic = "abort"
+opt-level = "s"
+lto = true
+
+[workspace]

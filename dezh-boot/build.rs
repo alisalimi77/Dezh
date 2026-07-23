@@ -13,6 +13,7 @@ fn main() {
     let manifest = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
     build_user_elf(&manifest, "userprog", "userprog");
     build_user_elf(&manifest, "virtio-blk", "virtio-blk");
+    build_user_elf(&manifest, "marz", "marz");
     build_user_elf(&manifest, "bench-app", "dezh-bench");
     build_user_elf(&manifest, "note-app", "dezh-note");
     build_user_elf(&manifest, "lab-app", "dezh-lab");

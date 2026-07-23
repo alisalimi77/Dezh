@@ -110,8 +110,13 @@ one — and the DIFC gate is what stands in the way.
 
 ## 6. Phases (each CI-green, in the W8 style)
 
-- **M1 — device.** A user-space virtio-net daemon with an explicit MMIO + DMA
-  grant; transmit a raw frame. Mirrors the `virtio-block` daemon.
+- **M1 — device. DONE.** The `marz` daemon is a separate U-mode ELF holding
+  exactly two grants: the **single** virtio-net MMIO page the kernel discovered
+  (capability `TASK_DEVICE_VIRTIO_NET` — not the whole window the block grant
+  maps) and a DMA window. It never scans for hardware. It negotiates no features,
+  arms the transmit queue, builds a real Ethernet + IPv4 + UDP frame and sends
+  it. `marz-send` drives it; CI asserts the frame in QEMU's packet capture, so
+  the claim is verified **on the wire**, not from a print.
 - **M2 — the gate.** Per-destination egress capability derived from an intent;
   the DIFC declassification check on export; refusal paths with named reasons.
 - **M3 — the effect.** Each send recorded as an irreversible Sand effect, visible
