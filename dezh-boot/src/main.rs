@@ -506,6 +506,10 @@ const TASK_PRINT: usize = 1 << 0;
 const TASK_TIME: usize = 1 << 1;
 const TASK_IPC: usize = 1 << 2;
 const TASK_DEVICE_VIRTIO_BLK: usize = 1 << 3;
+// Marz (egress): a SEPARATE device capability for the NIC. The block grant maps
+// the whole virtio-mmio window (existing coarseness); the NIC grant is per-device
+// by design — the kernel finds the one net slot and maps only that page.
+const TASK_DEVICE_VIRTIO_NET: usize = 1 << 6;
 const TASK_BLOCK_READ: usize = 1 << 4;
 const TASK_BLOCK_WRITE: usize = 1 << 5;
 static CURRENT_TASK_CAPS: AtomicUsize = AtomicUsize::new(0);
@@ -910,6 +914,47 @@ const DEV_VIRTIO_BLK_VA: usize = 0x5000_0000;
 const VIRTIO_BLK_MMIO_PA: usize = 0x1000_1000;
 const VIRTIO_MMIO_STRIDE: usize = 0x1000;
 const VIRTIO_MMIO_COUNT: usize = 8;
+const VIRTIO_MMIO_MAGIC: u32 = 0x7472_6976;
+const VIRTIO_DEVICE_ID_NET: u32 = 1;
+const VIRTIO_MMIO_OFF_DEVICE_ID: usize = 0x008;
+/// Where a Marz daemon sees its granted NIC page (one device, not the window).
+const DEV_VIRTIO_NET_VA: usize = 0x5002_0000;
+
+/// Scan the virtio-mmio window for a device of `want_id` and return its physical
+/// base. The kernel may read the window directly (it lives in the kernel-only
+/// device mapping); a daemon never scans — it receives only the single page the
+/// kernel grants it.
+fn find_virtio_mmio(want_id: u32) -> Option<usize> {
+    let mut i = 0usize;
+    while i < VIRTIO_MMIO_COUNT {
+        let base = VIRTIO_BLK_MMIO_PA + i * VIRTIO_MMIO_STRIDE;
+        let magic = unsafe { read_volatile(base as *const u32) };
+        let dev = unsafe { read_volatile((base + VIRTIO_MMIO_OFF_DEVICE_ID) as *const u32) };
+        if magic == VIRTIO_MMIO_MAGIC && dev == want_id {
+            return Some(base);
+        }
+        i += 1;
+    }
+    None
+}
+
+/// Marz M1 groundwork: report whether a NIC is present and which slot it owns.
+/// This is the device the egress boundary will be built on; nothing is granted
+/// to anyone by probing.
+fn net_probe() {
+    match find_virtio_mmio(VIRTIO_DEVICE_ID_NET) {
+        Some(pa) => {
+            let slot = (pa - VIRTIO_BLK_MMIO_PA) / VIRTIO_MMIO_STRIDE;
+            kprintln!("[marz] virtio-net present: mmio_pa={pa:#x} slot={slot}");
+            kprintln!("[marz] a Marz daemon would be granted ONLY this page (cap TASK_DEVICE_VIRTIO_NET), never the whole window");
+            record_event("kernel", "marz.probe", "virtio-net", "OK");
+        }
+        None => {
+            kprintln!("[marz] no virtio-net device present (QEMU needs -device virtio-net-device)");
+            record_event("kernel", "marz.probe", "virtio-net", "absent");
+        }
+    }
+}
 const VIRTIO_DMA_VA: usize = 0x5100_0000;
 const VIRTIO_DMA_SIZE: usize = 16 * 1024;
 const VIRTIO_DATA_OFF: usize = 8_192 + 16;
@@ -5244,6 +5289,13 @@ const COMMANDS: &[CommandSpec] = &[
         help: "the ocap namespace gate covers the untrusted AGENT path: a revoked ns refuses the agent's write",
     },
     CommandSpec {
+        name: "net-probe",
+        cap: cap::INSPECT,
+        cap_name: "INSPECT",
+        group: "Effects",
+        help: "Marz M1: report the virtio-net device the egress boundary will be built on",
+    },
+    CommandSpec {
         name: "exfil-demo",
         cap: cap::INSPECT,
         cap_name: "INSPECT",
@@ -6300,6 +6352,7 @@ fn dispatch(cmd: &str, arg: &str, plan: &KernelPlan, memory: &[MemoryRegion], he
         "ns-grant" => ns_grant(plan, arg),
         "nsrevoke-demo" => run_nsrevoke_demo(plan),
         "agentrevoke-demo" => run_agentrevoke_demo(plan),
+        "net-probe" => net_probe(),
         "exfil-demo" => run_exfil_demo(),
         "taintflow-demo" => run_taintflow_demo(plan),
         "taint" => taint_show(),

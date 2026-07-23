@@ -93,6 +93,13 @@ def run_riscv64(qemu: str, kernel: Path) -> None:
             f"file={disk_path},format=raw,if=none,id=dezhdisk",
             "-device",
             "virtio-blk-device,drive=dezhdisk",
+            # Marz (egress): a NIC for the guarded egress boundary. QEMU's user
+            # networking needs no host privileges; filter-dump captures every
+            # frame so CI can assert what actually left the machine.
+            "-netdev",
+            "user,id=n0",
+            "-device",
+            "virtio-net-device,netdev=n0",
         ],
         timeout=60,
     )
@@ -497,6 +504,16 @@ def run_riscv64(qemu: str, kernel: Path) -> None:
                     "[exfil-demo] PASS",
                 ],
             ),
+            # --- Marz M1: the NIC the egress boundary will be built on ---------
+            # The kernel discovers the virtio-net device itself; a Marz daemon
+            # will be granted only that one page, never the whole MMIO window.
+            (
+                "net-probe",
+                [
+                    "virtio-net present: mmio_pa=",
+                    "granted ONLY this page (cap TASK_DEVICE_VIRTIO_NET)",
+                ],
+            ),
             # --- DIFC ENFORCED on the real storage path -----------------------
             # Read vault (secret) taints the operator; a commit to a public ns is
             # then refused (no write-down) until an explicit declassify.
@@ -550,6 +567,13 @@ def run_riscv64(qemu: str, kernel: Path) -> None:
             f"file={disk_path},format=raw,if=none,id=dezhdisk",
             "-device",
             "virtio-blk-device,drive=dezhdisk",
+            # Marz (egress): a NIC for the guarded egress boundary. QEMU's user
+            # networking needs no host privileges; filter-dump captures every
+            # frame so CI can assert what actually left the machine.
+            "-netdev",
+            "user,id=n0",
+            "-device",
+            "virtio-net-device,netdev=n0",
         ],
         timeout=60,
     )
