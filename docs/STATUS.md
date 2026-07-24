@@ -47,7 +47,7 @@ true today, so a reviewer never has to guess.
   gives coarse, honest revocation for long-lived agents (`lease-demo`). What is
   still **not** done is clawing back a capability already handed to and running
   inside another task mid-execution; attenuation, task-death, and rollback cover
-  the common cases. See [SECURITY_MODEL.md](SECURITY_MODEL.md).
+  the common cases. See [Enforcement model](SECURITY_MODEL.md#enforcement-model).
 - **No IOMMU.** DMA isolation for the block daemon is a bounce-window
   convention, not hardware-enforced. Accelerator/DMA isolation (D017) is a
   hypothesis, not implemented.
@@ -57,7 +57,7 @@ true today, so a reviewer never has to guess.
   it against a root-anchored trust store, attenuating the grant to the
   publisher's ceiling (`granted = requested ∩ ceiling`) and refusing tampered or
   revoked-key packages — proven end to end by `sig-demo` (see
-  [PACKAGE_SIGNING.md](PACKAGE_SIGNING.md)). What is **not** done yet: a stand-
+  [Package signing](SUBSYSTEMS.md#package-signing)). What is **not** done yet: a stand-
   alone developer signing CLI, a root-signed trust store loaded from disk with
   key rotation (today it is kernel-embedded), and verifying packages on the live
   `pkg-recv` upload path. No online PKI / certificate-transparency service.
@@ -71,7 +71,7 @@ true today, so a reviewer never has to guess.
   (`dezh_core::ocap` + the `cap-demo`: generation-stamped object handles with
   per-object revocation and an attenuated delegation graph), but the live IPC /
   Cairn plumbing has **not** been migrated onto it yet — that migration is the
-  single largest planned change. See [SECURITY_MODEL.md](SECURITY_MODEL.md).
+  single largest planned change. See [Enforcement model](SECURITY_MODEL.md#enforcement-model).
 - **Confidentiality: DIFC is enforced on the storage path; other channels are
   not yet.** The information-flow-control primitive is built (`dezh_core::difc`)
   and **enforced on the live Cairn path** (`taintflow-demo`): reading `ns=vault`
@@ -79,7 +79,7 @@ true today, so a reviewer never has to guess.
   refused (no write-down) until a privileged `declassify`. What is not done is
   enforcing the same taint across the U-mode client→daemon hop, IPC, and
   networking (which does not exist yet). Confidentiality is real where data lives
-  (Cairn), not yet across every channel. See [THREAT_MODEL.md](THREAT_MODEL.md) §5.
+  (Cairn), not yet across every channel. See [Threat model](SECURITY_MODEL.md#threat-model) §5.
 - **W8 effect-runtime honesty.** External effects (`email.send`, `prod.deploy`,
   a compensatable `api-key`) are **modeled**, not wired to real connectors — the
   point proven is the *mechanism* (attribution, honest rollback, compensation),
@@ -88,7 +88,7 @@ true today, so a reviewer never has to guess.
   hashed for corruption detection + rollback, not signed against a malicious
   writer). The commit log is a fixed 255 slots with no GC yet. Intents (`Ahd`)
   are runtime sessions, not persisted, and there is no lease/revocation for
-  long-lived agents. See [THREAT_MODEL.md](THREAT_MODEL.md).
+  long-lived agents. See [Threat model](SECURITY_MODEL.md#threat-model).
 - **In-kernel U-mode task caveat (RISC-V).** Some baked demo tasks share the
   kernel binary and must avoid non-inlined calls; real apps use the separate-ELF
   and `.dzp` loader paths, which do not have this constraint.
@@ -96,6 +96,6 @@ true today, so a reviewer never has to guess.
 ## How to check these claims yourself
 
 See [REVIEWER_GUIDE.md](REVIEWER_GUIDE.md) for the exact commands, or
-[QUICKSTART_VM.md](QUICKSTART_VM.md) to boot a release in a VM. Everything in
+[Running in a VM](GETTING_STARTED.md#running-in-a-vm) to boot a release in a VM. Everything in
 the first two tables above is asserted by `tools/ci/qemu_smoke.py` and runs on
 every push.

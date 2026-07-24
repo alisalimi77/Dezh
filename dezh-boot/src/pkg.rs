@@ -1925,7 +1925,7 @@ pub(crate) fn sand_demo_effect(plan: &KernelPlan) -> u16 {
     }
 }
 
-// --- Package signing: trust store + verification (see docs/PACKAGE_SIGNING.md) -
+// --- Package signing: trust store + verification (see docs/SUBSYSTEMS.md (Package signing)) -
 //
 // The trust store is root-anchored publisher keys, each with a capability
 // CEILING and a revocation flag. Install verifies the signature, requires a

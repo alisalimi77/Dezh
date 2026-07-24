@@ -20,8 +20,8 @@ VM. Since v0.1-review:
 - **x86 exception IDT (M2):** 32-vector exception table; faults are reported and
   halted, not silent triple-faults.
 - **Release + docs:** the release ships the bootable ISO and a `RUN.txt`;
-  new `QUICKSTART_VM.md`, `STATUS.md` (honest limitations), a plain revocation
-  answer in `SECURITY_MODEL.md`, and a `REVIEWER_GUIDE.md` rewritten around the
+  new `GETTING_STARTED.md#running-in-a-vm`, `STATUS.md` (honest limitations), a plain revocation
+  answer in `SECURITY_MODEL.md#enforcement-model`, and a `REVIEWER_GUIDE.md` rewritten around the
   four demos.
 
 ## Unreleased
@@ -51,8 +51,8 @@ All parts are green in `tools/ci/qemu_smoke.py`.
   produced the last denial; `tbar <ahd>` renders the `actor → intent → effect`
   provenance graph.
 - **Flagship narrative:** `overnight` — "leave a coding agent loose overnight" —
-  collapses the above into one story (`docs/demo-transcript-overnight.md`).
-- **Credibility:** `docs/THREAT_MODEL.md` (trusted base, defenses + mechanisms,
+  collapses the above into one story (`docs/transcripts/overnight.md`).
+- **Credibility:** `docs/SECURITY_MODEL.md#threat-model` (trusted base, defenses + mechanisms,
   explicit non-goals, head-to-head vs user-space sandboxes) and a per-effect
   ledger-overhead analysis in `dezh-boot/BENCH.md`.
 

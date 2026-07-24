@@ -1,7 +1,7 @@
 # Dezh: an intent-native, effect-accountable OS substrate
 
 **Whitepaper v1** · research prototype · QEMU-only · see
-[`STATUS.md`](STATUS.md) for the honest state and [`THREAT_MODEL.md`](THREAT_MODEL.md)
+[`STATUS.md`](STATUS.md) for the honest state and [`SECURITY_MODEL.md#threat-model`](SECURITY_MODEL.md#threat-model)
 for what is and is not defended.
 
 ## Abstract
@@ -76,7 +76,7 @@ The model has five layered claims, each enforced by a concrete mechanism:
 
 The precise authority rules (derivation, attenuation, the effect-record schema,
 and the invariants they must satisfy) are stated in
-[`SECURITY_MODEL.md`](SECURITY_MODEL.md).
+[`SECURITY_MODEL.md#enforcement-model`](SECURITY_MODEL.md#enforcement-model).
 
 ## 3. Architecture
 
@@ -112,7 +112,7 @@ transcripts live in `docs/`.
   effect and its provenance surviving a reboot.
 - **The flagship.** `overnight` collapses the whole story — an agent loose under
   one intent, a morning of forecast + provenance + honest rollback, and a
-  contained escape — into one command (`docs/demo-transcript-overnight.md`).
+  contained escape — into one command (`docs/transcripts/overnight.md`).
 - **Measurement (D015).** Performance claims are architecture-backed *and*
   measured, never bare superlatives. The one real-silicon, same-CPU figure is
   the capability-check cost (~1 ns) vs the Linux syscall floor (~49 ns);
@@ -134,7 +134,7 @@ carrying a reversibility class, honest forecastable saga rollback of a whole
 mission — made unbypassable by a from-scratch no-ambient-authority kernel, and
 aimed at autonomous agents as first-class principals.
 
-## 6. Limitations (see `STATUS.md`, `THREAT_MODEL.md`)
+## 6. Limitations (see `STATUS.md`, `SECURITY_MODEL.md#threat-model`)
 
 QEMU-only; not formally verified (seL4 is the bar); external effects are
 *modeled*, not wired to real connectors; ledger integrity trusts the storage

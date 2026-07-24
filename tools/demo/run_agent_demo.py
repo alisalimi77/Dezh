@@ -72,7 +72,7 @@ def main() -> int:
     parser.add_argument(
         "--transcript",
         type=Path,
-        default=REPO / "docs" / "demo-transcript-agent-f1.md",
+        default=REPO / "docs" / "transcripts" / "agent-f1.md",
     )
     args = parser.parse_args()
 

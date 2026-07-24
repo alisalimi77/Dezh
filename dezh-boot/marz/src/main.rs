@@ -7,7 +7,7 @@
 //!
 //! M1 transmits one raw frame so the device path is proven end to end; the
 //! authority gate (per-destination capability + DIFC declassification) and the
-//! effect record land in M2/M3. See `docs/MARZ.md`.
+//! effect record land in M2/M3. See `docs/SUBSYSTEMS.md (Marz)`.
 
 #![no_std]
 #![no_main]

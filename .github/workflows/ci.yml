@@ -41,6 +41,9 @@ jobs:
       - name: Run public review hygiene scan
         run: python3 tools/review/scan_public.py
 
+      - name: Check documentation links and sprawl
+        run: python3 tools/ci/check_docs.py
+
       - name: Compile Python review tooling
         run: >
           python3 -m py_compile
@@ -51,6 +54,7 @@ jobs:
           tools/demo/run_review_demo.py
           tools/demo/run_agent_demo.py
           tools/ci/qemu_smoke.py
+          tools/ci/check_docs.py
           tools/ci/sdk_test.py
           tools/sdk/build_pkg.py
           tools/sdk/install_pkg.py

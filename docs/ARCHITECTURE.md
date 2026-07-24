@@ -1,11 +1,20 @@
-# Dezh Architecture
+# Architecture
+
+The layers and their authority boundaries, the diagrams that show them, and where
+each piece lives in the tree.
+
+---
+
+## Design
+
+<!-- was docs/ARCHITECTURE.md until the 2026-07-23 consolidation -->
 
 Dezh is a bare-metal OS research prototype focused on explicit authority,
 service-mediated effects, and recoverable lifecycle operations.
 
-For visual diagrams, see [ARCHITECTURE_DIAGRAMS.md](ARCHITECTURE_DIAGRAMS.md).
+For visual diagrams, see [Diagrams](ARCHITECTURE.md#diagrams).
 
-## Design Center
+### Design Center
 
 The current prototype is built around four rules:
 
@@ -19,7 +28,7 @@ concepts. The current implementation is not fully intent-native yet, but the
 package, service, IPC, and storage work is deliberately moving toward that
 shape.
 
-## Boot Flow
+### Boot Flow
 
 1. OpenSBI starts the RISC-V kernel in S-mode on QEMU `virt`.
 2. The kernel validates the boot contract from `dezh-kernel`.
@@ -30,7 +39,7 @@ shape.
 6. Long-lived services such as `virtio-block` are started explicitly or lazily
    from the registry.
 
-## Kernel Responsibilities
+### Kernel Responsibilities
 
 The kernel owns the confinement boundary:
 
@@ -45,7 +54,7 @@ The kernel owns the confinement boundary:
 
 The kernel does not implement the current block I/O path directly.
 
-## Process Model
+### Process Model
 
 Each ELF process receives:
 
@@ -59,7 +68,7 @@ Each ELF process receives:
 Foreground clients are reclaimed after exit or fault. Daemons remain alive until
 they stop, fault, or are explicitly restarted.
 
-## Capability Model
+### Capability Model
 
 Task capability bits currently cover:
 
@@ -77,7 +86,7 @@ into runtime grants; a manifest `cairn-read`/`cairn-write` grant maps to the
 app's **own** namespace bit only (matched by app name) — a manifest can never
 name another app's namespace.
 
-## IPC
+### IPC
 
 The base IPC syscall sends a small payload, a scalar word, and an attenuated
 capability grant. Service paths pack a typed v0 envelope into the scalar word:
@@ -96,7 +105,7 @@ against values a client cannot forge from user space. This is how the storage
 daemon enforces per-namespace access, and why its denials can name the exact
 missing capability (`why-denied` direction from the strategic plan).
 
-## User-Space Block Driver
+### User-Space Block Driver
 
 The `virtio-block` daemon is a separate U-mode ELF. It alone receives:
 
@@ -120,7 +129,7 @@ The daemon handles:
 - note/lab/calc/vault private storage
 - stop and controlled fault demo
 
-## Cairn v1 (Commit-Log Store)
+### Cairn v1 (Commit-Log Store)
 
 Cairn v1 lives inside the storage daemon on sectors 1600..1855:
 
@@ -140,13 +149,13 @@ Semantics:
 
 The commit record fields (actor, reversibility class, provenance chain) are
 the seed of the effect ledger described in
-[STRATEGIC_DIRECTION.md](STRATEGIC_DIRECTION.md) (decision D020).
+[Strategic direction](ROADMAP.md#strategic-direction) (decision D020).
 
 Dezh-IR apps reach the store through the kernel's IR host, which routes
 `cairn_put`/`cairn_get` host calls over typed IPC to the daemon with the app's
 own namespace capability — there is no kernel-side block I/O shortcut.
 
-## Service Registry
+### Service Registry
 
 The service registry tracks:
 
@@ -165,7 +174,7 @@ Manual stop and controlled fault are not hidden by automatic restart. Review
 commands use explicit `svc-restart` so service recovery remains visible and
 deterministic.
 
-## Package Store
+### Package Store
 
 The SDK builds `.dzp` packages. The OS stores them through the user-space block
 service, not through a kernel block path.
@@ -184,7 +193,7 @@ Current package features:
 Only `Active` packages are runnable. `Removed`, `Corrupt`, `Pending*`, and
 `Quarantined` packages do not run.
 
-## Embedded Apps
+### Embedded Apps
 
 The current embedded app set is intentionally mixed:
 
@@ -195,7 +204,7 @@ The current embedded app set is intentionally mixed:
 
 These are review demos, not a production app ecosystem.
 
-## Storage Path
+### Storage Path
 
 The storage path is:
 
@@ -207,7 +216,7 @@ console command -> foreground client -> typed IPC -> virtio-block daemon
 This path is central to the project. It proves that storage does not silently
 fall back to a kernel block driver.
 
-## Review Surface
+### Review Surface
 
 Useful review commands:
 
@@ -231,3 +240,293 @@ Useful review tools:
 - `tools/review/scan_public.py`
 - `tools/demo/run_review_demo.py`
 - `tools/demo/run_agent_demo.py` (F1 agent-containment transcript)
+
+---
+
+## Diagrams
+
+<!-- was docs/ARCHITECTURE_DIAGRAMS.md until the 2026-07-23 consolidation -->
+
+These diagrams are part of the review surface. They show the current prototype,
+not a production promise.
+
+### System Overview
+
+```mermaid
+flowchart TB
+    subgraph Kernel["Kernel boundary"]
+        Trap["Trap + syscall handling"]
+        VM["Address-space builder"]
+        Sched["Task scheduler"]
+        IPC["IPC queues + typed timeout"]
+        Services["Service registry"]
+        Frames["Frame ownership + reclaim"]
+    end
+
+    Console["Console task"] --> Trap
+    Console --> Services
+
+    subgraph User["U-mode processes"]
+        VBlk["virtio-block daemon"]
+        Client["Foreground clients"]
+        Apps["Installed apps"]
+        Bench["Benchmark app"]
+    end
+
+    Trap --> User
+    IPC --> VBlk
+    Client -->|typed IPC| VBlk
+    Apps -->|declared caps only| IPC
+
+    VBlk -->|explicit MMIO grant| MMIO["virtio-mmio page"]
+    VBlk -->|explicit DMA window| DMA["DMA bounce window"]
+    DMA --> Disk["QEMU raw disk image"]
+```
+
+### Boot And Service Graph
+
+```mermaid
+flowchart LR
+    OpenSBI["OpenSBI"] --> Boot["dezh-boot"]
+    Boot --> Contract["Validate boot contract"]
+    Contract --> Paging["Install traps + Sv39"]
+    Paging --> Registry["Build service registry"]
+    Registry --> Console["Start console"]
+
+    Console -->|lazy start| VBlk["virtio-block service"]
+    VBlk --> Running["Running"]
+    Running -->|svc-stop| Stopped["Stopped"]
+    Running -->|svc-fault-demo| Faulted["Faulted"]
+    Stopped -->|svc-restart| Running
+    Faulted -->|svc-restart| Running
+```
+
+### Storage Authority Path
+
+```mermaid
+sequenceDiagram
+    participant C as Console command
+    participant K as Kernel launch gate
+    participant F as Foreground client
+    participant D as virtio-block daemon
+    participant Disk as Raw disk image
+
+    C->>K: request storage operation
+    K->>F: launch with IPC + DMA, no MMIO
+    F->>D: typed IPC request
+    D->>Disk: block I/O through granted MMIO/DMA
+    Disk-->>D: status/data
+    D-->>F: typed status
+    F-->>C: command result
+```
+
+Important property: clients do not receive device MMIO authority. The daemon is
+the only process with the virtio MMIO page grant.
+
+### Package Lifecycle
+
+```mermaid
+stateDiagram-v2
+    [*] --> Empty
+    Empty --> PendingInstall: pkg-recv
+    PendingInstall --> Active: commit verified blob
+    PendingInstall --> Quarantined: suspicious recovery
+    Active --> PendingRemove: pkg-remove
+    PendingRemove --> Removed: commit remove
+    Removed --> Empty: pkg-gc run
+    Active --> Active: pkg-update commit
+    Active --> Active: pkg-rollback
+    Active --> Corrupt: blob/registry verify failure
+    Corrupt --> Quarantined: explicit recovery
+    Quarantined --> [*]
+```
+
+Lifecycle rules:
+
+- Only `Active` packages are runnable.
+- New capabilities during update require explicit `--allow-new-caps`.
+- Pins block update and rollback until explicit review.
+- GC never touches `Active`, `Corrupt`, or `Quarantined` slots.
+
+### Disk Layout
+
+```mermaid
+flowchart LR
+    S0["sector 0\ninstall marker"] --> S2["sector 2\nCairn v0 current"]
+    S2 --> S3["sector 3\nCairn v0 previous"]
+    S3 --> S4["sector 4\nroot metadata"]
+    S4 --> S5["sectors 5..7\napp registry v0"]
+    S5 --> S24["sector 24\npackage marker"]
+    S24 --> S25["sectors 25..31\npackage registry"]
+    S25 --> S32["sectors 32..39\npackage journal"]
+    S32 --> S64["sectors 64..575\nactive package blobs"]
+    S64 --> P["sectors 576..1087\nprevious blobs"]
+    P --> ST["sectors 1088..1599\nstage blobs"]
+    ST --> C1["sector 1600\nCairn v1 superblock"]
+    C1 --> C2["sectors 1601..1855\nCairn v1 commit log"]
+```
+
+The package store is intentionally small and inspectable in v0:
+
+- 8 package slots
+- 32 KiB per slot
+- active, previous, and stage blob areas
+- journaled recovery before package execution
+
+### Cairn v1 Commit Log
+
+Each namespace is a ref into an append-only chain of commit records. Rollback
+moves the ref; nothing is erased.
+
+```mermaid
+flowchart RL
+    subgraph Super["Superblock (sector 1600)"]
+        NSnote["ns=note head"]
+        NSvault["ns=vault head"]
+        Next["next free slot"]
+    end
+
+    C2["commit slot 2\nvalue: bad-write\nparent: 1\nhash + actor"] --> C1["commit slot 1\nvalue: note-v2\nparent: 0\nhash + actor"]
+    C1 --> C0["commit slot 0\nvalue: note-v1\nparent: none\nhash + actor"]
+
+    NSnote -. before rollback .-> C2
+    NSnote == after rollback 1 ==> C1
+```
+
+Commit record fields — parent ref, object hash (FNV-1a), actor task id, and a
+reversibility flag — are the on-disk seed of the effect ledger direction in
+[Strategic direction](ROADMAP.md#strategic-direction) (D020).
+
+### Namespace Capability Attestation (F1/F2 core mechanic)
+
+The storage daemon never trusts what a client *says*; it checks what the
+kernel *attests* the sender holds.
+
+```mermaid
+sequenceDiagram
+    participant A as Agent app (holds ns=agent bit)
+    participant K as Kernel (SYS_SEND / SYS_RECV)
+    participant D as Storage daemon
+
+    A->>K: send commit request (ns=note)
+    Note over K: kernel records sender's<br/>capability set in the message
+    K->>D: deliver request + attested sender caps
+    Note over D: check bit for ns=note<br/>in attested caps
+    D-->>A: DENIED: ns=note requires CAIRN_NS_0,<br/>sender holds caps=0x...
+
+    A->>K: send commit request (ns=agent)
+    K->>D: deliver request + attested sender caps
+    D-->>A: OK: commit slot N, parent P, hash H
+```
+
+### Multi-ISA Execution (F3 direction)
+
+The same Dezh-IR bytecode runs on every Dezh kernel; only the thin host
+bindings differ per ISA.
+
+```mermaid
+flowchart TB
+    Source[".dzs source (SDK assembler)"] --> IR["Dezh-IR bytecode\n(verified, capability-gated)"]
+    IR --> Engine["dezh-core engine\n(one shared no_std crate)"]
+    Engine --> RV["RISC-V kernel host\nprint → UART, cairn → storage daemon"]
+    Engine --> X86["x86_64 kernel host\nprint → COM1"]
+```
+
+### Authority And Denial
+
+```mermaid
+flowchart TB
+    Request["Operation request"] --> Intent["Declared operation / intent"]
+    Intent --> CapCheck["Capability check"]
+    CapCheck -->|allowed| Route["Service route / namespace"]
+    Route --> Effect["Effect record or command result"]
+    CapCheck -->|denied| Denial["Structured denial"]
+    Denial --> Explain["why-denied direction"]
+```
+
+The current implementation has capability-gated operations and audit events.
+The strategic direction is to make intent and effect records first-class OS
+objects.
+
+---
+
+## Repository layout
+
+<!-- was docs/REPO_STRUCTURE.md until the 2026-07-23 consolidation -->
+
+This repository mixes a bare-metal OS prototype, host-side research crates, SDK
+tooling, QEMU test harnesses, and public review documentation. This file is the
+map for reviewers.
+
+### Bare-Metal Targets
+
+| Path | Role |
+| --- | --- |
+| `dezh-boot/` | Main RISC-V QEMU `virt` boot target. Contains kernel entry, console, task model, service registry, package store, package lifecycle, embedded apps, and user-space process launch. |
+| `dezh-boot/virtio-blk/` | User-space `virtio-block` daemon. It receives explicit MMIO and DMA grants and performs the prototype disk I/O path. |
+| `dezh-boot/userprog/` | Small user program used by legacy demos and process-launch smoke paths. |
+| `dezh-boot/bench-app/` | U-mode benchmark app used by `bench-all`. |
+| `dezh-boot/note-app/` | Embedded note demo app. |
+| `dezh-boot/lab-app/` | Embedded multi-task lab demo app. |
+| `dezh-boot/calc-app/` | Embedded calculator demo app. |
+| `dezh-boot/vault-app/` | Embedded private-value demo app. |
+| `dezh-boot-x86/` | Smaller x86_64 boot/smoke target for multi-ISA validation. |
+
+### Shared Crates
+
+| Path | Role |
+| --- | --- |
+| `dezh-core/` | Shared `.dzp`, base64, and Dezh-IR support used by the boot target and SDK-adjacent code. |
+| `dezh-kernel/` | Boot contract, kernel plan, install manifest, and plan validation logic. |
+| `dezh-ir/` | Dezh IR contract crate. |
+| `dezh-cairn/` | Host-side persistent object/ref prototype. |
+| `dezh-host/` | Host capability model experiments and tests. |
+| `dezh-ipc/` | Host-side IPC/capability experiments. |
+| `dezh-identity/` | Delegation and invocation-chain experiments. |
+| `dezh-runtime/` | Host-side runtime boundary experiments. |
+| `dezh-linux/` | Compatibility and authority experiments for Linux-like paths. |
+| `dezh-scheduler/` | Scheduling-policy experiments. |
+
+### Tools
+
+| Path | Role |
+| --- | --- |
+| `tools/ci/qemu_smoke.py` | Boots RISC-V or x86_64 QEMU targets and asserts expected console behavior. |
+| `tools/ci/sdk_test.py` | End-to-end SDK/package lifecycle acceptance test across multiple QEMU reboots. |
+| `tools/sdk/build_pkg.py` | Builds `.dzp` packages from app directories. |
+| `tools/sdk/install_pkg.py` | Boots Dezh in QEMU and streams packages through the console upload protocol. |
+| `tools/sdk/dzas.py` | Tiny Dezh-IR assembler for SDK apps. |
+| `tools/demo/run_review_demo.py` | Runs the review demo and captures a transcript. |
+| `tools/demo/run_agent_demo.py` | Runs an agent-containment demo transcript. |
+| `tools/review/scan_public.py` | Public hygiene scan for review-package readiness. |
+| `tools/review/make_review_package.py` | Builds a clean review package snapshot. |
+
+### Documentation
+
+| Path | Role |
+| --- | --- |
+| `README.md` | Public landing page and quick review path. |
+| `docs/ARCHITECTURE.md` | Architecture explanation. |
+| `docs/ARCHITECTURE.md#diagrams` | Mermaid diagrams for the current prototype. |
+| `docs/SECURITY_MODEL.md#enforcement-model` | Threat model and enforced/not-yet-enforced boundaries. |
+| `docs/ROADMAP.md#strategic-direction` | Intent-native/effect-accountable direction and open review questions. |
+| `docs/SDK_GUIDE.md` | How to build, install, update, and run `.dzp` packages. |
+| `docs/REVIEWER_GUIDE.md` | Short path for external technical review. |
+| `docs/ROADMAP.md` | Roadmap and current milestone direction. |
+| `docs/DECISIONS.md` | Architecture decision notes. |
+| `docs/REVIEWER_GUIDE.md#running-the-demos` | Manual demo script. |
+| `docs/WHITEPAPER.md` | Technical whitepaper draft. |
+| `docs/OUTREACH.md` | Draft outreach templates. |
+
+### Generated/Local Artifacts
+
+These should not be committed:
+
+- `target/`
+- `dist/`
+- `graphify-out/`
+- raw QEMU disk images (`*.img`)
+- Python bytecode caches
+
+The repository intentionally keeps reproducible tools and transcripts, but not
+local generated build output.

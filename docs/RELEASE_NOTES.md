@@ -10,7 +10,7 @@ boot Dezh in a VM with no source tree.
 - Boot the x86_64 kernel from a real bootable ISO in **VirtualBox / VMware** (or
   QEMU `-cdrom`); it reaches 64-bit long mode, installs and runs a `.dzp` agent
   package, enforces the print capability, and catches a deliberately-raised CPU
-  exception instead of triple-faulting. See `QUICKSTART_VM.md`.
+  exception instead of triple-faulting. See `GETTING_STARTED.md#running-in-a-vm`.
 - Run the RISC-V capability console — agent containment (F1), Cairn versioned
   storage with rollback across reboot (F2), the same byte-identical Dezh-IR app
   on both ISAs (F3), and a real unmodified Linux ELF under Pol (F4).
@@ -75,8 +75,8 @@ python tools/review/run_full_review.py --full
 ```
 
 Expected release artifacts are described in
-[Release Process](RELEASE_PROCESS.md). GitHub Packages usage is described in
-[Packages And Releases](PACKAGES_AND_RELEASES.md).
+[Release Process](RELEASING.md#release-process). GitHub Packages usage is described in
+[Packages And Releases](RELEASING.md#packages-and-releases).
 
 ## Known Limitations
 

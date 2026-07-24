@@ -20,8 +20,8 @@
   <a href="#quick-review-path">Quick Review</a> ·
   <a href="#flagship-demos">Flagship Demos</a> ·
   <a href="docs/ARCHITECTURE.md">Architecture</a> ·
-  <a href="docs/SECURITY_MODEL.md">Security Model</a> ·
-  <a href="docs/RELEASE_PROCESS.md">Release Process</a>
+  <a href="docs/SECURITY_MODEL.md#enforcement-model">Security Model</a> ·
+  <a href="docs/RELEASING.md#release-process">Release Process</a>
 </p>
 
 Dezh OS is a bare-metal operating-system prototype built around one strict
@@ -83,7 +83,7 @@ security boundary. Dezh is exploring a tighter model:
   not a hidden kernel block path. (Honest caveat: this buys fault isolation and
   least privilege *of the driver process* today; memory safety against a
   *malicious* driver that programs the device to DMA anywhere needs an IOMMU,
-  which Dezh does not have yet — see [threat model](docs/THREAT_MODEL.md).)
+  which Dezh does not have yet — see [threat model](docs/SECURITY_MODEL.md#threat-model).)
 - **No silent lifecycle changes:** package updates, new capabilities, rollback,
   remove, and physical cleanup are explicit.
 
@@ -105,7 +105,7 @@ effect to its authorizing intent and **reverse a whole agent mission** on a
 substrate with no ambient authority underneath to route around. ISA (RISC-V,
 x86_64) is an implementation backend, not the identity: the same program should
 mean the same thing on any backend. See
-[strategic direction](docs/STRATEGIC_DIRECTION.md) (D021).
+[strategic direction](docs/ROADMAP.md#strategic-direction) (D021).
 
 <p align="center">
   <img src="docs/assets/comparison.svg" alt="Honest capability-comparison matrix: Dezh vs seL4, Genode, Fuchsia, gVisor" width="820">
@@ -118,7 +118,7 @@ package signing here is capability-native: a signature binds the *authority* a
 package requests, and a publisher key can only authorize capabilities within its
 own ceiling (`granted = requested ∩ signer_ceiling`). Full lineage and
 per-system detail in [Related Work and Novelty](docs/RELATED_WORK.md); the
-signing design in [Package Signing](docs/PACKAGE_SIGNING.md).
+signing design in [Package Signing](docs/SUBSYSTEMS.md#package-signing).
 
 ```mermaid
 flowchart LR
@@ -181,17 +181,17 @@ for scope and honest wording rules):
 
 | # | Differentiator | Status | Proof |
 | --- | --- | --- | --- |
-| F1 | Agent containment: narrow grants, kernel denial, attenuated delegation, rollback of an agent's damage | **Reproducible today** (in CI) | [`tools/demo/run_agent_demo.py`](tools/demo/run_agent_demo.py) → [transcript](docs/demo-transcript-agent-f1.md) |
+| F1 | Agent containment: narrow grants, kernel denial, attenuated delegation, rollback of an agent's damage | **Reproducible today** (in CI) | [`tools/demo/run_agent_demo.py`](tools/demo/run_agent_demo.py) → [transcript](docs/transcripts/agent-f1.md) |
 | F2 | Cairn storage: versioned commits, capability-gated namespaces, rollback across reboot | **Reproducible today** (in CI) | `cairn-demo` console flow, exercised by [`tools/ci/qemu_smoke.py`](tools/ci/qemu_smoke.py) incl. a second-boot persistence phase |
 | F3 | Program-format portability: the byte-identical Dezh-IR `.dzp` runs on the RISC-V and x86_64 kernels | **Reproducible today** (in CI) | x86_64 kernel installs and runs the byte-identical `.dzp` agent package; bytes pinned by a `dezh-core` test — [x86 smoke](tools/ci/qemu_smoke.py). Honest scope: this proves the *program format + IR semantics* are portable, **not** kernel parity — the x86 kernel is deliberately thin (no scheduler / returnable-IRQ path yet; the rich runtime is RISC-V only). |
 | F4 | Pol compatibility: unmodified static Linux binary, capability-gated | **Reproducible today** (in CI) | `linux-elf` runs a real static Linux/RISC-V ELF ([`linux-guest`](dezh-boot/linux-guest/)); the same bytes also run on real riscv64 Linux |
-| W8 | Intent → effect runtime: run an agent under one intent, account for every effect, and undo a whole mission honestly (retract / compensate / refuse-with-reason), with a contained escape | **Reproducible today** (in CI) | `overnight` collapses it into one story → [transcript](docs/demo-transcript-overnight.md); parts: `sfar-demo` `comp-demo` `sfar-cross-demo` `redteam` `why-denied` `tbar` in [`tools/ci/qemu_smoke.py`](tools/ci/qemu_smoke.py) |
+| W8 | Intent → effect runtime: run an agent under one intent, account for every effect, and undo a whole mission honestly (retract / compensate / refuse-with-reason), with a contained escape | **Reproducible today** (in CI) | `overnight` collapses it into one story → [transcript](docs/transcripts/overnight.md); parts: `sfar-demo` `comp-demo` `sfar-cross-demo` `redteam` `why-denied` `tbar` in [`tools/ci/qemu_smoke.py`](tools/ci/qemu_smoke.py) |
 
 **The W8 intent/effect runtime is complete** — intent as the only path to
 authority (`Ahd`), the unbypassable effect ledger (`Sand`), honest whole-mission
 rollback with compensation and multi-namespace authority (`Sfar`), a five-escape
 adversary (`redteam`), and explainable denial + provenance (`why-denied` /
-`Tbar`). See the [threat model](docs/THREAT_MODEL.md) for what is and is not
+`Tbar`). See the [threat model](docs/SECURITY_MODEL.md#threat-model) for what is and is not
 defended.
 
 <p align="center">
@@ -199,7 +199,7 @@ defended.
 </p>
 
 *One command (`overnight`) — the whole differentiator. Full captured transcript:
-[docs/demo-transcript-overnight.md](docs/demo-transcript-overnight.md).*
+[docs/transcripts/overnight.md](docs/transcripts/overnight.md).*
 
 ### For a serious OS reader
 
@@ -232,7 +232,7 @@ flowchart LR
     Pkg --> App["U-mode app / Dezh-IR app"]
 ```
 
-More diagrams: [docs/ARCHITECTURE_DIAGRAMS.md](docs/ARCHITECTURE_DIAGRAMS.md)
+More diagrams: [docs/ARCHITECTURE.md#diagrams](docs/ARCHITECTURE.md#diagrams)
 
 ## Quick Review Path
 
@@ -289,8 +289,8 @@ python tools/ci/sdk_test.py \
 Release tags build public review artifacts and a GitHub Container Registry
 review environment at `ghcr.io/alisalimi77/dezh-review-env:<tag>`. This is a
 GitHub Packages/GHCR image, not a Docker Hub image. See
-[release process](docs/RELEASE_PROCESS.md) and
-[packages and releases](docs/PACKAGES_AND_RELEASES.md).
+[release process](docs/RELEASING.md#release-process) and
+[packages and releases](docs/RELEASING.md#packages-and-releases).
 
 ## Console Commands Worth Reviewing
 
@@ -365,7 +365,7 @@ Dezh makes no bare "faster than X" claims. What has been measured so far
 
 ## Repository Map
 
-See [docs/REPO_STRUCTURE.md](docs/REPO_STRUCTURE.md) for the full map.
+See [docs/ARCHITECTURE.md#repository-layout](docs/ARCHITECTURE.md#repository-layout) for the full map.
 
 High-level layout:
 
@@ -389,10 +389,10 @@ High-level layout:
 | Start here | Architecture | Review evidence |
 | --- | --- | --- |
 | [Documentation index](docs/INDEX.md) | [Architecture](docs/ARCHITECTURE.md) | [Reviewer guide](docs/REVIEWER_GUIDE.md) |
-| [Getting started](docs/GETTING_STARTED.md) | [Architecture diagrams](docs/ARCHITECTURE_DIAGRAMS.md) | [Demo script](docs/DEMO_SCRIPT.md) |
-| [Build and run](docs/BUILD_AND_RUN.md) | [Security model](docs/SECURITY_MODEL.md) | [Release notes](docs/RELEASE_NOTES.md) |
-| [FAQ](docs/FAQ.md) | [Whitepaper](docs/WHITEPAPER.md) | [Release process](docs/RELEASE_PROCESS.md) |
-| [Repo structure](docs/REPO_STRUCTURE.md) | [Strategic direction](docs/STRATEGIC_DIRECTION.md) | [Packages and releases](docs/PACKAGES_AND_RELEASES.md) |
+| [Getting started](docs/GETTING_STARTED.md) | [Architecture diagrams](docs/ARCHITECTURE.md#diagrams) | [Demo script](docs/REVIEWER_GUIDE.md#running-the-demos) |
+| [Build and run](docs/GETTING_STARTED.md#build-and-run) | [Security model](docs/SECURITY_MODEL.md#enforcement-model) | [Release notes](docs/RELEASE_NOTES.md) |
+| [FAQ](docs/REVIEWER_GUIDE.md#faq) | [Whitepaper](docs/WHITEPAPER.md) | [Release process](docs/RELEASING.md#release-process) |
+| [Repo structure](docs/ARCHITECTURE.md#repository-layout) | [Strategic direction](docs/ROADMAP.md#strategic-direction) | [Packages and releases](docs/RELEASING.md#packages-and-releases) |
 | [Changelog](CHANGELOG.md) | [Roadmap](docs/ROADMAP.md) | [Architecture decisions](docs/DECISIONS.md) |
 
 ## Governance

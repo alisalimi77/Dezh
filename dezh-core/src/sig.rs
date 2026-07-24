@@ -1,6 +1,6 @@
 //! Package signing: bind the *authority* a package requests, not just its bytes.
 //!
-//! See `docs/PACKAGE_SIGNING.md` for the full design and the supply-chain
+//! See `docs/SUBSYSTEMS.md (Package signing)` for the full design and the supply-chain
 //! mistakes this avoids. The crypto is Ed25519 via the reputable, zero-
 //! dependency, `no_std` `ed25519-compact` crate — **never** a hand-rolled
 //! implementation. The kernel only *verifies* (deterministic, no RNG); signing

@@ -263,7 +263,7 @@ def main() -> int:
     parser.add_argument(
         "--transcript",
         type=Path,
-        default=ROOT / "docs" / "demo-transcript-riscv64.md",
+        default=ROOT / "docs" / "transcripts" / "riscv64.md",
     )
     args = parser.parse_args()
 

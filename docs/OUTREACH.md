@@ -5,7 +5,7 @@ public channel for each community or organization at send time, and post as a
 person asking for critique — not as an announcement.
 
 Every claim below must stay true to [STATUS.md](STATUS.md) and
-[THREAT_MODEL.md](THREAT_MODEL.md). If a reviewer finds a gap we did not name
+[Threat model](SECURITY_MODEL.md#threat-model). If a reviewer finds a gap we did not name
 ourselves, the post was wrong.
 
 ---
@@ -75,7 +75,7 @@ classification is honest; and whether the novelty claim survives contact with
 prior art you know better than I do.
 
 Repo: `<repo-url>` · Design + prior-art comparison: `docs/RELATED_WORK.md`,
-`docs/MARZ.md` · Honest limits: `docs/STATUS.md`, `docs/THREAT_MODEL.md`
+`docs/SUBSYSTEMS.md#marz-guarded-egress` · Honest limits: `docs/STATUS.md`, `docs/SECURITY_MODEL.md#threat-model`
 
 ---
 
@@ -114,7 +114,7 @@ teams whose agents change real repos/CI/deploys to tell me where the effect mode
 breaks against their workflow — especially which effects would need typed
 connectors, and what "undo" has to mean for them.
 
-Repo: `<repo-url>` · Start here: `docs/demo-transcript-overnight.md`
+Repo: `<repo-url>` · Start here: `docs/transcripts/overnight.md`
 
 ---
 

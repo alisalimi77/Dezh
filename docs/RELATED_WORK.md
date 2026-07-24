@@ -33,7 +33,7 @@ claimed: **autonomous AI agents as first-class, effect-accountable principals.**
 operation** (`derived = requested ∩ intent_ceiling`), not a purpose string or a
 policy annotation. Attenuation is classic ocap; making the attenuation ceiling a
 **first-class "intent" (`Ahd`) that is the only path any authority can enter
-through** is the sharpening — see [`SECURITY_MODEL.md`](SECURITY_MODEL.md).
+through** is the sharpening — see [`SECURITY_MODEL.md#enforcement-model`](SECURITY_MODEL.md#enforcement-model).
 
 ## 2. Information flow, provenance, and audit
 
@@ -154,7 +154,7 @@ them (D021).
 ## 7. Honest scope versus this prior art
 
 - **seL4** is formally verified; Dezh is not (a stated gap — see
-  [`THREAT_MODEL.md`](THREAT_MODEL.md)).
+  [`SECURITY_MODEL.md#threat-model`](SECURITY_MODEL.md#threat-model)).
 - **gVisor/Firecracker/WASI** are mature, portable, and battle-tested at
   confinement; Dezh is a QEMU-only research prototype.
 - **CHERI** enforces capabilities in hardware; Dezh enforces at the syscall and

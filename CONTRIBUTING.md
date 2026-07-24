@@ -92,10 +92,10 @@ Any change that affects public behavior should update at least one of:
 
 - `README.md`
 - `docs/ARCHITECTURE.md`
-- `docs/SECURITY_MODEL.md`
+- `docs/SECURITY_MODEL.md#enforcement-model`
 - `docs/SDK_GUIDE.md`
 - `docs/REVIEWER_GUIDE.md`
-- `docs/DEMO_SCRIPT.md`
+- `docs/REVIEWER_GUIDE.md#running-the-demos`
 - `CHANGELOG.md`
 
 ## Security Reports

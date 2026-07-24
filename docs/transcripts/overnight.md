@@ -88,11 +88,11 @@ effect log sits beside the resource on an ambient-authority host, and there is
 generally a path to the resource that skips it. On Dezh there is no ambient
 authority under the ledger: the effect path goes *through* the record that
 authorizes it, which is why the from-scratch kernel exists. See
-[`THREAT_MODEL.md`](THREAT_MODEL.md#6-why-not-just-a-user-space-sandbox-head-to-head).
+[`SECURITY_MODEL.md#threat-model`](../SECURITY_MODEL.md#threat-model).
 
 ## Reproduce
 
-Boot the RISC-V kernel (see [`BUILD_AND_RUN.md`](BUILD_AND_RUN.md)) and type
+Boot the RISC-V kernel (see [`GETTING_STARTED.md#build-and-run`](../GETTING_STARTED.md#build-and-run)) and type
 `overnight`. The individual acts are also available on their own: `intent-open` /
 `intent-run`, `sand-log` / `sand-info`, `sfar-plan` / `sfar-rollback`,
 `comp-demo`, `sfar-cross-demo`, `tbar`, `redteam`, `why-denied`. All are asserted
