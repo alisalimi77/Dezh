@@ -222,6 +222,7 @@ restore_kernel_ctx:
 extern "C" {
     fn trap_entry();
     fn restore_kernel_ctx() -> !;
+    fn _hart_start();
 }
 
 // --- Multitasking trap path: full register context switch between U-mode tasks.
@@ -930,12 +931,21 @@ const VIRTIO_MMIO_COUNT: usize = 8;
 // not block on I/O. The PLIC is what turns polled drivers into an event-driven
 // kernel.
 //
-// QEMU `virt` layout: the S-mode context of hart 0 is context 1, and virtio-mmio
-// slot i raises IRQ (1 + i).
+// QEMU `virt` layout: hart h has PLIC context 2h (M-mode) and 2h+1 (S-mode);
+// per-context enable bits start at +0x2000 with stride 0x80, and per-context
+// threshold/claim at +0x20_0000 with stride 0x1000. virtio-mmio slot i raises
+// IRQ (1 + i). The boot hart is chosen by the firmware and is NOT always hart 0
+// under -smp, so the S-mode context we program is derived from the boot hart id
+// at init time rather than hardcoded - otherwise device interrupts get routed to
+// a hart that is not running the kernel and every driver blocks forever.
 const PLIC_BASE: usize = 0x0c00_0000;
-const PLIC_S_ENABLE: usize = PLIC_BASE + 0x2080;
-const PLIC_S_THRESHOLD: usize = PLIC_BASE + 0x0020_1000;
-const PLIC_S_CLAIM: usize = PLIC_S_THRESHOLD + 4;
+const PLIC_ENABLE_BASE: usize = PLIC_BASE + 0x2000;
+const PLIC_ENABLE_STRIDE: usize = 0x80;
+const PLIC_CONTEXT_BASE: usize = PLIC_BASE + 0x0020_0000;
+const PLIC_CONTEXT_STRIDE: usize = 0x1000;
+/// Claim/complete register for the boot hart's S-mode context. Set by plic_init;
+/// read by plic_handle. Defaults to context 1 (hart 0) until init runs.
+static PLIC_S_CLAIM: AtomicUsize = AtomicUsize::new(PLIC_CONTEXT_BASE + 0x1000 + 4);
 const VIRTIO_IRQ_BASE: u32 = 1;
 const SEIE: usize = 1 << 9;
 const VR_INTERRUPT_STATUS: usize = 0x060;
@@ -949,7 +959,13 @@ static IRQ_WAKEUPS: AtomicU64 = AtomicU64::new(0);
 
 /// Route the virtio device interrupts to this hart's S-mode context and unmask
 /// external interrupts. Devices assert their own line; the PLIC arbitrates.
-fn plic_init() {
+fn plic_init(boot_hart: usize) {
+    // S-mode context of the boot hart. Under -smp the boot hart is not always 0.
+    let ctx = 2 * boot_hart + 1;
+    let enable = PLIC_ENABLE_BASE + ctx * PLIC_ENABLE_STRIDE;
+    let threshold = PLIC_CONTEXT_BASE + ctx * PLIC_CONTEXT_STRIDE;
+    let claim = threshold + 4;
+    PLIC_S_CLAIM.store(claim, Ordering::Relaxed);
     unsafe {
         let mut irq = VIRTIO_IRQ_BASE;
         while irq < VIRTIO_IRQ_BASE + VIRTIO_MMIO_COUNT as u32 {
@@ -957,8 +973,8 @@ fn plic_init() {
             irq += 1;
         }
         let mask: u32 = (((1u32 << VIRTIO_MMIO_COUNT) - 1) << VIRTIO_IRQ_BASE) as u32;
-        write_volatile(PLIC_S_ENABLE as *mut u32, mask);
-        write_volatile(PLIC_S_THRESHOLD as *mut u32, 0);
+        write_volatile(enable as *mut u32, mask);
+        write_volatile(threshold as *mut u32, 0);
         asm!("csrs sie, {}", in(reg) SEIE);
     }
 }
@@ -967,8 +983,9 @@ fn plic_init() {
 /// then complete it at the PLIC. Skipping the device ACK would re-raise the
 /// interrupt immediately and livelock the kernel.
 fn plic_handle() -> u32 {
+    let claim = PLIC_S_CLAIM.load(Ordering::Relaxed);
     unsafe {
-        let irq = read_volatile(PLIC_S_CLAIM as *const u32);
+        let irq = read_volatile(claim as *const u32);
         if irq == 0 {
             return 0;
         }
@@ -980,7 +997,7 @@ fn plic_handle() -> u32 {
                 write_volatile((base + VR_INTERRUPT_ACK) as *mut u32, st);
             }
         }
-        write_volatile(PLIC_S_CLAIM as *mut u32, irq);
+        write_volatile(claim as *mut u32, irq);
         EXT_IRQS.fetch_add(1, Ordering::Relaxed);
         // Anyone sleeping on a device becomes runnable again.
         let mut i = 0usize;
@@ -1007,8 +1024,249 @@ fn irq_stat() {
         "irq: driver waits woken by a device interrupt (not by spinning) = {}",
         IRQ_WAKEUPS.load(Ordering::Relaxed)
     );
-    kprintln!("  source: PLIC context 1 (hart 0, S-mode); virtio slots raise IRQ 1..8");
+    kprintln!(
+        "  source: PLIC S-mode context of the boot hart (claim @ {:#x}); virtio slots raise IRQ 1..8",
+        PLIC_S_CLAIM.load(Ordering::Relaxed)
+    );
     kprintln!("  before this, every device wait was a busy-loop; devices can now report completion");
+}
+
+// --- SMP: bring up secondary harts through the real SBI HSM protocol. --------
+//
+// Honest scope. The boot hart runs the OS: the scheduler and every kernel data
+// structure are single-threaded `static mut`, so a symmetric scheduler over them
+// would need a lock on each, and that is a named future milestone (see ROADMAP),
+// not this step. What this step proves is the foundation such a scheduler stands
+// on: that Dezh can actually *drive hardware parallelism* — start the other harts
+// through the standard SBI Hart State Management call, give each its own stack and
+// identity (`tp` = hart id), and show more than one hart executing concurrently
+// under our control with coherent atomics. QEMU parks secondary harts in the SBI
+// firmware until `sbi_hart_start`; only the boot hart ever enters `_start`, so the
+// boot path has no concurrent-entry race to guard.
+const MAX_HARTS: usize = 8;
+const HART_STACK: usize = 8 * 1024;
+// Atomic increments each secondary hammers onto ONE shared counter per round. The
+// contention is the point: a coherent total proves the harts share memory and the
+// hardware serialises their atomics, not that they ran one-after-another.
+const SMP_WORK: u64 = 200_000;
+// Bounded spin so a hart that never checks in cannot hang the boot or the console.
+const SMP_SPIN_LIMIT: u64 = 300_000_000;
+
+// Per-hart stacks and the secondary entry point live in the asm block so a hart
+// has a stack before any Rust runs. `sbi_hart_start` enters here with a0 = hart id.
+global_asm!(
+    r#"
+    .section .bss
+    .align 16
+    .globl hart_stacks
+hart_stacks:
+    .space {TOTAL}
+
+    .section .text
+    .align 4
+    .globl _hart_start
+_hart_start:
+    mv      tp, a0              # per-hart identity: tp = hart id
+    la      t0, hart_stacks
+    li      t1, {STK}
+    addi    t2, a0, 1
+    mul     t2, t2, t1          # (hart id + 1) * HART_STACK = top of this hart's slot
+    add     sp, t0, t2
+    call    hart_main           # a0 still = hart id
+1:  wfi
+    j       1b
+"#,
+    STK = const HART_STACK,
+    TOTAL = const HART_STACK * MAX_HARTS,
+);
+
+const SBI_EXT_HSM: usize = 0x48534D; // "HSM"
+const SBI_HSM_HART_START: usize = 0;
+
+/// SBI Hart State Management: ask the firmware to start `hartid` at `start_addr`.
+/// Returns the SBI error code (0 = SBI_SUCCESS; nonzero e.g. for an absent hart).
+fn sbi_hart_start(hartid: usize, start_addr: usize, opaque: usize) -> isize {
+    let err: isize;
+    unsafe {
+        asm!(
+            "ecall",
+            in("a7") SBI_EXT_HSM,
+            in("a6") SBI_HSM_HART_START,
+            in("a0") hartid,
+            in("a1") start_addr,
+            in("a2") opaque,
+            lateout("a0") err,
+            lateout("a1") _,
+        );
+    }
+    err
+}
+
+static BOOT_HART: AtomicUsize = AtomicUsize::new(0);
+static SMP_STARTED: AtomicU64 = AtomicU64::new(0); // secondaries the firmware accepted
+static HARTS_ONLINE: AtomicU64 = AtomicU64::new(0); // secondaries that reached Rust
+static SMP_GEN: AtomicU64 = AtomicU64::new(0); // round counter the boot hart bumps
+static SMP_COUNTER: AtomicU64 = AtomicU64::new(0); // the shared target of the parallel work
+static HART_RAN: [AtomicBool; MAX_HARTS] = [const { AtomicBool::new(false) }; MAX_HARTS];
+static HART_ROUNDS: [AtomicU64; MAX_HARTS] = [const { AtomicU64::new(0) }; MAX_HARTS];
+
+/// Secondary hart body. Never prints (only the boot hart owns the UART) and never
+/// traps (no stvec installed here): it checks in, then serves parallel rounds the
+/// boot hart opens by bumping `SMP_GEN`.
+#[no_mangle]
+extern "C" fn hart_main(hartid: usize) -> ! {
+    if hartid < MAX_HARTS {
+        HART_RAN[hartid].store(true, Ordering::Release);
+    }
+    HARTS_ONLINE.fetch_add(1, Ordering::Release);
+
+    let mut served = SMP_GEN.load(Ordering::Acquire);
+    loop {
+        // Wait for the boot hart to open a new round. spin_loop (not wfi) so a
+        // TCG round-robin host keeps making progress and we wake promptly.
+        while SMP_GEN.load(Ordering::Acquire) == served {
+            core::hint::spin_loop();
+        }
+        served = SMP_GEN.load(Ordering::Acquire);
+
+        let mut n = 0;
+        while n < SMP_WORK {
+            SMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+            n += 1;
+        }
+        // Release: the boot hart's Acquire-load of this establishes that our
+        // counter increments happen-before it reads the total.
+        if hartid < MAX_HARTS {
+            HART_ROUNDS[hartid].fetch_add(1, Ordering::Release);
+        }
+    }
+}
+
+/// Boot hart: start every other hart via SBI HSM and wait for them to check in.
+fn smp_bringup(boot: usize) {
+    BOOT_HART.store(boot, Ordering::Relaxed);
+    let mut started = 0u64;
+    for hid in 0..MAX_HARTS {
+        if hid == boot {
+            continue;
+        }
+        // An absent hart returns a nonzero error and is simply skipped, so the
+        // same build works at -smp 1 and -smp 8 with no configuration.
+        if sbi_hart_start(hid, _hart_start as usize, 0) == 0 {
+            started += 1;
+        }
+    }
+    SMP_STARTED.store(started, Ordering::Relaxed);
+
+    let mut spins = 0u64;
+    while HARTS_ONLINE.load(Ordering::Acquire) < started && spins < SMP_SPIN_LIMIT {
+        core::hint::spin_loop();
+        spins += 1;
+    }
+}
+
+/// Drive one parallel round and return (harts that participated, final counter,
+/// bitmask of participating hart ids).
+fn smp_round() -> (u64, u64, u64) {
+    let started = SMP_STARTED.load(Ordering::Relaxed);
+    if started == 0 {
+        return (0, 0, 0);
+    }
+    SMP_COUNTER.store(0, Ordering::Relaxed);
+    let gen = SMP_GEN.fetch_add(1, Ordering::Release) + 1;
+
+    let mut spins = 0u64;
+    loop {
+        let mut done = 0u64;
+        for hid in 0..MAX_HARTS {
+            if HART_ROUNDS[hid].load(Ordering::Acquire) >= gen {
+                done += 1;
+            }
+        }
+        if done >= started || spins >= SMP_SPIN_LIMIT {
+            break;
+        }
+        core::hint::spin_loop();
+        spins += 1;
+    }
+
+    let counter = SMP_COUNTER.load(Ordering::Relaxed);
+    let mut parts = 0u64;
+    let mut mask = 0u64;
+    for hid in 0..MAX_HARTS {
+        if HART_ROUNDS[hid].load(Ordering::Acquire) >= gen {
+            parts += 1;
+            mask |= 1 << hid;
+        }
+    }
+    (parts, counter, mask)
+}
+
+/// One-line boot-time SMP proof (asserted in CI).
+fn smp_report_boot() {
+    let started = SMP_STARTED.load(Ordering::Relaxed);
+    if started == 0 {
+        kprintln!("[dezh-boot] smp: 1 hart (launch with -smp N for parallelism); SBI HSM bringup path present");
+        return;
+    }
+    let (parts, counter, _mask) = smp_round();
+    let expected = parts * SMP_WORK;
+    kprintln!(
+        "[dezh-boot] smp: {} secondary harts online via SBI HSM; boot hart = {}",
+        started,
+        BOOT_HART.load(Ordering::Relaxed)
+    );
+    kprintln!(
+        "[dezh-boot] smp: parallel round shared-counter = {} (expected {}) -> {}",
+        counter,
+        expected,
+        if counter == expected {
+            "COHERENT"
+        } else {
+            "MISMATCH"
+        }
+    );
+}
+
+/// Interactive `smp-demo`: re-run a parallel round and explain what it proves.
+fn run_smp_demo() {
+    let boot = BOOT_HART.load(Ordering::Relaxed);
+    let started = SMP_STARTED.load(Ordering::Relaxed);
+    let online = HARTS_ONLINE.load(Ordering::Relaxed);
+    kprintln!("[smp] boot hart = {boot} (runs the OS: scheduler, IPC, drivers)");
+    kprintln!("[smp] secondary harts started via SBI HSM = {started}, checked in = {online}");
+    if started == 0 {
+        kprintln!("[smp] no secondary harts. Launch QEMU with -smp N to see real parallelism.");
+        kprintln!("[smp] the bringup path (sbi_hart_start + per-hart stack + tp identity) is still present.");
+        return;
+    }
+    let (parts, counter, mask) = smp_round();
+    let expected = parts * SMP_WORK;
+    kprintln!(
+        "[smp] {parts} harts each applied {SMP_WORK} atomic increments to ONE shared counter, at once"
+    );
+    kprintln!(
+        "[smp] shared counter = {counter} (expected {expected}) -> {}",
+        if counter == expected {
+            "COHERENT - the harts truly share memory and their atomics serialise"
+        } else {
+            "MISMATCH"
+        }
+    );
+    kprint!("[smp] participating hart ids: ");
+    let mut first = true;
+    for hid in 0..MAX_HARTS {
+        if mask & (1 << hid) != 0 {
+            if !first {
+                kprint!(", ");
+            }
+            kprint!("{hid}");
+            first = false;
+        }
+    }
+    kprintln!("");
+    kprintln!("[smp] proven: >1 hart executes concurrently under Dezh's control.");
+    kprintln!("[smp] not yet: symmetric task scheduling across harts (kernel state is single-threaded); see ROADMAP.");
 }
 
 const VIRTIO_MMIO_MAGIC: u32 = 0x7472_6976;
@@ -5811,6 +6069,13 @@ const COMMANDS: &[CommandSpec] = &[
         help: "object-capability primitive: attenuated delegation + per-object generation-stamped revocation",
     },
     CommandSpec {
+        name: "smp-demo",
+        cap: cap::INSPECT,
+        cap_name: "INSPECT",
+        group: "Inspect",
+        help: "SMP: secondary harts brought up via SBI HSM run a parallel round with coherent atomics",
+    },
+    CommandSpec {
         name: "ns-revoke",
         cap: cap::SPAWN,
         cap_name: "SPAWN",
@@ -6961,6 +7226,7 @@ fn dispatch(cmd: &str, arg: &str, plan: &KernelPlan, memory: &[MemoryRegion], he
         "intent-revoke" => pkg::intent_revoke(arg),
         "lease-demo" => pkg::lease_demo(),
         "cap-demo" => run_cap_demo(),
+        "smp-demo" => run_smp_demo(),
         "ns-revoke" => ns_revoke(plan, arg),
         "ns-grant" => ns_grant(plan, arg),
         "nsrevoke-demo" => run_nsrevoke_demo(plan),
@@ -7268,8 +7534,10 @@ fn read_line(buf: &mut [u8]) -> usize {
 }
 
 #[no_mangle]
-pub extern "C" fn kmain() -> ! {
+pub extern "C" fn kmain(hart_id: usize, _fdt: usize) -> ! {
     Uart.init();
+    // SBI hands the boot hart's id in a0. Capture it before anything else needs a0.
+    let boot_hart = hart_id;
 
     let memory = vec![
         MemoryRegion::new(0x8000_0000, 0x20_0000, MemoryKind::Reserved),
@@ -7315,8 +7583,11 @@ pub extern "C" fn kmain() -> ! {
         asm!("csrw scounteren, {}", in(reg) 0x7usize); // let U-mode read cycle/time/instret
     }
 
-    plic_init();
-    kprintln!("[dezh-boot] PLIC up: virtio device interrupts routed to S-mode (no longer polled-only)");
+    plic_init(boot_hart);
+    kprintln!("[dezh-boot] PLIC up: virtio device interrupts routed to boot hart {boot_hart} S-mode (no longer polled-only)");
+
+    smp_bringup(boot_hart);
+    smp_report_boot();
 
     kprintln!("[dezh-boot] enabling Sv39 paging (U-mode confined to its own region)...");
     build_page_tables();

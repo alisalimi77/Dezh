@@ -194,6 +194,15 @@ adversary (`redteam`), and explainable denial + provenance (`why-denied` /
 `Tbar`). See the [threat model](docs/SECURITY_MODEL.md#threat-model) for what is and is not
 defended.
 
+**Hardware maturity (W9).** The RISC-V kernel is interrupt-driven, not polled: a
+PLIC delivers virtio interrupts, drivers sleep on the device (`sys_irq_wait`) and
+the scheduler idles with `wfi` for them (`irq-stat`). Secondary harts are brought
+up through the standard **SBI HSM** protocol and shown executing concurrently on
+coherent shared memory (`smp-demo`, asserted at boot under `-smp 4`). Honest
+scope: hardware parallelism is real; **symmetric task scheduling across harts is
+the next milestone**, since the scheduler is still single-threaded on the boot
+hart — see [STATUS](docs/STATUS.md) and the [roadmap](docs/ROADMAP.md).
+
 <p align="center">
   <img src="docs/assets/overnight.svg" alt="The overnight flagship run: an agent's night forecast, rolled back honestly, and its escape contained" width="720">
 </p>

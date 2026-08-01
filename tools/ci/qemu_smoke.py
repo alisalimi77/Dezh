@@ -89,6 +89,12 @@ def run_riscv64(qemu: str, kernel: Path) -> None:
             qemu,
             "-machine",
             "virt",
+            # Four harts: the SMP proof needs more than one. QEMU parks the
+            # secondaries in SBI firmware until the kernel starts them, and the
+            # boot hart is chosen nondeterministically - both of which the kernel
+            # handles (it reads its own id from a0 and skips absent harts).
+            "-smp",
+            "4",
             "-nographic",
             "-bios",
             "default",
@@ -112,6 +118,11 @@ def run_riscv64(qemu: str, kernel: Path) -> None:
     )
     try:
         session.wait_for("boot contract VALIDATED")
+        # SMP: the secondary harts come up via SBI HSM and run a parallel round at
+        # boot. With -smp 4 exactly three secondaries start, and the shared counter
+        # must equal harts x work - proof they ran concurrently on coherent memory.
+        session.wait_for("smp: 3 secondary harts online via SBI HSM")
+        session.wait_for("shared-counter = 600000 (expected 600000) -> COHERENT")
         session.wait_for("service registry built from boot plan")
         session.wait_for("Dezh console. Every command requires an explicit capability.")
 
@@ -572,6 +583,17 @@ def run_riscv64(qemu: str, kernel: Path) -> None:
             # Persisted namespace revocation: revoke ns=calc at the object owner
             # (the daemon writes it to the superblock). The reboot phase proves it
             # survives a power cycle.
+            # SMP again, on demand: re-run a parallel round from the console and
+            # confirm the shared counter is coherent and >1 hart participated.
+            (
+                "smp-demo",
+                [
+                    "secondary harts started via SBI HSM = 3, checked in = 3",
+                    "harts each applied 200000 atomic increments to ONE shared counter",
+                    "COHERENT - the harts truly share memory and their atomics serialise",
+                    "proven: >1 hart executes concurrently under Dezh's control",
+                ],
+            ),
             ("ns-revoke calc", "namespace 'calc' REVOKED (persisted)"),
             # Devices now report completion instead of being polled blind.
             (

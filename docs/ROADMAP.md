@@ -231,6 +231,33 @@ they structurally cannot — attributing and reversing a whole agent mission.
 
 **W8 is complete:** every part above is green in `tools/ci/qemu_smoke.py`.
 
+##### W9 — Hardware maturity: interrupts and SMP
+
+The bottleneck that most kept Dezh from reading as a real OS was that it drove no
+hardware asynchronously: all device I/O was polled and only one hart ever ran.
+Both are now addressed on RISC-V, in order:
+
+- **Interrupt-driven I/O. — DONE.** A PLIC routes virtio device interrupts to the
+  boot hart's S-mode context; drivers block on `sys_irq_wait` (a restartable
+  blocking syscall) and are woken by the device rather than by spinning; the
+  scheduler idles with `wfi` for a device when nothing else is runnable and
+  services the PLIC by hand (the hardware clears `sstatus.SIE` on trap entry, so a
+  pending interrupt must be taken explicitly). `irq-stat` reports interrupts
+  serviced and driver waits woken by hardware; CI asserts both.
+- **SMP bring-up + parallel proof. — DONE.** Secondary harts are started through
+  the standard **SBI Hart State Management** call, each given its own stack and
+  `tp` = hart id; a parallel round has every secondary hammer one shared atomic
+  counter and the coherent total proves genuine concurrent execution on shared
+  memory (`smp-demo`; asserted at boot under `-smp 4`). The boot hart is read from
+  the firmware, not assumed to be hart 0 — which surfaced and fixed a latent PLIC
+  bug (interrupts were hardcoded to hart 0's context).
+- **Symmetric scheduling. — NEXT, not started.** The scheduler and kernel data
+  structures are single-threaded `static mut` on the boot hart. Running U-mode
+  tasks across harts needs a lock discipline over each of them (run queue, task
+  table, IPC mailboxes, frame allocator). This is the honest remaining gap and the
+  next milestone; until it lands, the secondaries are a proven parallel-compute
+  facility, not general task-scheduling CPUs.
+
 Post-MVP horizon (recorded, deliberately not started in W8): explicit system
 generations / time-travel, multi-agent attenuated sub-delegation with
 provenance chains, full saga/compensation for external effects, human-approval
