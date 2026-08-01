@@ -123,6 +123,10 @@ def run_riscv64(qemu: str, kernel: Path) -> None:
         # must equal harts x work - proof they ran concurrently on coherent memory.
         session.wait_for("smp: 3 secondary harts online via SBI HSM")
         session.wait_for("shared-counter = 600000 (expected 600000) -> COHERENT")
+        # Mutual exclusion: a NON-atomic counter under the kernel's ticket lock,
+        # hammered by all four harts, must land exactly on (4 x 50000). Atomics
+        # cannot prove this - only a correct lock can.
+        session.wait_for("lock-guarded counter = 200000 (expected 200000) -> MUTEX-OK")
         session.wait_for("service registry built from boot plan")
         session.wait_for("Dezh console. Every command requires an explicit capability.")
 
@@ -591,7 +595,8 @@ def run_riscv64(qemu: str, kernel: Path) -> None:
                     "secondary harts started via SBI HSM = 3, checked in = 3",
                     "harts each applied 200000 atomic increments to ONE shared counter",
                     "COHERENT - the harts truly share memory and their atomics serialise",
-                    "proven: >1 hart executes concurrently under Dezh's control",
+                    "lock-guarded counter = 200000 (expected 200000) -> MUTEX-OK",
+                    "the kernel now has a working mutual-exclusion lock",
                 ],
             ),
             ("ns-revoke calc", "namespace 'calc' REVOKED (persisted)"),

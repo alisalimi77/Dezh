@@ -251,12 +251,21 @@ Both are now addressed on RISC-V, in order:
   memory (`smp-demo`; asserted at boot under `-smp 4`). The boot hart is read from
   the firmware, not assumed to be hart 0 — which surfaced and fixed a latent PLIC
   bug (interrupts were hardcoded to hart 0's context).
-- **Symmetric scheduling. — NEXT, not started.** The scheduler and kernel data
-  structures are single-threaded `static mut` on the boot hart. Running U-mode
-  tasks across harts needs a lock discipline over each of them (run queue, task
-  table, IPC mailboxes, frame allocator). This is the honest remaining gap and the
-  next milestone; until it lands, the secondaries are a proven parallel-compute
-  facility, not general task-scheduling CPUs.
+- **Mutual-exclusion lock. — DONE.** Symmetric scheduling needs a run queue shared
+  by more than one hart, which is impossible without a lock — and the kernel had
+  none (single-hart discipline covered everything until now). A fair **ticket
+  spinlock** (`TicketLock`, FIFO order so no hart starves) is now in the kernel and
+  proven: all four harts hammer a **non-atomic** counter under it and the total
+  lands exactly on `contributors x work` (`smp-demo` reports `MUTEX-OK`; CI asserts
+  it at boot and interactively). Atomics alone cannot prove this — the hardware
+  serialises them regardless — so the non-atomic counter is the point.
+- **Symmetric scheduling. — NEXT, not started.** With the lock in hand, the
+  remaining work is to put it around the scheduler's shared state (run queue, task
+  table, IPC mailboxes, frame allocator) and give each hart its own trap
+  infrastructure (per-hart `KCTX`, trap stack, `sscratch`), so a U-mode task can be
+  dispatched onto a secondary hart while the boot hart keeps running the console.
+  Until that lands, the secondaries are a proven parallel-compute facility with a
+  working lock, not yet general task-scheduling CPUs.
 
 Post-MVP horizon (recorded, deliberately not started in W8): explicit system
 generations / time-travel, multi-agent attenuated sub-delegation with

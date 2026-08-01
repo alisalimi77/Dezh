@@ -102,7 +102,7 @@ use core::cell::UnsafeCell;
 use core::fmt::{self, Write};
 use core::panic::PanicInfo;
 use core::ptr::{read_volatile, write_volatile};
-use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 
 use alloc::{format, vec};
 use dezh_kernel::{
@@ -1110,6 +1110,47 @@ static SMP_COUNTER: AtomicU64 = AtomicU64::new(0); // the shared target of the p
 static HART_RAN: [AtomicBool; MAX_HARTS] = [const { AtomicBool::new(false) }; MAX_HARTS];
 static HART_ROUNDS: [AtomicU64; MAX_HARTS] = [const { AtomicU64::new(0) }; MAX_HARTS];
 
+/// A fair ticket spinlock. This is the load-bearing primitive for symmetric
+/// scheduling: a run queue shared by more than one hart cannot exist without
+/// mutual exclusion, and the kernel had none (single-hart discipline covered
+/// everything until now). Ticket order (hand out `next`, serve them in turn)
+/// gives FIFO fairness — no hart starves under contention, unlike a bare
+/// test-and-set. `lock` publishes with Acquire and `unlock` with Release, so an
+/// ordinary read-modify-write inside the critical section is correct.
+struct TicketLock {
+    next: AtomicU32,
+    serving: AtomicU32,
+}
+impl TicketLock {
+    const fn new() -> Self {
+        Self {
+            next: AtomicU32::new(0),
+            serving: AtomicU32::new(0),
+        }
+    }
+    fn lock(&self) {
+        let ticket = self.next.fetch_add(1, Ordering::Relaxed);
+        while self.serving.load(Ordering::Acquire) != ticket {
+            core::hint::spin_loop();
+        }
+    }
+    fn unlock(&self) {
+        // Only the holder calls this and each unlock advances the queue by one,
+        // so a store is enough — no read-modify-write needed.
+        self.serving
+            .store(self.serving.load(Ordering::Relaxed) + 1, Ordering::Release);
+    }
+}
+
+static SMP_LOCK: TicketLock = TicketLock::new();
+/// A deliberately NON-atomic counter, mutated only under `SMP_LOCK`. Atomics
+/// (as in `SMP_COUNTER`) prove coherent shared memory but cannot prove a lock
+/// works — the hardware serialises them regardless. A plain read-modify-write
+/// under contention loses updates unless mutual exclusion actually holds, so a
+/// total of exactly (participants x work) is the proof the lock is correct.
+static mut SMP_GUARDED: u64 = 0;
+const SMP_LOCK_WORK: u64 = 50_000;
+
 /// Secondary hart body. Never prints (only the boot hart owns the UART) and never
 /// traps (no stvec installed here): it checks in, then serves parallel rounds the
 /// boot hart opens by bumping `SMP_GEN`.
@@ -1129,10 +1170,25 @@ extern "C" fn hart_main(hartid: usize) -> ! {
         }
         served = SMP_GEN.load(Ordering::Acquire);
 
+        // (1) Atomic work: proves coherent shared memory.
         let mut n = 0;
         while n < SMP_WORK {
             SMP_COUNTER.fetch_add(1, Ordering::Relaxed);
             n += 1;
+        }
+        // (2) Locked work: proves mutual exclusion. The increment is a plain
+        // read-modify-write on a non-atomic; without the lock, concurrent harts
+        // would clobber each other and the total would come up short.
+        let mut m = 0;
+        while m < SMP_LOCK_WORK {
+            SMP_LOCK.lock();
+            unsafe {
+                let p = core::ptr::addr_of_mut!(SMP_GUARDED);
+                let v = read_volatile(p);
+                write_volatile(p, v + 1);
+            }
+            SMP_LOCK.unlock();
+            m += 1;
         }
         // Release: the boot hart's Acquire-load of this establishes that our
         // counter increments happen-before it reads the total.
@@ -1165,15 +1221,52 @@ fn smp_bringup(boot: usize) {
     }
 }
 
-/// Drive one parallel round and return (harts that participated, final counter,
-/// bitmask of participating hart ids).
-fn smp_round() -> (u64, u64, u64) {
+/// The result of one parallel round.
+struct SmpRound {
+    /// Secondary harts that participated.
+    parts: u64,
+    /// Atomic shared counter total (proves coherent memory).
+    counter: u64,
+    /// Lock-guarded non-atomic counter total (proves mutual exclusion).
+    guarded: u64,
+    /// Contributors to `guarded`: the secondaries plus the boot hart.
+    guarded_contributors: u64,
+    /// Bitmask of participating secondary hart ids.
+    mask: u64,
+}
+
+/// Drive one parallel round: the secondaries do atomic work and lock-guarded
+/// work, and the boot hart joins the SAME lock so the contention is real (it is a
+/// hart too). Returns the tallies.
+fn smp_round() -> SmpRound {
     let started = SMP_STARTED.load(Ordering::Relaxed);
     if started == 0 {
-        return (0, 0, 0);
+        return SmpRound {
+            parts: 0,
+            counter: 0,
+            guarded: 0,
+            guarded_contributors: 0,
+            mask: 0,
+        };
     }
     SMP_COUNTER.store(0, Ordering::Relaxed);
+    unsafe { write_volatile(core::ptr::addr_of_mut!(SMP_GUARDED), 0) };
+    // Release: orders both resets above before the secondaries observe the new
+    // generation and start their work.
     let gen = SMP_GEN.fetch_add(1, Ordering::Release) + 1;
+
+    // The boot hart contends on the lock alongside the secondaries.
+    let mut m = 0;
+    while m < SMP_LOCK_WORK {
+        SMP_LOCK.lock();
+        unsafe {
+            let p = core::ptr::addr_of_mut!(SMP_GUARDED);
+            let v = read_volatile(p);
+            write_volatile(p, v + 1);
+        }
+        SMP_LOCK.unlock();
+        m += 1;
+    }
 
     let mut spins = 0u64;
     loop {
@@ -1191,6 +1284,7 @@ fn smp_round() -> (u64, u64, u64) {
     }
 
     let counter = SMP_COUNTER.load(Ordering::Relaxed);
+    let guarded = unsafe { read_volatile(core::ptr::addr_of!(SMP_GUARDED)) };
     let mut parts = 0u64;
     let mut mask = 0u64;
     for hid in 0..MAX_HARTS {
@@ -1199,7 +1293,13 @@ fn smp_round() -> (u64, u64, u64) {
             mask |= 1 << hid;
         }
     }
-    (parts, counter, mask)
+    SmpRound {
+        parts,
+        counter,
+        guarded,
+        guarded_contributors: parts + 1, // secondaries + this boot hart
+        mask,
+    }
 }
 
 /// One-line boot-time SMP proof (asserted in CI).
@@ -1209,8 +1309,9 @@ fn smp_report_boot() {
         kprintln!("[dezh-boot] smp: 1 hart (launch with -smp N for parallelism); SBI HSM bringup path present");
         return;
     }
-    let (parts, counter, _mask) = smp_round();
-    let expected = parts * SMP_WORK;
+    let r = smp_round();
+    let expected = r.parts * SMP_WORK;
+    let guarded_expected = r.guarded_contributors * SMP_LOCK_WORK;
     kprintln!(
         "[dezh-boot] smp: {} secondary harts online via SBI HSM; boot hart = {}",
         started,
@@ -1218,12 +1319,22 @@ fn smp_report_boot() {
     );
     kprintln!(
         "[dezh-boot] smp: parallel round shared-counter = {} (expected {}) -> {}",
-        counter,
+        r.counter,
         expected,
-        if counter == expected {
+        if r.counter == expected {
             "COHERENT"
         } else {
             "MISMATCH"
+        }
+    );
+    kprintln!(
+        "[dezh-boot] smp: lock-guarded counter = {} (expected {}) -> {}",
+        r.guarded,
+        guarded_expected,
+        if r.guarded == guarded_expected {
+            "MUTEX-OK"
+        } else {
+            "RACE"
         }
     );
 }
@@ -1240,23 +1351,39 @@ fn run_smp_demo() {
         kprintln!("[smp] the bringup path (sbi_hart_start + per-hart stack + tp identity) is still present.");
         return;
     }
-    let (parts, counter, mask) = smp_round();
-    let expected = parts * SMP_WORK;
+    let r = smp_round();
+    let expected = r.parts * SMP_WORK;
+    let guarded_expected = r.guarded_contributors * SMP_LOCK_WORK;
     kprintln!(
-        "[smp] {parts} harts each applied {SMP_WORK} atomic increments to ONE shared counter, at once"
+        "[smp] {} harts each applied {SMP_WORK} atomic increments to ONE shared counter, at once",
+        r.parts
     );
     kprintln!(
-        "[smp] shared counter = {counter} (expected {expected}) -> {}",
-        if counter == expected {
+        "[smp] shared counter = {} (expected {expected}) -> {}",
+        r.counter,
+        if r.counter == expected {
             "COHERENT - the harts truly share memory and their atomics serialise"
         } else {
             "MISMATCH"
         }
     );
-    kprint!("[smp] participating hart ids: ");
+    kprintln!(
+        "[smp] then {} harts (incl. the boot hart) each did {SMP_LOCK_WORK} NON-atomic increments under one ticket lock",
+        r.guarded_contributors
+    );
+    kprintln!(
+        "[smp] lock-guarded counter = {} (expected {guarded_expected}) -> {}",
+        r.guarded,
+        if r.guarded == guarded_expected {
+            "MUTEX-OK - the lock held; without it concurrent read-modify-write would lose updates"
+        } else {
+            "RACE - updates were lost"
+        }
+    );
+    kprint!("[smp] participating secondary hart ids: ");
     let mut first = true;
     for hid in 0..MAX_HARTS {
-        if mask & (1 << hid) != 0 {
+        if r.mask & (1 << hid) != 0 {
             if !first {
                 kprint!(", ");
             }
@@ -1265,8 +1392,8 @@ fn run_smp_demo() {
         }
     }
     kprintln!("");
-    kprintln!("[smp] proven: >1 hart executes concurrently under Dezh's control.");
-    kprintln!("[smp] not yet: symmetric task scheduling across harts (kernel state is single-threaded); see ROADMAP.");
+    kprintln!("[smp] proven: >1 hart executes concurrently, and the kernel now has a working mutual-exclusion lock.");
+    kprintln!("[smp] next: put that lock around the run queue + per-hart trap state so U-mode tasks schedule across harts; see ROADMAP.");
 }
 
 const VIRTIO_MMIO_MAGIC: u32 = 0x7472_6976;

@@ -18,6 +18,7 @@ true today, so a reviewer never has to guess.
 | W8 — intent → effect runtime | An agent runs under one **intent** (`Ahd`); its derived capability is provably ⊆ the intent. Every effect is a ledger record (`Sand`) carrying `actor → intent → derived cap → reversibility`. A whole **mission** (`Sfar`) is rolled back honestly: reversible effects retracted, compensatable effects undone by a **recorded** compensating action, irreversible effects **refused with a reason** — and rollback needs authority over every namespace the mission touched. A five-escape adversary (`redteam`) is stopped at five named boundaries; `why-denied` names the boundary of the last denial; `Tbar` renders the `actor → intent → effect` provenance graph. The `overnight` flagship runs the whole story. |
 | Device interrupts | The kernel is interrupt-driven, not polled: a PLIC routes virtio IRQs to the boot hart's S-mode context, drivers **sleep** on `sys_irq_wait` and are woken by the device, and the scheduler idles (`wfi`) for a device when nothing else is runnable (`irq-stat`). |
 | SMP bring-up | Secondary harts are started through the real **SBI HSM** protocol, each with its own stack and identity (`tp` = hart id); a parallel round proves >1 hart executes concurrently on coherent shared memory (`smp-demo`, and asserted at boot under `-smp 4`). The boot hart is chosen by firmware and is **not** assumed to be hart 0. |
+| SMP mutual exclusion | The kernel has a fair **ticket spinlock**. All harts hammer a non-atomic counter under it and the total is exact (`MUTEX-OK`) — proof the lock works, which atomics cannot show. This is the primitive symmetric scheduling is built on. |
 
 ## What is measured, and how honestly
 
@@ -63,12 +64,14 @@ true today, so a reviewer never has to guess.
   alone developer signing CLI, a root-signed trust store loaded from disk with
   key rotation (today it is kernel-embedded), and verifying packages on the live
   `pkg-recv` upload path. No online PKI / certificate-transparency service.
-- **SMP: hardware parallelism is real; symmetric scheduling is not.** Secondary
-  harts are brought up via SBI HSM and proven to run concurrently with coherent
-  atomics (`smp-demo`), but the scheduler and kernel data structures are still
-  single-threaded `static mut` on the boot hart. Running U-mode tasks
-  symmetrically across harts needs a lock on each of those structures and is the
-  next milestone (see [ROADMAP.md](ROADMAP.md)), not done today.
+- **SMP: hardware parallelism and the lock are real; symmetric scheduling is
+  not.** Secondary harts are brought up via SBI HSM and proven to run concurrently
+  with coherent atomics, and the kernel now has a working fair spinlock proven by a
+  lock-guarded non-atomic counter (`smp-demo`). But the scheduler and kernel data
+  structures are still single-threaded `static mut` on the boot hart. Dispatching
+  U-mode tasks symmetrically across harts is the next milestone: put the lock
+  around the run queue / task table / mailboxes / frame allocator and give each
+  hart its own trap state (see [ROADMAP.md](ROADMAP.md)). Not done today.
 - No production installer, no side-channel hardening, no formal verification.
 - **The live capabilities are a per-task bitmask; the object-capability
   primitive is built but not yet the substrate.** Today's task authority is a bit
