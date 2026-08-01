@@ -1080,6 +1080,156 @@ _hart_start:
     TOTAL = const HART_STACK * MAX_HARTS,
 );
 
+// --- Per-hart U-mode trap path (for running a task on a secondary hart). ------
+//
+// This is deliberately SEPARATE from the boot hart's `utrap`/`KCTX`/`ktrap_stack`
+// so that dispatching a task onto a secondary hart cannot perturb the single-hart
+// console scheduler that everything else depends on. One AP task runs at a time
+// (the boot hart posts it and waits), so a single trap stack and a single saved
+// kernel context suffice — and, crucially, the trap path must NOT read `tp` to
+// find them: a U-mode task owns every integer register, so by the time it traps
+// its `tp` is whatever it left there. (Running tasks on several harts at once will
+// need a `tp`-independent per-hart pointer, e.g. via sscratch; noted in ROADMAP.)
+//   ap_run(frame, kctx): save callee-saved into kctx, then sret into the task.
+//   ap_return(kctx):     longjmp back to just after ap_run (used on task exit).
+//   utrap_ap:            U-mode trap entry using the single AP trap stack.
+const AP_TRAP_STK: usize = 8192;
+global_asm!(
+    r#"
+    .section .bss
+    .align 16
+ap_trap_stack:
+    .space {AP_STK}
+    .globl ap_trap_top
+ap_trap_top:
+
+    .section .text
+    .align 4
+    .globl utrap_ap
+utrap_ap:
+    csrrw   sp, sscratch, sp        # sp = &frame, sscratch = user sp
+    sd      x1, 0(sp)
+    sd      x3, 16(sp)
+    sd      x4, 24(sp)
+    sd      x5, 32(sp)
+    csrr    x5, sscratch            # x5 = user sp (x5 already saved)
+    sd      x5, 8(sp)
+    sd      x6, 40(sp)
+    sd      x7, 48(sp)
+    sd      x8, 56(sp)
+    sd      x9, 64(sp)
+    sd      x10, 72(sp)
+    sd      x11, 80(sp)
+    sd      x12, 88(sp)
+    sd      x13, 96(sp)
+    sd      x14, 104(sp)
+    sd      x15, 112(sp)
+    sd      x16, 120(sp)
+    sd      x17, 128(sp)
+    sd      x18, 136(sp)
+    sd      x19, 144(sp)
+    sd      x20, 152(sp)
+    sd      x21, 160(sp)
+    sd      x22, 168(sp)
+    sd      x23, 176(sp)
+    sd      x24, 184(sp)
+    sd      x25, 192(sp)
+    sd      x26, 200(sp)
+    sd      x27, 208(sp)
+    sd      x28, 216(sp)
+    sd      x29, 224(sp)
+    sd      x30, 232(sp)
+    sd      x31, 240(sp)
+    csrr    x5, sepc
+    sd      x5, 248(sp)
+    mv      a0, sp                  # a0 = &frame
+    la      sp, ap_trap_top         # the single AP trap stack (no tp reliance)
+    call    ap_trap_handler         # returns &frame to resume in a0
+    j       ap_frame_restore
+
+    .globl ap_run
+ap_run:                             # a0 = &frame, a1 = &kctx
+    sd      ra, 0(a1)
+    sd      sp, 8(a1)
+    sd      s0, 16(a1)
+    sd      s1, 24(a1)
+    sd      s2, 32(a1)
+    sd      s3, 40(a1)
+    sd      s4, 48(a1)
+    sd      s5, 56(a1)
+    sd      s6, 64(a1)
+    sd      s7, 72(a1)
+    sd      s8, 80(a1)
+    sd      s9, 88(a1)
+    sd      s10, 96(a1)
+    sd      s11, 104(a1)
+    # fall through into the restore with a0 = frame
+
+ap_frame_restore:                   # a0 = &frame to resume
+    mv      t0, a0
+    ld      t1, 248(t0)
+    csrw    sepc, t1
+    csrw    sscratch, t0            # sscratch = &frame for the next trap
+    ld      sp, 8(t0)               # user sp
+    ld      x1, 0(t0)
+    ld      x3, 16(t0)
+    ld      x4, 24(t0)
+    ld      x6, 40(t0)
+    ld      x7, 48(t0)
+    ld      x8, 56(t0)
+    ld      x9, 64(t0)
+    ld      x11, 80(t0)
+    ld      x12, 88(t0)
+    ld      x13, 96(t0)
+    ld      x14, 104(t0)
+    ld      x15, 112(t0)
+    ld      x16, 120(t0)
+    ld      x17, 128(t0)
+    ld      x18, 136(t0)
+    ld      x19, 144(t0)
+    ld      x20, 152(t0)
+    ld      x21, 160(t0)
+    ld      x22, 168(t0)
+    ld      x23, 176(t0)
+    ld      x24, 184(t0)
+    ld      x25, 192(t0)
+    ld      x26, 200(t0)
+    ld      x27, 208(t0)
+    ld      x28, 216(t0)
+    ld      x29, 224(t0)
+    ld      x30, 232(t0)
+    ld      x31, 240(t0)
+    ld      x10, 72(t0)             # a0
+    ld      x5, 32(t0)              # t0 itself, last
+    sret
+
+    .globl ap_return
+ap_return:                          # a0 = &kctx: longjmp back to after ap_run
+    ld      ra, 0(a0)
+    ld      sp, 8(a0)
+    ld      s0, 16(a0)
+    ld      s1, 24(a0)
+    ld      s2, 32(a0)
+    ld      s3, 40(a0)
+    ld      s4, 48(a0)
+    ld      s5, 56(a0)
+    ld      s6, 64(a0)
+    ld      s7, 72(a0)
+    ld      s8, 80(a0)
+    ld      s9, 88(a0)
+    ld      s10, 96(a0)
+    ld      s11, 104(a0)
+    ret
+"#,
+    AP_STK = const AP_TRAP_STK,
+);
+
+extern "C" {
+    fn utrap_ap();
+    fn ap_run(frame: *const usize, kctx: *const usize);
+    fn ap_return(kctx: *const usize) -> !;
+}
+
 const SBI_EXT_HSM: usize = 0x48534D; // "HSM"
 const SBI_HSM_HART_START: usize = 0;
 
@@ -1218,6 +1368,100 @@ fn drain_runq(hartid: usize) {
     }
 }
 
+// --- Running an actual U-mode task on a secondary hart. ----------------------
+//
+// The run queue above moves markers; this moves a real U-mode task. The boot hart
+// posts a task to a secondary via AP_TASK_REQ; that hart switches into the task's
+// address space, sret's into U-mode, services the task's syscalls through the
+// per-hart AP trap path, and longjmps back to its own loop when the task exits —
+// all while the boot hart keeps running the console. This is one task pinned to
+// one hart; wiring it to the shared run queue (any hart runs any task) is the
+// follow-on, but the hard part — a task genuinely executing in U-mode off the boot
+// hart, with its own trap state — is here.
+static mut AP_KCTX: [usize; 14] = [0; 14];
+static mut AP_FRAME: [usize; 32] = [0; 32];
+static AP_TASK_REQ: [AtomicBool; MAX_HARTS] = [const { AtomicBool::new(false) }; MAX_HARTS];
+static AP_TASK_DONE: AtomicBool = AtomicBool::new(false);
+static AP_TASK_FAULT: AtomicBool = AtomicBool::new(false);
+static AP_TASK_EXIT: AtomicU64 = AtomicU64::new(0);
+
+/// The U-mode task dispatched to a secondary hart. Lives in the user region
+/// (mapped U+X) and speaks only through syscalls — zero ambient authority, exactly
+/// like a boot-hart task.
+#[link_section = ".user.text"]
+#[no_mangle]
+extern "C" fn ap_user_task() -> ! {
+    sys_print(b"  [ap-task] hello from a U-mode task running on a SECONDARY hart\n");
+    sys_print(b"  [ap-task] my syscalls are being serviced off the boot hart; exiting\n");
+    sys_exit(0)
+}
+
+/// AP U-mode trap handler. Services the small syscall set the AP task uses; on
+/// exit or fault it longjmps back into the hart's loop via `AP_KCTX`.
+#[no_mangle]
+extern "C" fn ap_trap_handler(frame: *mut usize) -> *const usize {
+    let scause: usize;
+    unsafe {
+        asm!("csrr {}, scause", out(reg) scause);
+    }
+    let interrupt = scause >> (usize::BITS - 1) == 1;
+    let code = scause & (!0 >> 1);
+    let f = unsafe { &mut *(frame as *mut [usize; 32]) };
+
+    if interrupt {
+        // The AP enabled no interrupts while running the task; ignore and resume.
+        return frame;
+    }
+    if code == 8 {
+        // Environment call from U-mode. Resume after the ecall.
+        f[F_SEPC] += 4;
+        match f[F_A7] {
+            SYS_PRINT => {
+                // Lock the UART: the boot hart may print concurrently.
+                SMP_LOCK.lock();
+                let s = unsafe { core::slice::from_raw_parts(f[F_A0] as *const u8, f[F_A1]) };
+                for &b in s {
+                    Uart.putc(b);
+                }
+                SMP_LOCK.unlock();
+                f[F_A0] = 0;
+            }
+            SYS_EXIT => {
+                AP_TASK_EXIT.store(f[F_A0] as u64, Ordering::Relaxed);
+                unsafe { ap_return(core::ptr::addr_of!(AP_KCTX) as *const usize) }
+            }
+            _ => {
+                f[F_A0] = SYS_DENIED;
+            }
+        }
+        return frame;
+    }
+    // Any exception (e.g. a bad memory access) ends the task cleanly on this hart.
+    AP_TASK_FAULT.store(true, Ordering::Relaxed);
+    unsafe { ap_return(core::ptr::addr_of!(AP_KCTX) as *const usize) }
+}
+
+/// Run the posted AP task on this (secondary) hart: switch into the task's address
+/// space, drop to U-mode, and return here once it exits. Kernel-region VAs are
+/// identity-mapped, so this hart's own PC/SP stay valid across the satp switch.
+unsafe fn run_ap_task() {
+    let satp = kernel_satp();
+    asm!("sfence.vma");
+    asm!("csrw satp, {}", in(reg) satp);
+    asm!("sfence.vma");
+    asm!("csrw stvec, {}", in(reg) utrap_ap as usize);
+    asm!("csrs sstatus, {}", in(reg) 1usize << 18); // SUM: S-mode may read the task's U pages
+    let fp = core::ptr::addr_of!(AP_FRAME) as *const usize;
+    let kp = core::ptr::addr_of!(AP_KCTX) as *const usize;
+    ap_run(fp, kp); // returns (via ap_return) when the task exits or faults
+    // Back to bare mode; leave the hart as it was for the compute/queue rounds.
+    asm!("csrw stvec, {}", in(reg) 0usize);
+    asm!("sfence.vma");
+    asm!("csrw satp, {}", in(reg) 0usize);
+    asm!("sfence.vma");
+    AP_TASK_DONE.store(true, Ordering::Release);
+}
+
 /// Secondary hart body. Never prints (only the boot hart owns the UART) and never
 /// traps (no stvec installed here): it checks in, then serves parallel rounds the
 /// boot hart opens by bumping `SMP_GEN`.
@@ -1231,8 +1475,12 @@ extern "C" fn hart_main(hartid: usize) -> ! {
     let mut served = SMP_GEN.load(Ordering::Acquire);
     loop {
         // Wait for the boot hart to open a new round. spin_loop (not wfi) so a
-        // TCG round-robin host keeps making progress and we wake promptly.
+        // TCG round-robin host keeps making progress and we wake promptly. While
+        // waiting, also pick up a U-mode task the boot hart posted to this hart.
         while SMP_GEN.load(Ordering::Acquire) == served {
+            if AP_TASK_REQ[hartid].swap(false, Ordering::Acquire) {
+                unsafe { run_ap_task() };
+            }
             core::hint::spin_loop();
         }
         served = SMP_GEN.load(Ordering::Acquire);
@@ -1530,6 +1778,65 @@ fn run_smp_demo() {
     );
     kprintln!("[smp] proven: several harts drain one shared run queue under a lock, each item exactly once - the core of a symmetric scheduler.");
     kprintln!("[smp] next: make each job a U-mode task dispatch (needs per-hart trap state + address-space switch); see ROADMAP.");
+}
+
+/// Interactive `smp-task`: dispatch a real U-mode task onto a secondary hart and
+/// wait for it to finish, while the boot hart stays on the console.
+fn run_smp_task_demo() {
+    let boot = BOOT_HART.load(Ordering::Relaxed);
+    let started = SMP_STARTED.load(Ordering::Relaxed);
+    if started == 0 {
+        kprintln!("[smp-task] no secondary harts. Launch QEMU with -smp N.");
+        return;
+    }
+    let mut target = usize::MAX;
+    for h in 0..MAX_HARTS {
+        if h != boot && HART_RAN[h].load(Ordering::Relaxed) {
+            target = h;
+            break;
+        }
+    }
+    if target == usize::MAX {
+        kprintln!("[smp-task] no online secondary hart found.");
+        return;
+    }
+    kprintln!(
+        "[smp-task] dispatching a U-mode task to secondary hart {target} (boot hart {boot} stays on the console)"
+    );
+    unsafe {
+        let f = &mut *core::ptr::addr_of_mut!(AP_FRAME);
+        *f = [0; 32];
+        f[F_SEPC] = ap_user_task as usize;
+        f[F_SP] = task_stack_top(0);
+    }
+    // Expose task slot 0's stack (U=1) for the task. Safe: the console is not
+    // launching tasks while this runs synchronously on the boot hart.
+    set_active_task_mem(0);
+    AP_TASK_DONE.store(false, Ordering::Release);
+    AP_TASK_FAULT.store(false, Ordering::Release);
+    AP_TASK_EXIT.store(0, Ordering::Relaxed);
+    AP_TASK_REQ[target].store(true, Ordering::Release);
+
+    let mut spins = 0u64;
+    while !AP_TASK_DONE.load(Ordering::Acquire) && spins < SMP_SPIN_LIMIT {
+        core::hint::spin_loop();
+        spins += 1;
+    }
+    set_active_task_mem(usize::MAX); // clear the stack grant again
+
+    if !AP_TASK_DONE.load(Ordering::Acquire) {
+        kprintln!("[smp-task] TIMEOUT: hart {target} did not report the task done.");
+        return;
+    }
+    if AP_TASK_FAULT.load(Ordering::Acquire) {
+        kprintln!("[smp-task] the task FAULTED on hart {target} (handled; hart recovered).");
+        return;
+    }
+    kprintln!(
+        "[smp-task] the task exited (code {}) on hart {target} -> U-MODE-ON-AP",
+        AP_TASK_EXIT.load(Ordering::Relaxed)
+    );
+    kprintln!("[smp-task] proven: a U-mode task ran to completion on a hart other than the boot hart, its syscalls serviced there via a per-hart trap path.");
 }
 
 const VIRTIO_MMIO_MAGIC: u32 = 0x7472_6976;
@@ -6339,6 +6646,13 @@ const COMMANDS: &[CommandSpec] = &[
         help: "SMP: secondary harts brought up via SBI HSM run a parallel round with coherent atomics",
     },
     CommandSpec {
+        name: "smp-task",
+        cap: cap::INSPECT,
+        cap_name: "INSPECT",
+        group: "Inspect",
+        help: "SMP: dispatch a real U-mode task onto a secondary hart while the boot hart stays on the console",
+    },
+    CommandSpec {
         name: "ns-revoke",
         cap: cap::SPAWN,
         cap_name: "SPAWN",
@@ -7490,6 +7804,7 @@ fn dispatch(cmd: &str, arg: &str, plan: &KernelPlan, memory: &[MemoryRegion], he
         "lease-demo" => pkg::lease_demo(),
         "cap-demo" => run_cap_demo(),
         "smp-demo" => run_smp_demo(),
+        "smp-task" => run_smp_task_demo(),
         "ns-revoke" => ns_revoke(plan, arg),
         "ns-grant" => ns_grant(plan, arg),
         "nsrevoke-demo" => run_nsrevoke_demo(plan),

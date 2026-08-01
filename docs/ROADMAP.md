@@ -265,15 +265,25 @@ Both are now addressed on RISC-V, in order:
   correctness property a run queue must have is checked — **every item runs exactly
   once** (none lost to a torn dequeue, none run twice by two harts). `smp-demo`
   reports `QUEUE-OK`; CI asserts it at boot and interactively.
-- **Symmetric task scheduling. — NEXT, not started.** The remaining work is to make
-  a run-queue job be a real **U-mode task dispatch** rather than a marker: give each
-  hart its own trap infrastructure (per-hart `KCTX`, trap stack, `sscratch`) and
-  switch address spaces per hart, so a task pulled from the shared queue runs in
-  U-mode on a secondary hart while the boot hart keeps serving the console. The
-  scheduler's other shared state (task table, IPC mailboxes, frame allocator) then
-  moves under the lock too. Until that lands, the secondaries are a proven
-  parallel-compute facility with a correct shared run queue, not yet U-mode
-  task-scheduling CPUs.
+- **A U-mode task on a secondary hart. — DONE.** A real U-mode task is now
+  dispatched onto a secondary hart: it switches into the task's address space,
+  drops to U-mode through a **separate AP trap path** (its own trap stack + saved
+  kernel context, kept isolated from the boot hart's `utrap`/`KCTX` so the console
+  scheduler is untouched), services the task's syscalls **on that hart**, and
+  longjmps back to the hart's loop when the task exits — all while the boot hart
+  keeps running the console. `smp-task` reports `U-MODE-ON-AP`; CI asserts the
+  task's own output appears and it runs to completion on a hart other than the boot
+  hart. Landing this surfaced a real bug worth recording: the AP trap path must not
+  read `tp` to find its stack/context, because a U-mode task owns every integer
+  register and clobbers `tp` before it traps.
+- **Full symmetric scheduling. — NEXT, not started.** What is done is *one* task,
+  *pinned* to a hart the boot hart chose. The remaining work is generality: let the
+  shared run queue itself hand any task to any hart (dispatch + migration), run
+  several tasks on several harts at once (which needs a `tp`-independent per-hart
+  context pointer, e.g. via `sscratch`, not the single AP context used today), and
+  move the rest of the scheduler's shared state — task table, IPC mailboxes, frame
+  allocator — under the lock. Until then, secondaries can run a task on request but
+  are not yet general, load-balanced task-scheduling CPUs.
 
 Post-MVP horizon (recorded, deliberately not started in W8): explicit system
 generations / time-travel, multi-agent attenuated sub-delegation with

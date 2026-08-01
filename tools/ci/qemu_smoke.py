@@ -604,6 +604,18 @@ def run_riscv64(qemu: str, kernel: Path) -> None:
                     "the core of a symmetric scheduler",
                 ],
             ),
+            # A real U-mode task dispatched onto a SECONDARY hart: its own
+            # syscalls are serviced off the boot hart via the per-hart trap path,
+            # and it runs to completion while the boot hart stays on the console.
+            (
+                "smp-task",
+                [
+                    "hello from a U-mode task running on a SECONDARY hart",
+                    "my syscalls are being serviced off the boot hart",
+                    "-> U-MODE-ON-AP",
+                    "a U-mode task ran to completion on a hart other than the boot hart",
+                ],
+            ),
             ("ns-revoke calc", "namespace 'calc' REVOKED (persisted)"),
             # Devices now report completion instead of being polled blind.
             (
