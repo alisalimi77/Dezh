@@ -127,6 +127,10 @@ def run_riscv64(qemu: str, kernel: Path) -> None:
         # hammered by all four harts, must land exactly on (4 x 50000). Atomics
         # cannot prove this - only a correct lock can.
         session.wait_for("lock-guarded counter = 200000 (expected 200000) -> MUTEX-OK")
+        # Shared run queue: 48 jobs drained concurrently by several harts, each
+        # exactly once - the core correctness property of a symmetric scheduler.
+        session.wait_for("run-queue 48 jobs drained by")
+        session.wait_for("each exactly once -> QUEUE-OK")
         session.wait_for("service registry built from boot plan")
         session.wait_for("Dezh console. Every command requires an explicit capability.")
 
@@ -596,7 +600,8 @@ def run_riscv64(qemu: str, kernel: Path) -> None:
                     "harts each applied 200000 atomic increments to ONE shared counter",
                     "COHERENT - the harts truly share memory and their atomics serialise",
                     "lock-guarded counter = 200000 (expected 200000) -> MUTEX-OK",
-                    "the kernel now has a working mutual-exclusion lock",
+                    "each job ran exactly once -> QUEUE-OK",
+                    "the core of a symmetric scheduler",
                 ],
             ),
             ("ns-revoke calc", "namespace 'calc' REVOKED (persisted)"),

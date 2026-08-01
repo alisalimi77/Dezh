@@ -19,6 +19,7 @@ true today, so a reviewer never has to guess.
 | Device interrupts | The kernel is interrupt-driven, not polled: a PLIC routes virtio IRQs to the boot hart's S-mode context, drivers **sleep** on `sys_irq_wait` and are woken by the device, and the scheduler idles (`wfi`) for a device when nothing else is runnable (`irq-stat`). |
 | SMP bring-up | Secondary harts are started through the real **SBI HSM** protocol, each with its own stack and identity (`tp` = hart id); a parallel round proves >1 hart executes concurrently on coherent shared memory (`smp-demo`, and asserted at boot under `-smp 4`). The boot hart is chosen by firmware and is **not** assumed to be hart 0. |
 | SMP mutual exclusion | The kernel has a fair **ticket spinlock**. All harts hammer a non-atomic counter under it and the total is exact (`MUTEX-OK`) — proof the lock works, which atomics cannot show. This is the primitive symmetric scheduling is built on. |
+| SMP shared run queue | The core of a symmetric scheduler: 48 jobs on ONE queue, drained concurrently by every hart under the lock, each item running **exactly once** (`QUEUE-OK`) — none lost, none double-run. |
 
 ## What is measured, and how honestly
 
@@ -64,14 +65,17 @@ true today, so a reviewer never has to guess.
   alone developer signing CLI, a root-signed trust store loaded from disk with
   key rotation (today it is kernel-embedded), and verifying packages on the live
   `pkg-recv` upload path. No online PKI / certificate-transparency service.
-- **SMP: hardware parallelism and the lock are real; symmetric scheduling is
-  not.** Secondary harts are brought up via SBI HSM and proven to run concurrently
-  with coherent atomics, and the kernel now has a working fair spinlock proven by a
-  lock-guarded non-atomic counter (`smp-demo`). But the scheduler and kernel data
-  structures are still single-threaded `static mut` on the boot hart. Dispatching
-  U-mode tasks symmetrically across harts is the next milestone: put the lock
-  around the run queue / task table / mailboxes / frame allocator and give each
-  hart its own trap state (see [ROADMAP.md](ROADMAP.md)). Not done today.
+- **SMP: hardware parallelism, the lock, and a shared run queue are real; U-mode
+  task scheduling across harts is not.** Secondary harts are brought up via SBI HSM
+  and proven to run concurrently with coherent atomics; the kernel has a working
+  fair spinlock (proven by a lock-guarded non-atomic counter); and several harts
+  drain one shared run queue with each item running exactly once (`smp-demo`,
+  `QUEUE-OK`). What is **not** done: making a queued job a real U-mode task
+  dispatch. That needs per-hart trap state (`KCTX`, trap stack, `sscratch`) and
+  per-hart address-space switching, after which the task table / mailboxes / frame
+  allocator move under the lock too. Today the U-mode scheduler still runs
+  single-threaded on the boot hart. This is the next milestone (see
+  [ROADMAP.md](ROADMAP.md)).
 - No production installer, no side-channel hardening, no formal verification.
 - **The live capabilities are a per-task bitmask; the object-capability
   primitive is built but not yet the substrate.** Today's task authority is a bit

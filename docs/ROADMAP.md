@@ -259,13 +259,21 @@ Both are now addressed on RISC-V, in order:
   lands exactly on `contributors x work` (`smp-demo` reports `MUTEX-OK`; CI asserts
   it at boot and interactively). Atomics alone cannot prove this — the hardware
   serialises them regardless — so the non-atomic counter is the point.
-- **Symmetric scheduling. — NEXT, not started.** With the lock in hand, the
-  remaining work is to put it around the scheduler's shared state (run queue, task
-  table, IPC mailboxes, frame allocator) and give each hart its own trap
-  infrastructure (per-hart `KCTX`, trap stack, `sscratch`), so a U-mode task can be
-  dispatched onto a secondary hart while the boot hart keeps running the console.
-  Until that lands, the secondaries are a proven parallel-compute facility with a
-  working lock, not yet general task-scheduling CPUs.
+- **Shared run queue. — DONE.** The structural core of a symmetric scheduler: ONE
+  queue of work, every hart popping the next item under the lock and running it in
+  parallel. 48 jobs are enqueued and drained concurrently by all harts, and the
+  correctness property a run queue must have is checked — **every item runs exactly
+  once** (none lost to a torn dequeue, none run twice by two harts). `smp-demo`
+  reports `QUEUE-OK`; CI asserts it at boot and interactively.
+- **Symmetric task scheduling. — NEXT, not started.** The remaining work is to make
+  a run-queue job be a real **U-mode task dispatch** rather than a marker: give each
+  hart its own trap infrastructure (per-hart `KCTX`, trap stack, `sscratch`) and
+  switch address spaces per hart, so a task pulled from the shared queue runs in
+  U-mode on a secondary hart while the boot hart keeps serving the console. The
+  scheduler's other shared state (task table, IPC mailboxes, frame allocator) then
+  moves under the lock too. Until that lands, the secondaries are a proven
+  parallel-compute facility with a correct shared run queue, not yet U-mode
+  task-scheduling CPUs.
 
 Post-MVP horizon (recorded, deliberately not started in W8): explicit system
 generations / time-travel, multi-agent attenuated sub-delegation with

@@ -1151,6 +1151,73 @@ static SMP_LOCK: TicketLock = TicketLock::new();
 static mut SMP_GUARDED: u64 = 0;
 const SMP_LOCK_WORK: u64 = 50_000;
 
+// --- A shared run queue drained by every hart at once. -----------------------
+//
+// This is the shape of a symmetric scheduler's core: ONE queue of work, and
+// several harts each popping the next item and running it, in parallel, under a
+// lock. The property that must hold — and the thing the lock buys — is that every
+// item runs EXACTLY once: none lost to a torn dequeue, none run twice by two
+// harts that both thought they popped it. The jobs here are just markers so the
+// proof is checkable; the next step is for a job to be a U-mode task dispatch
+// (which additionally needs per-hart trap state + address-space switching).
+const NJOBS: usize = 48;
+const RUNQ_CAP: usize = 64;
+static SMP_RUNQ_LOCK: TicketLock = TicketLock::new();
+
+struct RunQueue {
+    buf: [u32; RUNQ_CAP],
+    head: usize,
+    tail: usize,
+}
+static mut RUNQ: RunQueue = RunQueue {
+    buf: [0; RUNQ_CAP],
+    head: 0,
+    tail: 0,
+};
+/// How many times each job was executed — must be exactly 1 everywhere.
+static JOB_RUNS: [AtomicU32; NJOBS] = [const { AtomicU32::new(0) }; NJOBS];
+/// Which hart ran each job (0xffff_ffff = not yet) — to show the spread.
+static JOB_HART: [AtomicU32; NJOBS] = [const { AtomicU32::new(u32::MAX) }; NJOBS];
+static JOBS_DONE: AtomicU64 = AtomicU64::new(0);
+
+fn runq_push(id: u32) {
+    SMP_RUNQ_LOCK.lock();
+    unsafe {
+        let q = &mut *core::ptr::addr_of_mut!(RUNQ);
+        q.buf[q.tail % RUNQ_CAP] = id;
+        q.tail += 1;
+    }
+    SMP_RUNQ_LOCK.unlock();
+}
+
+fn runq_pop() -> Option<u32> {
+    SMP_RUNQ_LOCK.lock();
+    let r = unsafe {
+        let q = &mut *core::ptr::addr_of_mut!(RUNQ);
+        if q.head == q.tail {
+            None
+        } else {
+            let v = q.buf[q.head % RUNQ_CAP];
+            q.head += 1;
+            Some(v)
+        }
+    };
+    SMP_RUNQ_LOCK.unlock();
+    r
+}
+
+/// Pop and "run" jobs until the queue is empty. Called concurrently by every hart.
+fn drain_runq(hartid: usize) {
+    while let Some(id) = runq_pop() {
+        let i = id as usize;
+        if i < NJOBS {
+            JOB_RUNS[i].fetch_add(1, Ordering::Relaxed);
+            JOB_HART[i].store(hartid as u32, Ordering::Relaxed);
+        }
+        JOBS_DONE.fetch_add(1, Ordering::Release);
+    }
+}
+
 /// Secondary hart body. Never prints (only the boot hart owns the UART) and never
 /// traps (no stvec installed here): it checks in, then serves parallel rounds the
 /// boot hart opens by bumping `SMP_GEN`.
@@ -1169,6 +1236,11 @@ extern "C" fn hart_main(hartid: usize) -> ! {
             core::hint::spin_loop();
         }
         served = SMP_GEN.load(Ordering::Acquire);
+
+        // (0) Drain the shared run queue: proves several harts pop one queue
+        // concurrently with each item running exactly once. Done first so all
+        // harts contend on the queue at the same time.
+        drain_runq(hartid);
 
         // (1) Atomic work: proves coherent shared memory.
         let mut n = 0;
@@ -1233,6 +1305,12 @@ struct SmpRound {
     guarded_contributors: u64,
     /// Bitmask of participating secondary hart ids.
     mask: u64,
+    /// Run-queue jobs drained in total (must equal NJOBS).
+    jobs_done: u64,
+    /// True iff every job ran exactly once (the run-queue correctness property).
+    jobs_each_once: bool,
+    /// How many distinct harts pulled at least one job (shows the spread).
+    job_harts: u64,
 }
 
 /// Drive one parallel round: the secondaries do atomic work and lock-guarded
@@ -1247,13 +1325,28 @@ fn smp_round() -> SmpRound {
             guarded: 0,
             guarded_contributors: 0,
             mask: 0,
+            jobs_done: 0,
+            jobs_each_once: false,
+            job_harts: 0,
         };
     }
     SMP_COUNTER.store(0, Ordering::Relaxed);
     unsafe { write_volatile(core::ptr::addr_of_mut!(SMP_GUARDED), 0) };
+    // Reset and refill the shared run queue before opening the round.
+    JOBS_DONE.store(0, Ordering::Relaxed);
+    for i in 0..NJOBS {
+        JOB_RUNS[i].store(0, Ordering::Relaxed);
+        JOB_HART[i].store(u32::MAX, Ordering::Relaxed);
+    }
+    for id in 0..NJOBS {
+        runq_push(id as u32);
+    }
     // Release: orders both resets above before the secondaries observe the new
     // generation and start their work.
     let gen = SMP_GEN.fetch_add(1, Ordering::Release) + 1;
+
+    // The boot hart joins the drain (it is a hart too), then the lock contention.
+    drain_runq(BOOT_HART.load(Ordering::Relaxed));
 
     // The boot hart contends on the lock alongside the secondaries.
     let mut m = 0;
@@ -1293,12 +1386,32 @@ fn smp_round() -> SmpRound {
             mask |= 1 << hid;
         }
     }
+
+    // Run-queue verdict: every job ran exactly once, and count the distinct harts
+    // that pulled work.
+    let jobs_done = JOBS_DONE.load(Ordering::Acquire);
+    let mut jobs_each_once = true;
+    let mut hart_seen = 0u64;
+    for i in 0..NJOBS {
+        if JOB_RUNS[i].load(Ordering::Relaxed) != 1 {
+            jobs_each_once = false;
+        }
+        let h = JOB_HART[i].load(Ordering::Relaxed);
+        if (h as usize) < MAX_HARTS {
+            hart_seen |= 1 << h;
+        }
+    }
+    let job_harts = hart_seen.count_ones() as u64;
+
     SmpRound {
         parts,
         counter,
         guarded,
         guarded_contributors: parts + 1, // secondaries + this boot hart
         mask,
+        jobs_done,
+        jobs_each_once,
+        job_harts,
     }
 }
 
@@ -1335,6 +1448,16 @@ fn smp_report_boot() {
             "MUTEX-OK"
         } else {
             "RACE"
+        }
+    );
+    kprintln!(
+        "[dezh-boot] smp: run-queue {} jobs drained by {} harts, each exactly once -> {}",
+        r.jobs_done,
+        r.job_harts,
+        if r.jobs_done == NJOBS as u64 && r.jobs_each_once {
+            "QUEUE-OK"
+        } else {
+            "QUEUE-BROKEN"
         }
     );
 }
@@ -1392,8 +1515,21 @@ fn run_smp_demo() {
         }
     }
     kprintln!("");
-    kprintln!("[smp] proven: >1 hart executes concurrently, and the kernel now has a working mutual-exclusion lock.");
-    kprintln!("[smp] next: put that lock around the run queue + per-hart trap state so U-mode tasks schedule across harts; see ROADMAP.");
+    kprintln!(
+        "[smp] then {} jobs on ONE shared run queue were drained concurrently by {} harts",
+        r.jobs_done,
+        r.job_harts
+    );
+    kprintln!(
+        "[smp] each job ran exactly once -> {}",
+        if r.jobs_done == NJOBS as u64 && r.jobs_each_once {
+            "QUEUE-OK - a correct concurrent run queue: none lost, none double-run"
+        } else {
+            "QUEUE-BROKEN"
+        }
+    );
+    kprintln!("[smp] proven: several harts drain one shared run queue under a lock, each item exactly once - the core of a symmetric scheduler.");
+    kprintln!("[smp] next: make each job a U-mode task dispatch (needs per-hart trap state + address-space switch); see ROADMAP.");
 }
 
 const VIRTIO_MMIO_MAGIC: u32 = 0x7472_6976;
