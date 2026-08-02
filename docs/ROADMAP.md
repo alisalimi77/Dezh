@@ -276,14 +276,28 @@ Both are now addressed on RISC-V, in order:
   hart. Landing this surfaced a real bug worth recording: the AP trap path must not
   read `tp` to find its stack/context, because a U-mode task owns every integer
   register and clobbers `tp` before it traps.
-- **Full symmetric scheduling. — NEXT, not started.** What is done is *one* task,
-  *pinned* to a hart the boot hart chose. The remaining work is generality: let the
-  shared run queue itself hand any task to any hart (dispatch + migration), run
-  several tasks on several harts at once (which needs a `tp`-independent per-hart
-  context pointer, e.g. via `sscratch`, not the single AP context used today), and
-  move the rest of the scheduler's shared state — task table, IPC mailboxes, frame
-  allocator — under the lock. Until then, secondaries can run a task on request but
-  are not yet general, load-balanced task-scheduling CPUs.
+- **Symmetric scheduling, with isolation intact. — DONE.** The previous step ran
+  *one* task *pinned* to a hart the boot hart chose. Now the boot hart fills a
+  single task queue and **every** secondary hart pulls from it, so tasks land
+  wherever a hart is free and several execute in U-mode **at the same instant**
+  (`smp-sched`: 4 tasks placed across 3 harts, each run exactly once, peak 3 live
+  concurrently → `SCHED-OK`).
+  - Per-hart state is found **through `sscratch`, not `tp`**: each hart's `ApCtx`
+    begins with its trap frame, so the trap entry lands on it and reads that hart's
+    trap stack and saved kernel context at fixed offsets. Several harts can be in a
+    trap simultaneously.
+  - Parallelism did **not** cost isolation. Each task gets its **own address
+    space** — a private copy of the page tables in which only that task's stack
+    region carries the U bit — so two tasks running concurrently on two harts cannot
+    touch each other's memory. `smp-isolate` proves it: a task that reaches into a
+    neighbour's stack page-faults and is killed on its own hart while the neighbour
+    runs on undisturbed (`ISOLATION-OK`).
+- **Remaining SMP work. — NOT started.** Tasks run to completion on the hart that
+  picked them: there is no preemption or migration on a secondary hart (no timer
+  armed there yet), and the *console's* own scheduler — task table, IPC mailboxes,
+  frame allocator — is still single-threaded on the boot hart and not yet under the
+  lock. Merging the two schedulers into one lock-protected structure, so every task
+  in the system (daemons included) is dispatchable on any hart, is the next step.
 
 Post-MVP horizon (recorded, deliberately not started in W8): explicit system
 generations / time-travel, multi-agent attenuated sub-delegation with

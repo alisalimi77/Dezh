@@ -616,6 +616,24 @@ def run_riscv64(qemu: str, kernel: Path) -> None:
                     "a U-mode task ran to completion on a hart other than the boot hart",
                 ],
             ),
+            # Symmetric scheduling: one task queue, every hart pulling from it,
+            # several U-mode tasks executing at the same instant on different harts.
+            (
+                "smp-sched",
+                [
+                    "task -> hart placement:",
+                    "-> SCHED-OK",
+                ],
+            ),
+            # Parallelism did not cost isolation: each task has its own address
+            # space, so a task reaching into a neighbour's stack page-faults.
+            (
+                "smp-isolate",
+                [
+                    "page-faulted on the cross-task write, killed on its own hart",
+                    "-> ISOLATION-OK",
+                ],
+            ),
             ("ns-revoke calc", "namespace 'calc' REVOKED (persisted)"),
             # Devices now report completion instead of being polled blind.
             (

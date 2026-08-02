@@ -197,11 +197,14 @@ defended.
 **Hardware maturity (W9).** The RISC-V kernel is interrupt-driven, not polled: a
 PLIC delivers virtio interrupts, drivers sleep on the device (`sys_irq_wait`) and
 the scheduler idles with `wfi` for them (`irq-stat`). Secondary harts are brought
-up through the standard **SBI HSM** protocol and shown executing concurrently on
-coherent shared memory (`smp-demo`, asserted at boot under `-smp 4`). Honest
-scope: hardware parallelism is real; **symmetric task scheduling across harts is
-the next milestone**, since the scheduler is still single-threaded on the boot
-hart — see [STATUS](docs/STATUS.md) and the [roadmap](docs/ROADMAP.md).
+up through the standard **SBI HSM** protocol, and U-mode tasks are **scheduled
+symmetrically** across them — one queue, every hart pulling from it, several tasks
+running in U-mode at the same instant (`smp-sched`). Parallelism does not cost
+isolation: each task gets its own address space, so a task that reaches into a
+concurrent neighbour's stack page-faults and dies on its own hart (`smp-isolate`).
+Honest scope: tasks on secondary harts run to completion (**no preemption or
+migration there yet**) and the console's own scheduler is still single-hart — see
+[STATUS](docs/STATUS.md) and the [roadmap](docs/ROADMAP.md).
 
 <p align="center">
   <img src="docs/assets/overnight.svg" alt="The overnight flagship run: an agent's night forecast, rolled back honestly, and its escape contained" width="720">

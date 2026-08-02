@@ -20,7 +20,9 @@ true today, so a reviewer never has to guess.
 | SMP bring-up | Secondary harts are started through the real **SBI HSM** protocol, each with its own stack and identity (`tp` = hart id); a parallel round proves >1 hart executes concurrently on coherent shared memory (`smp-demo`, and asserted at boot under `-smp 4`). The boot hart is chosen by firmware and is **not** assumed to be hart 0. |
 | SMP mutual exclusion | The kernel has a fair **ticket spinlock**. All harts hammer a non-atomic counter under it and the total is exact (`MUTEX-OK`) — proof the lock works, which atomics cannot show. This is the primitive symmetric scheduling is built on. |
 | SMP shared run queue | The core of a symmetric scheduler: 48 jobs on ONE queue, drained concurrently by every hart under the lock, each item running **exactly once** (`QUEUE-OK`) — none lost, none double-run. |
-| U-mode task on a secondary hart | A real U-mode task is dispatched onto a secondary hart, drops to U-mode via a separate per-hart trap path, has its syscalls serviced **on that hart**, and runs to completion while the boot hart stays on the console (`smp-task`, `U-MODE-ON-AP`). One task, pinned; general load-balanced scheduling is the next step. |
+| U-mode task on a secondary hart | A real U-mode task is dispatched onto a secondary hart, drops to U-mode via a per-hart trap path, has its syscalls serviced **on that hart**, and runs to completion while the boot hart stays on the console (`smp-task`, `U-MODE-ON-AP`). |
+| Symmetric scheduling | One task queue, every hart pulling from it: tasks land wherever a hart is free and several run in U-mode **at the same instant** (`smp-sched` — 4 tasks across 3 harts, each exactly once, peak 3 live → `SCHED-OK`). Per-hart trap state is reached via `sscratch`, so harts can trap simultaneously. |
+| Isolation under parallelism | Each task gets its **own address space** (only its stack region is U-mapped), so concurrent tasks on different harts cannot reach each other's memory: an intruder page-faults and dies on its own hart while its neighbour runs on (`smp-isolate`, `ISOLATION-OK`). |
 
 ## What is measured, and how honestly
 
@@ -66,16 +68,16 @@ true today, so a reviewer never has to guess.
   alone developer signing CLI, a root-signed trust store loaded from disk with
   key rotation (today it is kernel-embedded), and verifying packages on the live
   `pkg-recv` upload path. No online PKI / certificate-transparency service.
-- **SMP: real up to one-task-per-hart; general symmetric scheduling is not done.**
-  Secondary harts come up via SBI HSM and run concurrently with coherent atomics;
-  the kernel has a working fair spinlock; several harts drain one shared run queue
-  with each item exactly once; and a real **U-mode task runs on a secondary hart**
-  with its syscalls serviced there (`smp-task`, `U-MODE-ON-AP`). What is **not**
-  done is generality: the shared queue does not yet hand arbitrary tasks to
-  arbitrary harts, only one AP task runs at a time (a single AP trap context, not
-  yet per-hart), and the rest of the scheduler's state (task table, IPC mailboxes,
-  frame allocator) is still single-threaded on the boot hart and not under the
-  lock. Full load-balanced scheduling is the next milestone (see
+- **SMP: symmetric scheduling works for queued tasks; the console's own scheduler
+  is still single-hart.** Secondary harts come up via SBI HSM, the kernel has a fair
+  spinlock, several harts drain one shared queue, and real U-mode tasks are
+  scheduled symmetrically across harts with per-task address spaces keeping them
+  isolated (`smp-sched`, `smp-isolate`). What is **not** done: tasks on secondary
+  harts run to completion — **no preemption or migration there** (no timer armed on
+  a secondary yet) — and the *console's* scheduler with its task table, IPC
+  mailboxes and frame allocator is still single-threaded on the boot hart and not
+  under the lock, so daemons and console tasks are not yet dispatchable on any hart.
+  Merging the two into one lock-protected scheduler is the next milestone (see
   [ROADMAP.md](ROADMAP.md)).
 - No production installer, no side-channel hardening, no formal verification.
 - **The live capabilities are a per-task bitmask; the object-capability

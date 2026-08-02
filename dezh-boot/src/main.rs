@@ -1083,25 +1083,30 @@ _hart_start:
 // --- Per-hart U-mode trap path (for running a task on a secondary hart). ------
 //
 // This is deliberately SEPARATE from the boot hart's `utrap`/`KCTX`/`ktrap_stack`
-// so that dispatching a task onto a secondary hart cannot perturb the single-hart
-// console scheduler that everything else depends on. One AP task runs at a time
-// (the boot hart posts it and waits), so a single trap stack and a single saved
-// kernel context suffice — and, crucially, the trap path must NOT read `tp` to
-// find them: a U-mode task owns every integer register, so by the time it traps
-// its `tp` is whatever it left there. (Running tasks on several harts at once will
-// need a `tp`-independent per-hart pointer, e.g. via sscratch; noted in ROADMAP.)
+// so that dispatching tasks onto secondary harts cannot perturb the single-hart
+// console scheduler that everything else depends on.
+//
+// Finding per-hart state without `tp`. A U-mode task owns every integer register,
+// so by the time it traps, `tp` holds whatever the task left there — the trap path
+// must not use it. Instead each hart's state lives in one `ApCtx` whose FIRST field
+// is the trap frame, and `sscratch` points at it while the task runs. On trap,
+// `csrrw sp, sscratch, sp` lands sp on that hart's own `ApCtx`, from which the
+// per-hart trap stack (offset 256) and saved kernel context (offset 264) are read.
+// That makes several harts able to be in a trap at the same time.
 //   ap_run(frame, kctx): save callee-saved into kctx, then sret into the task.
 //   ap_return(kctx):     longjmp back to just after ap_run (used on task exit).
-//   utrap_ap:            U-mode trap entry using the single AP trap stack.
+//   utrap_ap:            U-mode trap entry; per-hart state via sscratch, not tp.
 const AP_TRAP_STK: usize = 8192;
+/// Byte offsets inside `ApCtx`, mirrored in the assembly below.
+const AP_OFF_TRAPTOP: usize = 256;
+const AP_OFF_KCTX: usize = 264;
 global_asm!(
     r#"
     .section .bss
     .align 16
-ap_trap_stack:
-    .space {AP_STK}
-    .globl ap_trap_top
-ap_trap_top:
+    .globl ap_trap_stacks
+ap_trap_stacks:
+    .space {AP_TOTAL}
 
     .section .text
     .align 4
@@ -1142,8 +1147,8 @@ utrap_ap:
     sd      x31, 240(sp)
     csrr    x5, sepc
     sd      x5, 248(sp)
-    mv      a0, sp                  # a0 = &frame
-    la      sp, ap_trap_top         # the single AP trap stack (no tp reliance)
+    mv      a0, sp                  # a0 = &frame == &ApCtx for THIS hart
+    ld      sp, {OFF_TRAPTOP}(a0)   # this hart's own trap stack (found via sscratch)
     call    ap_trap_handler         # returns &frame to resume in a0
     j       ap_frame_restore
 
@@ -1221,7 +1226,8 @@ ap_return:                          # a0 = &kctx: longjmp back to after ap_run
     ld      s11, 104(a0)
     ret
 "#,
-    AP_STK = const AP_TRAP_STK,
+    AP_TOTAL = const AP_TRAP_STK * MAX_HARTS,
+    OFF_TRAPTOP = const AP_OFF_TRAPTOP,
 );
 
 extern "C" {
@@ -1368,36 +1374,165 @@ fn drain_runq(hartid: usize) {
     }
 }
 
-// --- Running an actual U-mode task on a secondary hart. ----------------------
+// --- Symmetric U-mode scheduling: any task, any hart, several at once. -------
 //
-// The run queue above moves markers; this moves a real U-mode task. The boot hart
-// posts a task to a secondary via AP_TASK_REQ; that hart switches into the task's
-// address space, sret's into U-mode, services the task's syscalls through the
-// per-hart AP trap path, and longjmps back to its own loop when the task exits —
-// all while the boot hart keeps running the console. This is one task pinned to
-// one hart; wiring it to the shared run queue (any hart runs any task) is the
-// follow-on, but the hard part — a task genuinely executing in U-mode off the boot
-// hart, with its own trap state — is here.
-static mut AP_KCTX: [usize; 14] = [0; 14];
-static mut AP_FRAME: [usize; 32] = [0; 32];
-static AP_TASK_REQ: [AtomicBool; MAX_HARTS] = [const { AtomicBool::new(false) }; MAX_HARTS];
-static AP_TASK_DONE: AtomicBool = AtomicBool::new(false);
-static AP_TASK_FAULT: AtomicBool = AtomicBool::new(false);
-static AP_TASK_EXIT: AtomicU64 = AtomicU64::new(0);
+// The run queue above moves markers. This moves REAL U-mode tasks: the boot hart
+// fills a task queue, every secondary hart pops from it and runs whatever it gets
+// in U-mode, and several tasks execute on several harts at the same time — while
+// the boot hart stays on the console.
+//
+// Isolation is not dropped to get there. Each task gets its OWN address space: a
+// private copy of the page tables in which only that task's stack region carries
+// the U bit. Two tasks running concurrently on two harts therefore cannot touch
+// each other's memory — proven by `smp-isolate`, where a task that reaches into a
+// neighbour's stack takes a page fault instead.
 
-/// The U-mode task dispatched to a secondary hart. Lives in the user region
-/// (mapped U+X) and speaks only through syscalls — zero ambient authority, exactly
-/// like a boot-hart task.
+/// Per-hart AP state. The trap frame MUST stay first: `sscratch` points here while
+/// a task runs, so the trap entry lands on it and reads `trap_top`/`kctx` at the
+/// fixed offsets `AP_OFF_TRAPTOP` / `AP_OFF_KCTX` — never via `tp`, which a U-mode
+/// task is free to clobber.
+#[repr(C, align(16))]
+struct ApCtx {
+    frame: [usize; 32],
+    trap_top: usize,
+    kctx: [usize; 14],
+    slot: usize,
+}
+const EMPTY_AP_CTX: ApCtx = ApCtx {
+    frame: [0; 32],
+    trap_top: 0,
+    kctx: [0; 14],
+    slot: usize::MAX,
+};
+static mut AP_CTX: [ApCtx; MAX_HARTS] = [EMPTY_AP_CTX; MAX_HARTS];
+
+extern "C" {
+    static ap_trap_stacks: u8;
+}
+
+fn ap_trap_top(hartid: usize) -> usize {
+    (unsafe { core::ptr::addr_of!(ap_trap_stacks) } as usize) + (hartid + 1) * AP_TRAP_STK
+}
+
+/// Task slots. One per per-task stack region, so each has an isolated stack.
+const AP_SLOTS: usize = MAX_TASKS;
+static AP_SLOT_ENTRY: [AtomicUsize; AP_SLOTS] = [const { AtomicUsize::new(0) }; AP_SLOTS];
+static AP_SLOT_ARG: [AtomicUsize; AP_SLOTS] = [const { AtomicUsize::new(0) }; AP_SLOTS];
+static AP_SLOT_SATP: [AtomicUsize; AP_SLOTS] = [const { AtomicUsize::new(0) }; AP_SLOTS];
+static AP_SLOT_RUNS: [AtomicU32; AP_SLOTS] = [const { AtomicU32::new(0) }; AP_SLOTS];
+static AP_SLOT_HART: [AtomicU32; AP_SLOTS] = [const { AtomicU32::new(u32::MAX) }; AP_SLOTS];
+static AP_SLOT_EXIT: [AtomicU64; AP_SLOTS] = [const { AtomicU64::new(u64::MAX) }; AP_SLOTS];
+static AP_SLOT_FAULT: [AtomicBool; AP_SLOTS] = [const { AtomicBool::new(false) }; AP_SLOTS];
+/// The two page-table frames each slot's address space owns, so they can be freed.
+static AP_SLOT_ROOT: [AtomicUsize; AP_SLOTS] = [const { AtomicUsize::new(0) }; AP_SLOTS];
+static AP_SLOT_L1: [AtomicUsize; AP_SLOTS] = [const { AtomicUsize::new(0) }; AP_SLOTS];
+
+/// The task queue the harts pull from, plus liveness gauges.
+static AP_Q_LOCK: TicketLock = TicketLock::new();
+static mut AP_Q: RunQueue = RunQueue {
+    buf: [0; RUNQ_CAP],
+    head: 0,
+    tail: 0,
+};
+static AP_SCHED_ON: AtomicBool = AtomicBool::new(false);
+static AP_TASKS_DONE: AtomicU64 = AtomicU64::new(0);
+/// U-mode tasks executing right now, and the high-water mark — the number that
+/// proves tasks really overlapped rather than running one after another.
+static AP_LIVE: AtomicU64 = AtomicU64::new(0);
+static AP_LIVE_MAX: AtomicU64 = AtomicU64::new(0);
+
+fn ap_q_push(slot: u32) {
+    AP_Q_LOCK.lock();
+    unsafe {
+        let q = &mut *core::ptr::addr_of_mut!(AP_Q);
+        q.buf[q.tail % RUNQ_CAP] = slot;
+        q.tail += 1;
+    }
+    AP_Q_LOCK.unlock();
+}
+
+fn ap_q_pop() -> Option<u32> {
+    AP_Q_LOCK.lock();
+    let r = unsafe {
+        let q = &mut *core::ptr::addr_of_mut!(AP_Q);
+        if q.head == q.tail {
+            None
+        } else {
+            let v = q.buf[q.head % RUNQ_CAP];
+            q.head += 1;
+            Some(v)
+        }
+    };
+    AP_Q_LOCK.unlock();
+    r
+}
+
+/// Build a private address space for one task slot: copy the kernel page tables,
+/// then clear the U bit on EVERY task stack region except this slot's. Shared task
+/// code stays U+X (read/execute only), so tasks share code but never data.
+fn build_ap_slot_space(slot: usize) -> usize {
+    let root_pa = frame_alloc();
+    let l1_pa = frame_alloc();
+    if root_pa == 0 || l1_pa == 0 {
+        return 0;
+    }
+    unsafe {
+        let src_root = &(*core::ptr::addr_of!(ROOT)).0;
+        let src_l1 = &(*core::ptr::addr_of!(L1)).0;
+        let dr = root_pa as *mut u64;
+        let dl = l1_pa as *mut u64;
+        for i in 0..512usize {
+            write_volatile(dr.add(i), src_root[i]);
+            write_volatile(dl.add(i), src_l1[i]);
+        }
+        // No task stack is reachable from U-mode...
+        for i in 0..MAX_TASKS {
+            let idx = stack_region_l1_index(i);
+            let e = read_volatile(dl.add(idx)) & !PTE_U;
+            write_volatile(dl.add(idx), e);
+        }
+        // ...except this slot's own.
+        let mine = stack_region_l1_index(slot);
+        let e = read_volatile(dl.add(mine)) | PTE_U;
+        write_volatile(dl.add(mine), e);
+        // Point the copied root at the copied L1.
+        write_volatile(dr.add(2), ((l1_pa as u64 >> 12) << 10) | PTE_V);
+    }
+    AP_SLOT_ROOT[slot].store(root_pa, Ordering::Relaxed);
+    AP_SLOT_L1[slot].store(l1_pa, Ordering::Relaxed);
+    (8usize << 60) | (root_pa >> 12)
+}
+
+/// A U-mode worker. Lives in the user region (U+X) and speaks only through
+/// syscalls — zero ambient authority, exactly like a boot-hart task. `a0` is its
+/// slot id; it spins briefly so concurrent workers genuinely overlap in time.
 #[link_section = ".user.text"]
 #[no_mangle]
-extern "C" fn ap_user_task() -> ! {
+extern "C" fn ap_worker_task(slot: usize) -> ! {
     sys_print(b"  [ap-task] hello from a U-mode task running on a SECONDARY hart\n");
+    let mut i = 0usize;
+    while i < 300_000 {
+        unsafe { asm!("nop") };
+        i += 1;
+    }
     sys_print(b"  [ap-task] my syscalls are being serviced off the boot hart; exiting\n");
+    sys_exit(slot)
+}
+
+/// A U-mode task that reaches into ANOTHER task's stack (address in `a1`). With
+/// per-task address spaces that page is not mapped U here, so it must fault.
+#[link_section = ".user.text"]
+#[no_mangle]
+extern "C" fn ap_rogue_task(_slot: usize, victim: usize) -> ! {
+    unsafe {
+        asm!("sb {v}, 0({p})", v = in(reg) 0x41usize, p = in(reg) victim);
+    }
+    sys_print(b"  [ap-rogue] (BUG) a cross-task stack write was NOT blocked\n");
     sys_exit(0)
 }
 
-/// AP U-mode trap handler. Services the small syscall set the AP task uses; on
-/// exit or fault it longjmps back into the hart's loop via `AP_KCTX`.
+/// AP U-mode trap handler. Per-hart state comes from the frame pointer (which is
+/// the hart's `ApCtx`), never from `tp`.
 #[no_mangle]
 extern "C" fn ap_trap_handler(frame: *mut usize) -> *const usize {
     let scause: usize;
@@ -1406,10 +1541,13 @@ extern "C" fn ap_trap_handler(frame: *mut usize) -> *const usize {
     }
     let interrupt = scause >> (usize::BITS - 1) == 1;
     let code = scause & (!0 >> 1);
+    let ctx = frame as *mut ApCtx;
+    let kctx = unsafe { core::ptr::addr_of!((*ctx).kctx) } as *const usize;
+    let slot = unsafe { (*ctx).slot };
     let f = unsafe { &mut *(frame as *mut [usize; 32]) };
 
     if interrupt {
-        // The AP enabled no interrupts while running the task; ignore and resume.
+        // The AP enables no interrupts while running a task; ignore and resume.
         return frame;
     }
     if code == 8 {
@@ -1417,7 +1555,7 @@ extern "C" fn ap_trap_handler(frame: *mut usize) -> *const usize {
         f[F_SEPC] += 4;
         match f[F_A7] {
             SYS_PRINT => {
-                // Lock the UART: the boot hart may print concurrently.
+                // Lock the UART: other harts and the console may print too.
                 SMP_LOCK.lock();
                 let s = unsafe { core::slice::from_raw_parts(f[F_A0] as *const u8, f[F_A1]) };
                 for &b in s {
@@ -1427,8 +1565,10 @@ extern "C" fn ap_trap_handler(frame: *mut usize) -> *const usize {
                 f[F_A0] = 0;
             }
             SYS_EXIT => {
-                AP_TASK_EXIT.store(f[F_A0] as u64, Ordering::Relaxed);
-                unsafe { ap_return(core::ptr::addr_of!(AP_KCTX) as *const usize) }
+                if slot < AP_SLOTS {
+                    AP_SLOT_EXIT[slot].store(f[F_A0] as u64, Ordering::Relaxed);
+                }
+                unsafe { ap_return(kctx) }
             }
             _ => {
                 f[F_A0] = SYS_DENIED;
@@ -1436,30 +1576,62 @@ extern "C" fn ap_trap_handler(frame: *mut usize) -> *const usize {
         }
         return frame;
     }
-    // Any exception (e.g. a bad memory access) ends the task cleanly on this hart.
-    AP_TASK_FAULT.store(true, Ordering::Relaxed);
-    unsafe { ap_return(core::ptr::addr_of!(AP_KCTX) as *const usize) }
+    // Any exception (a cross-task access, a bad pointer) ends the task cleanly on
+    // this hart; the hart returns to the scheduler loop and takes the next task.
+    if slot < AP_SLOTS {
+        AP_SLOT_FAULT[slot].store(true, Ordering::Relaxed);
+    }
+    unsafe { ap_return(kctx) }
 }
 
-/// Run the posted AP task on this (secondary) hart: switch into the task's address
-/// space, drop to U-mode, and return here once it exits. Kernel-region VAs are
-/// identity-mapped, so this hart's own PC/SP stay valid across the satp switch.
-unsafe fn run_ap_task() {
-    let satp = kernel_satp();
+/// Run one task slot on this hart: enter the task's private address space, drop to
+/// U-mode, and come back when it exits or faults. Kernel-region VAs are
+/// identity-mapped in every space, so this hart's own PC/SP stay valid across the
+/// satp switch.
+unsafe fn ap_execute(hartid: usize, slot: usize) {
+    let ctx = &mut *core::ptr::addr_of_mut!(AP_CTX[hartid]);
+    ctx.frame = [0; 32];
+    ctx.frame[F_SEPC] = AP_SLOT_ENTRY[slot].load(Ordering::Relaxed);
+    ctx.frame[F_SP] = task_stack_top(slot);
+    ctx.frame[F_A0] = slot;
+    ctx.frame[F_A1] = AP_SLOT_ARG[slot].load(Ordering::Relaxed);
+    ctx.trap_top = ap_trap_top(hartid);
+    ctx.slot = slot;
+
+    AP_SLOT_RUNS[slot].fetch_add(1, Ordering::Relaxed);
+    AP_SLOT_HART[slot].store(hartid as u32, Ordering::Relaxed);
+
+    // Track real overlap: how many U-mode tasks are live at once.
+    let live = AP_LIVE.fetch_add(1, Ordering::AcqRel) + 1;
+    AP_LIVE_MAX.fetch_max(live, Ordering::AcqRel);
+
+    let satp = AP_SLOT_SATP[slot].load(Ordering::Relaxed);
     asm!("sfence.vma");
     asm!("csrw satp, {}", in(reg) satp);
     asm!("sfence.vma");
     asm!("csrw stvec, {}", in(reg) utrap_ap as usize);
     asm!("csrs sstatus, {}", in(reg) 1usize << 18); // SUM: S-mode may read the task's U pages
-    let fp = core::ptr::addr_of!(AP_FRAME) as *const usize;
-    let kp = core::ptr::addr_of!(AP_KCTX) as *const usize;
+
+    let fp = core::ptr::addr_of!(ctx.frame) as *const usize;
+    let kp = core::ptr::addr_of!(ctx.kctx) as *const usize;
     ap_run(fp, kp); // returns (via ap_return) when the task exits or faults
-    // Back to bare mode; leave the hart as it was for the compute/queue rounds.
+
+    // Back to bare mode so the hart's compute/queue rounds are unaffected.
     asm!("csrw stvec, {}", in(reg) 0usize);
     asm!("sfence.vma");
     asm!("csrw satp, {}", in(reg) 0usize);
     asm!("sfence.vma");
-    AP_TASK_DONE.store(true, Ordering::Release);
+
+    AP_LIVE.fetch_sub(1, Ordering::AcqRel);
+    AP_TASKS_DONE.fetch_add(1, Ordering::Release);
+}
+
+/// Pull tasks off the shared queue and run them until it is empty. Every secondary
+/// hart runs this concurrently — this is the symmetric dispatch loop.
+unsafe fn ap_schedule(hartid: usize) {
+    while let Some(slot) = ap_q_pop() {
+        ap_execute(hartid, slot as usize);
+    }
 }
 
 /// Secondary hart body. Never prints (only the boot hart owns the UART) and never
@@ -1478,8 +1650,8 @@ extern "C" fn hart_main(hartid: usize) -> ! {
         // TCG round-robin host keeps making progress and we wake promptly. While
         // waiting, also pick up a U-mode task the boot hart posted to this hart.
         while SMP_GEN.load(Ordering::Acquire) == served {
-            if AP_TASK_REQ[hartid].swap(false, Ordering::Acquire) {
-                unsafe { run_ap_task() };
+            if AP_SCHED_ON.load(Ordering::Acquire) {
+                unsafe { ap_schedule(hartid) };
             }
             core::hint::spin_loop();
         }
@@ -1780,63 +1952,205 @@ fn run_smp_demo() {
     kprintln!("[smp] next: make each job a U-mode task dispatch (needs per-hart trap state + address-space switch); see ROADMAP.");
 }
 
-/// Interactive `smp-task`: dispatch a real U-mode task onto a secondary hart and
-/// wait for it to finish, while the boot hart stays on the console.
-fn run_smp_task_demo() {
-    let boot = BOOT_HART.load(Ordering::Relaxed);
-    let started = SMP_STARTED.load(Ordering::Relaxed);
-    if started == 0 {
-        kprintln!("[smp-task] no secondary harts. Launch QEMU with -smp N.");
-        return;
+/// Prepare one task slot: build its private address space and reset its tallies.
+/// Called only from the boot hart, so the frame allocator is not contended.
+fn ap_prepare_slot(slot: usize, entry: usize, arg: usize) -> bool {
+    let satp = build_ap_slot_space(slot);
+    if satp == 0 {
+        return false;
     }
-    let mut target = usize::MAX;
-    for h in 0..MAX_HARTS {
-        if h != boot && HART_RAN[h].load(Ordering::Relaxed) {
-            target = h;
-            break;
-        }
-    }
-    if target == usize::MAX {
-        kprintln!("[smp-task] no online secondary hart found.");
-        return;
-    }
-    kprintln!(
-        "[smp-task] dispatching a U-mode task to secondary hart {target} (boot hart {boot} stays on the console)"
-    );
-    unsafe {
-        let f = &mut *core::ptr::addr_of_mut!(AP_FRAME);
-        *f = [0; 32];
-        f[F_SEPC] = ap_user_task as usize;
-        f[F_SP] = task_stack_top(0);
-    }
-    // Expose task slot 0's stack (U=1) for the task. Safe: the console is not
-    // launching tasks while this runs synchronously on the boot hart.
-    set_active_task_mem(0);
-    AP_TASK_DONE.store(false, Ordering::Release);
-    AP_TASK_FAULT.store(false, Ordering::Release);
-    AP_TASK_EXIT.store(0, Ordering::Relaxed);
-    AP_TASK_REQ[target].store(true, Ordering::Release);
+    AP_SLOT_ENTRY[slot].store(entry, Ordering::Relaxed);
+    AP_SLOT_ARG[slot].store(arg, Ordering::Relaxed);
+    AP_SLOT_SATP[slot].store(satp, Ordering::Relaxed);
+    AP_SLOT_RUNS[slot].store(0, Ordering::Relaxed);
+    AP_SLOT_HART[slot].store(u32::MAX, Ordering::Relaxed);
+    AP_SLOT_EXIT[slot].store(u64::MAX, Ordering::Relaxed);
+    AP_SLOT_FAULT[slot].store(false, Ordering::Relaxed);
+    true
+}
 
+/// Hand `n` prepared slots to the secondaries and wait for all of them to finish.
+/// Returns false on timeout.
+fn ap_run_batch(n: usize) -> bool {
+    AP_TASKS_DONE.store(0, Ordering::Release);
+    AP_LIVE.store(0, Ordering::Relaxed);
+    AP_LIVE_MAX.store(0, Ordering::Relaxed);
+    for s in 0..n {
+        ap_q_push(s as u32);
+    }
+    AP_SCHED_ON.store(true, Ordering::Release);
     let mut spins = 0u64;
-    while !AP_TASK_DONE.load(Ordering::Acquire) && spins < SMP_SPIN_LIMIT {
+    while AP_TASKS_DONE.load(Ordering::Acquire) < n as u64 && spins < SMP_SPIN_LIMIT {
         core::hint::spin_loop();
         spins += 1;
     }
-    set_active_task_mem(usize::MAX); // clear the stack grant again
+    AP_SCHED_ON.store(false, Ordering::Release);
+    AP_TASKS_DONE.load(Ordering::Acquire) >= n as u64
+}
 
-    if !AP_TASK_DONE.load(Ordering::Acquire) {
-        kprintln!("[smp-task] TIMEOUT: hart {target} did not report the task done.");
-        return;
+/// Release a slot's page-table frames.
+fn ap_free_slot(slot: usize) {
+    let r = AP_SLOT_ROOT[slot].swap(0, Ordering::Relaxed);
+    let l = AP_SLOT_L1[slot].swap(0, Ordering::Relaxed);
+    if r != 0 {
+        frame_free(r);
     }
-    if AP_TASK_FAULT.load(Ordering::Acquire) {
-        kprintln!("[smp-task] the task FAULTED on hart {target} (handled; hart recovered).");
+    if l != 0 {
+        frame_free(l);
+    }
+    AP_SLOT_SATP[slot].store(0, Ordering::Relaxed);
+}
+
+/// Interactive `smp-task`: dispatch one real U-mode task onto a secondary hart and
+/// wait for it to finish, while the boot hart stays on the console.
+fn run_smp_task_demo() {
+    let boot = BOOT_HART.load(Ordering::Relaxed);
+    if SMP_STARTED.load(Ordering::Relaxed) == 0 {
+        kprintln!("[smp-task] no secondary harts. Launch QEMU with -smp N.");
         return;
     }
     kprintln!(
-        "[smp-task] the task exited (code {}) on hart {target} -> U-MODE-ON-AP",
-        AP_TASK_EXIT.load(Ordering::Relaxed)
+        "[smp-task] dispatching a U-mode task to a secondary hart (boot hart {boot} stays on the console)"
     );
+    if !ap_prepare_slot(0, ap_worker_task as usize, 0) {
+        kprintln!("[smp-task] out of frames while building the task's address space.");
+        return;
+    }
+    let ok = ap_run_batch(1);
+    let hart = AP_SLOT_HART[0].load(Ordering::Relaxed);
+    let exit = AP_SLOT_EXIT[0].load(Ordering::Relaxed);
+    let faulted = AP_SLOT_FAULT[0].load(Ordering::Relaxed);
+    ap_free_slot(0);
+
+    if !ok {
+        kprintln!("[smp-task] TIMEOUT: no hart reported the task done.");
+        return;
+    }
+    if faulted {
+        kprintln!("[smp-task] the task FAULTED on hart {hart} (handled; the hart recovered).");
+        return;
+    }
+    kprintln!("[smp-task] the task exited (code {exit}) on hart {hart} -> U-MODE-ON-AP");
     kprintln!("[smp-task] proven: a U-mode task ran to completion on a hart other than the boot hart, its syscalls serviced there via a per-hart trap path.");
+}
+
+/// Interactive `smp-sched`: hand several U-mode tasks to ONE shared queue and let
+/// every secondary hart pull from it — symmetric scheduling, several tasks running
+/// in U-mode at the same instant on different harts.
+fn run_smp_sched_demo() {
+    let boot = BOOT_HART.load(Ordering::Relaxed);
+    if SMP_STARTED.load(Ordering::Relaxed) == 0 {
+        kprintln!("[smp-sched] no secondary harts. Launch QEMU with -smp N.");
+        return;
+    }
+    kprintln!(
+        "[smp-sched] queueing {AP_SLOTS} U-mode tasks; every secondary hart pulls from the SAME queue (boot hart {boot} stays on the console)"
+    );
+    let mut prepared = 0usize;
+    while prepared < AP_SLOTS {
+        if !ap_prepare_slot(prepared, ap_worker_task as usize, 0) {
+            break;
+        }
+        prepared += 1;
+    }
+    if prepared == 0 {
+        kprintln!("[smp-sched] out of frames while building address spaces.");
+        return;
+    }
+    let ok = ap_run_batch(prepared);
+    let live_max = AP_LIVE_MAX.load(Ordering::Relaxed);
+
+    let mut each_once = true;
+    let mut faults = 0usize;
+    let mut hart_mask = 0u64;
+    for s in 0..prepared {
+        if AP_SLOT_RUNS[s].load(Ordering::Relaxed) != 1 {
+            each_once = false;
+        }
+        if AP_SLOT_FAULT[s].load(Ordering::Relaxed) {
+            faults += 1;
+        }
+        let h = AP_SLOT_HART[s].load(Ordering::Relaxed);
+        if (h as usize) < MAX_HARTS {
+            hart_mask |= 1 << h;
+        }
+    }
+    let harts_used = hart_mask.count_ones() as u64;
+
+    kprint!("[smp-sched] task -> hart placement: ");
+    for s in 0..prepared {
+        if s > 0 {
+            kprint!(", ");
+        }
+        kprint!("t{}=hart{}", s, AP_SLOT_HART[s].load(Ordering::Relaxed));
+    }
+    kprintln!("");
+    for s in 0..prepared {
+        ap_free_slot(s);
+    }
+
+    if !ok {
+        kprintln!("[smp-sched] TIMEOUT: not every task reported done.");
+        return;
+    }
+    kprintln!(
+        "[smp-sched] {prepared} tasks ran on {harts_used} harts, each exactly once, {faults} faults; peak {live_max} U-mode tasks live at the same time"
+    );
+    kprintln!(
+        "[smp-sched] verdict -> {}",
+        if each_once && faults == 0 && harts_used >= 2 && live_max >= 2 {
+            "SCHED-OK - one queue, many harts, several U-mode tasks executing simultaneously"
+        } else {
+            "SCHED-INCOMPLETE"
+        }
+    );
+}
+
+/// Interactive `smp-isolate`: two tasks on two harts, and the second one reaches
+/// into the first's stack. Each task has its OWN address space, so the intruder
+/// must fault instead — parallelism did not cost isolation.
+fn run_smp_isolate_demo() {
+    if SMP_STARTED.load(Ordering::Relaxed) == 0 {
+        kprintln!("[smp-isolate] no secondary harts. Launch QEMU with -smp N.");
+        return;
+    }
+    let victim_stack = task_stack_top(0) - 64; // inside slot 0's stack region
+    kprintln!("[smp-isolate] task 0 is an ordinary worker; task 1 reaches into task 0's stack at {victim_stack:#x}");
+    if !ap_prepare_slot(0, ap_worker_task as usize, 0)
+        || !ap_prepare_slot(1, ap_rogue_task as usize, victim_stack)
+    {
+        kprintln!("[smp-isolate] out of frames while building address spaces.");
+        return;
+    }
+    let ok = ap_run_batch(2);
+    let good_fault = AP_SLOT_FAULT[0].load(Ordering::Relaxed);
+    let rogue_fault = AP_SLOT_FAULT[1].load(Ordering::Relaxed);
+    let h0 = AP_SLOT_HART[0].load(Ordering::Relaxed);
+    let h1 = AP_SLOT_HART[1].load(Ordering::Relaxed);
+    ap_free_slot(0);
+    ap_free_slot(1);
+
+    if !ok {
+        kprintln!("[smp-isolate] TIMEOUT: not every task reported done.");
+        return;
+    }
+    kprintln!("[smp-isolate] worker on hart {h0}: {}", if good_fault { "FAULTED (unexpected)" } else { "ran cleanly" });
+    kprintln!(
+        "[smp-isolate] intruder on hart {h1}: {}",
+        if rogue_fault {
+            "page-faulted on the cross-task write, killed on its own hart"
+        } else {
+            "was NOT blocked"
+        }
+    );
+    kprintln!(
+        "[smp-isolate] verdict -> {}",
+        if rogue_fault && !good_fault {
+            "ISOLATION-OK - concurrent tasks on different harts cannot reach each other's memory"
+        } else {
+            "ISOLATION-BROKEN"
+        }
+    );
 }
 
 const VIRTIO_MMIO_MAGIC: u32 = 0x7472_6976;
@@ -6653,6 +6967,20 @@ const COMMANDS: &[CommandSpec] = &[
         help: "SMP: dispatch a real U-mode task onto a secondary hart while the boot hart stays on the console",
     },
     CommandSpec {
+        name: "smp-sched",
+        cap: cap::INSPECT,
+        cap_name: "INSPECT",
+        group: "Inspect",
+        help: "SMP: symmetric scheduling - one task queue, every hart pulls from it, several U-mode tasks at once",
+    },
+    CommandSpec {
+        name: "smp-isolate",
+        cap: cap::INSPECT,
+        cap_name: "INSPECT",
+        group: "Inspect",
+        help: "SMP: concurrent tasks on different harts cannot reach each other's memory (per-task address spaces)",
+    },
+    CommandSpec {
         name: "ns-revoke",
         cap: cap::SPAWN,
         cap_name: "SPAWN",
@@ -7805,6 +8133,8 @@ fn dispatch(cmd: &str, arg: &str, plan: &KernelPlan, memory: &[MemoryRegion], he
         "cap-demo" => run_cap_demo(),
         "smp-demo" => run_smp_demo(),
         "smp-task" => run_smp_task_demo(),
+        "smp-sched" => run_smp_sched_demo(),
+        "smp-isolate" => run_smp_isolate_demo(),
         "ns-revoke" => ns_revoke(plan, arg),
         "ns-grant" => ns_grant(plan, arg),
         "nsrevoke-demo" => run_nsrevoke_demo(plan),
