@@ -72,6 +72,82 @@ class QemuSession:
                 self.proc.wait(timeout=2)
 
 
+GUEST_IP = (10, 0, 2, 15)
+GUEST_VAULT_IP = (10, 0, 2, 3)
+EGRESS_MARKER = b"DEZH-MARZ-EGRESS-v0"
+
+
+def parse_pcap(blob: bytes) -> list[dict]:
+    """Decode a classic pcap capture into per-packet facts.
+
+    Only what the assertions need: IPv4 addresses, protocol, the ICMP type, and
+    whether a UDP payload carries the egress marker. Anything unparseable is
+    reported as an empty dict rather than raising, so a malformed tail cannot mask
+    a real assertion failure.
+    """
+    if len(blob) < 24:
+        return []
+    magic = blob[:4]
+    if magic in (b"\xd4\xc3\xb2\xa1", b"\x4d\x3c\xb2\xa1"):
+        endian = "little"
+    elif magic in (b"\xa1\xb2\xc3\xd4", b"\xa1\xb2\x3c\x4d"):
+        endian = "big"
+    else:
+        return []
+
+    def u32(b: bytes) -> int:
+        return int.from_bytes(b, endian)
+
+    out: list[dict] = []
+    off = 24
+    while off + 16 <= len(blob):
+        incl = u32(blob[off + 8 : off + 12])
+        off += 16
+        if incl <= 0 or off + incl > len(blob):
+            break
+        frame = blob[off : off + incl]
+        off += incl
+        out.append(decode_frame(frame))
+    return out
+
+
+def decode_frame(frame: bytes) -> dict:
+    info: dict = {"len": len(frame)}
+    if len(frame) < 14:
+        return info
+    ethertype = int.from_bytes(frame[12:14], "big")
+    info["ethertype"] = ethertype
+    if ethertype != 0x0800 or len(frame) < 34:
+        return info
+    ip = frame[14:]
+    ihl = (ip[0] & 0x0F) * 4
+    if ip[0] >> 4 != 4 or len(ip) < ihl:
+        return info
+    info["src_ip"] = tuple(ip[12:16])
+    info["dst_ip"] = tuple(ip[16:20])
+    proto = ip[9]
+    info["proto"] = proto
+    body = ip[ihl:]
+    if proto == 1 and body:  # ICMP
+        info["icmp_type"] = body[0]
+    elif proto == 17 and len(body) >= 8:  # UDP
+        info["udp_payload"] = body[8:]
+    return info
+
+
+def is_guest_udp_marker(p: dict) -> bool:
+    """A UDP datagram the GUEST sent carrying the egress marker.
+
+    Requiring the guest as source is what separates a real send from the host's
+    ICMP error quoting our datagram back at us.
+    """
+    return (
+        p.get("proto") == 17
+        and p.get("src_ip") == GUEST_IP
+        and EGRESS_MARKER in p.get("udp_payload", b"")
+    )
+
+
 def run_riscv64(qemu: str, kernel: Path) -> None:
     disk = tempfile.NamedTemporaryFile(prefix="dezh-disk-", suffix=".img", delete=False)
     disk_path = Path(disk.name)
@@ -591,6 +667,19 @@ def run_riscv64(qemu: str, kernel: Path) -> None:
             # Persisted namespace revocation: revoke ns=calc at the object owner
             # (the daemon writes it to the superblock). The reboot phase proves it
             # survives a power cycle.
+            # The network is bidirectional now: the daemon arms the NIC's receive
+            # queue, resolves the destination with ARP, sends a real ICMP echo and
+            # PARSES the reply that comes back off the wire. Receiving is what a
+            # transmit-only stack cannot fake.
+            (
+                "marz-ping ops",
+                [
+                    "receive queue armed (buffers offered to the NIC)",
+                    "ARP reply received: the destination is reachable",
+                    "PING-OK: ICMP echo reply received and matched (id+seq)",
+                    "NET-RX-OK",
+                ],
+            ),
             # SMP again, on demand: re-run a parallel round from the console and
             # confirm the shared counter is coherent and >1 hart participated.
             (
@@ -666,23 +755,36 @@ def run_riscv64(qemu: str, kernel: Path) -> None:
         print(transcript)
         session.stop()
 
-    # Marz: the frame must exist in the capture, not merely in the transcript.
+    # Marz: the traffic must exist on the wire, not merely in the transcript. The
+    # capture is parsed as real packets rather than searched as a byte blob,
+    # because the host also replies with ICMP errors that QUOTE our datagram - a
+    # substring count would score those quotes as extra egress.
     blob = pcap_path.read_bytes()
-    # Authorized sends: marz-demo lands two (ops, vault-sync), marz-effect-demo
-    # one (ops under an intent) and dev-demo one (after the device is re-granted).
-    # Every refused send must leave nothing, so the count is exact.
-    sent = blob.count(b"DEZH-MARZ-EGRESS-v0")
-    if sent != 4:
+    packets = parse_pcap(blob)
+    egress = [p for p in packets if is_guest_udp_marker(p)]
+    if len(egress) != 4:
         raise AssertionError(
-            f"expected exactly 4 egress frames on the wire (the AUTHORIZED sends), "
-            f"found {sent} in a {len(blob)}-byte capture. More means a refused send "
-            "leaked; fewer means an authorized send never left."
+            f"expected exactly 4 egress frames from the guest (the AUTHORIZED sends), "
+            f"found {len(egress)} in a {len(packets)}-packet capture. More means a "
+            "refused send leaked; fewer means an authorized send never left."
         )
     # The write-up send must have reached the destination cleared for secrets.
-    if bytes([10, 0, 2, 3]) not in blob:
+    if not any(p.get("dst_ip") == GUEST_VAULT_IP for p in egress):
         raise AssertionError("no frame addressed to vault-sync (10.0.2.3) in the capture")
-    print(f"[marz] capture confirms the gate: {sent} authorized frames on the wire, "
-          f"refused sends left nothing ({len(blob)} bytes captured)")
+    # The receive path: our echo request went out AND the host's reply came back.
+    echo_req = [p for p in packets if p.get("icmp_type") == 8 and p.get("src_ip") == GUEST_IP]
+    echo_rep = [p for p in packets if p.get("icmp_type") == 0 and p.get("dst_ip") == GUEST_IP]
+    if not echo_req or not echo_rep:
+        raise AssertionError(
+            f"marz-ping did not produce a real exchange on the wire: "
+            f"{len(echo_req)} echo requests out, {len(echo_rep)} replies back"
+        )
+    print(
+        f"[marz] capture confirms the gate: {len(egress)} authorized frames on the wire, "
+        f"refused sends left nothing; and the ping is real "
+        f"({len(echo_req)} ICMP echo out, {len(echo_rep)} back) "
+        f"across {len(packets)} captured packets"
+    )
 
     # Second boot on the SAME disk: Cairn v1 state must survive a reboot
     # (F2 acceptance: rollback-restored value + hash verify after power cycle).

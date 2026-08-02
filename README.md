@@ -202,9 +202,15 @@ symmetrically** across them — one queue, every hart pulling from it, several t
 running in U-mode at the same instant (`smp-sched`). Parallelism does not cost
 isolation: each task gets its own address space, so a task that reaches into a
 concurrent neighbour's stack page-faults and dies on its own hart (`smp-isolate`).
+The network edge is **bidirectional**: the egress daemon arms the NIC's receive
+queue, resolves its destination by ARP and completes a real ICMP echo exchange,
+matching the reply off the wire (`marz-ping`) — and CI decodes the packet capture
+to check it, rather than trusting a printed claim.
+
 Honest scope: tasks on secondary harts run to completion (**no preemption or
-migration there yet**) and the console's own scheduler is still single-hart — see
-[STATUS](docs/STATUS.md) and the [roadmap](docs/ROADMAP.md).
+migration there yet**), the console's own scheduler is still single-hart, and the
+network is a probe rather than a stack (**no TCP, DNS, DHCP, listening or
+routing**) — see [STATUS](docs/STATUS.md) and the [roadmap](docs/ROADMAP.md).
 
 <p align="center">
   <img src="docs/assets/overnight.svg" alt="The overnight flagship run: an agent's night forecast, rolled back honestly, and its escape contained" width="720">

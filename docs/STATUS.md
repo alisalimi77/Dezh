@@ -23,6 +23,7 @@ true today, so a reviewer never has to guess.
 | U-mode task on a secondary hart | A real U-mode task is dispatched onto a secondary hart, drops to U-mode via a per-hart trap path, has its syscalls serviced **on that hart**, and runs to completion while the boot hart stays on the console (`smp-task`, `U-MODE-ON-AP`). |
 | Symmetric scheduling | One task queue, every hart pulling from it: tasks land wherever a hart is free and several run in U-mode **at the same instant** (`smp-sched` — 4 tasks across 3 harts, each exactly once, peak 3 live → `SCHED-OK`). Per-hart trap state is reached via `sscratch`, so harts can trap simultaneously. |
 | Isolation under parallelism | Each task gets its **own address space** (only its stack region is U-mapped), so concurrent tasks on different harts cannot reach each other's memory: an intruder page-faults and dies on its own hart while its neighbour runs on (`smp-isolate`, `ISOLATION-OK`). |
+| Bidirectional networking | The Marz daemon **receives**, not just transmits: it offers the NIC receive buffers, blocks on the device interrupt, resolves the destination by **ARP**, and completes a real **ICMP echo** exchange, matching the reply by id and sequence (`marz-ping`, `NET-RX-OK`). CI decodes the packet capture structurally and asserts the echo left and the reply came back. |
 
 ## What is measured, and how honestly
 
@@ -94,9 +95,17 @@ true today, so a reviewer never has to guess.
   and **enforced on the live Cairn path** (`taintflow-demo`): reading `ns=vault`
   (labelled secret) taints the operator, then a commit to a lower namespace is
   refused (no write-down) until a privileged `declassify`. What is not done is
-  enforcing the same taint across the U-mode client→daemon hop, IPC, and
-  networking (which does not exist yet). Confidentiality is real where data lives
-  (Cairn), not yet across every channel. See [Threat model](SECURITY_MODEL.md#threat-model) §5.
+  enforcing the same taint across the U-mode client→daemon hop and IPC.
+  Confidentiality is real where data lives (Cairn) and on **outbound** network
+  export (a secret-tainted operator cannot send to a destination not cleared for
+  it), but **inbound** packets are not labelled: `marz-ping` matches a reply and
+  drops it, so nothing yet flows in for DIFC to track. See
+  [Threat model](SECURITY_MODEL.md#threat-model) §5.
+- **Networking is a probe, not a stack.** Marz does Ethernet, ARP, IPv4, UDP
+  egress and ICMP echo — enough to prove the edge is real and reachable in both
+  directions. There is **no TCP, no DNS, no DHCP (the address is static), no
+  inbound listening and no routing**, and received packets are not ledgered
+  effects. See [Marz](SUBSYSTEMS.md#marz-guarded-egress).
 - **W8 effect-runtime honesty.** External effects (`email.send`, `prod.deploy`,
   a compensatable `api-key`) are **modeled**, not wired to real connectors — the
   point proven is the *mechanism* (attribution, honest rollback, compensation),

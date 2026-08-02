@@ -292,6 +292,17 @@ Both are now addressed on RISC-V, in order:
     touch each other's memory. `smp-isolate` proves it: a task that reaches into a
     neighbour's stack page-faults and is killed on its own hart while the neighbour
     runs on undisturbed (`ISOLATION-OK`).
+- **A receive path on the network. — DONE.** A transmit-only stack cannot be
+  checked against reality — nothing answers it. The Marz daemon now arms the NIC's
+  receive queue, blocks on the device interrupt, resolves its destination with
+  **ARP**, and completes a real **ICMP echo** exchange, matching the reply by id and
+  sequence (`marz-ping <dest>` → `NET-RX-OK`). Ingress is gated by the same
+  authority as egress: a revoked device or destination refuses the probe. CI now
+  **decodes** the packet capture instead of scanning it — necessary because the
+  host answers with ICMP errors that quote our datagram, which a substring count
+  would misread as extra egress. Landing this also fixed a real bug: the internet
+  checksum dropped the final byte of an odd-length body, so our echo request was
+  silently discarded by the host and no reply ever came.
 - **Remaining SMP work. — NOT started.** Tasks run to completion on the hart that
   picked them: there is no preemption or migration on a secondary hart (no timer
   armed there yet), and the *console's* own scheduler — task table, IPC mailboxes,

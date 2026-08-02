@@ -139,15 +139,29 @@ one — and the DIFC gate is what stands in the way.
   `tbar` attributes what left the machine and `sfar-plan` forecasts it honestly.
   `sfar-rollback` **refuses** it - the wire cannot be undone and Dezh does not
   pretend otherwise. `marz-effect-demo` shows the whole loop.
+- **M4 — the receive path. DONE.** Transmitting proves little on its own: a stack
+  that cannot *receive* cannot be checked against reality. The daemon now offers
+  the NIC receive buffers, blocks on the device interrupt, and parses what comes
+  back: it resolves the destination with **ARP** and completes a real **ICMP echo**
+  exchange, matching the reply by id and sequence (`marz-ping <dest>`, reported as
+  `NET-RX-OK`). Ingress carries the same authority as egress — a revoked device or
+  destination refuses the probe — because reaching the wire is reaching the wire.
 - **Verification.** QEMU's packet capture (`-object filter-dump`) lets CI assert
   the permitted frame actually left **and that the refused one did not** — a real
-  test, not a printed claim.
+  test, not a printed claim. CI **decodes** the capture as packets rather than
+  scanning it for bytes, which matters once the host starts answering: its ICMP
+  errors quote our datagram back, and a substring count would score those quotes as
+  extra egress. The assertions are now structural — exactly four guest-sourced UDP
+  datagrams carry the marker, and the echo request and its reply both appear.
 
 #### Honest non-goals (v0)
 
-No TCP, no DNS, no inbound listening, no routing; a minimal frame/UDP-class
-egress only. No cryptographic transport. This is the authority + accountability
-mechanism at the network edge, not a network stack.
+No TCP, no DNS, no inbound listening (nothing accepts a connection), no routing,
+no DHCP — the address is static. ARP and ICMP echo exist because they are what a
+reachability probe needs; ingress is **not** yet a ledgered effect or DIFC-labelled
+(a received packet is matched and dropped). No cryptographic transport. This is the
+authority + accountability mechanism at the network edge, plus enough of a stack to
+prove the edge is real — not a general network stack.
 
 <!-- sources -->
 [sel4]: https://sel4.systems/About/seL4-whitepaper.pdf

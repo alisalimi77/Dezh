@@ -66,10 +66,29 @@ const USED_OFF: usize = 4096;
 // still inside the window — writing past it would fault the daemon.
 const HDR_OFF: usize = 0x3100;
 const FRAME_OFF: usize = 0x3200;
+/// Receive buffers. Two of 1536 bytes each — enough for a full Ethernet frame plus
+/// the virtio header — placed last so they end exactly on the 16 KiB grant
+/// boundary. The device WRITES here, which is why these descriptors carry
+/// `VIRTQ_DESC_F_WRITE`.
+const RX_BUF0_OFF: usize = 0x3400;
+const RX_BUF_SZ: usize = 0x600;
+const RX_NBUF: usize = 2;
 
 /// Legacy `virtio_net_hdr` (no MRG_RXBUF negotiated) is 10 bytes, all zero for a
 /// plain frame with no offload.
 const NET_HDR_LEN: usize = 10;
+
+const VIRTQ_DESC_F_WRITE: u16 = 2;
+const ETHERTYPE_IPV4: u16 = 0x0800;
+const ETHERTYPE_ARP: u16 = 0x0806;
+const IP_PROTO_ICMP: u8 = 1;
+const OP_SEND: usize = 0;
+const OP_PING: usize = 1;
+/// Our address and the QEMU user-net gateway, which answers ARP and ICMP.
+const SRC_IP: [u8; 4] = [10, 0, 2, 15];
+const SRC_MAC: [u8; 6] = [0x52, 0x54, 0x00, 0x12, 0x34, 0x56];
+const PING_ID: u16 = 0xDE20;
+const PING_SEQ: u16 = 1;
 
 #[panic_handler]
 fn panic(_: &core::panic::PanicInfo) -> ! {
@@ -213,6 +232,10 @@ fn nic_init(dma_pa: usize) -> bool {
     true
 }
 
+/// The standard internet checksum. An IPv4 header is always even-length, but ICMP
+/// covers header + payload and can be odd — in which case the final byte is padded
+/// with a zero, not dropped. (Dropping it produced a checksum the host rejected
+/// silently: the echo went out and no reply ever came back.)
 fn ip_checksum(off: usize, len: usize) -> u16 {
     let mut sum: u32 = 0;
     let mut i = 0usize;
@@ -221,6 +244,10 @@ fn ip_checksum(off: usize, len: usize) -> u16 {
         let lo = unsafe { core::ptr::read_volatile((DMA_VA + off + i + 1) as *const u8) } as u32;
         sum += (hi << 8) | lo;
         i += 2;
+    }
+    if i < len {
+        let hi = unsafe { core::ptr::read_volatile((DMA_VA + off + i) as *const u8) } as u32;
+        sum += hi << 8; // odd tail byte, zero-padded on the right
     }
     while sum >> 16 != 0 {
         sum = (sum & 0xffff) + (sum >> 16);
@@ -295,6 +322,227 @@ fn build_frame(payload: &[u8], dst_ip: [u8; 4], dst_port: u16) -> usize {
     14 + ip_len
 }
 
+fn rd8(off: usize) -> u8 {
+    unsafe { core::ptr::read_volatile((DMA_VA + off) as *const u8) }
+}
+
+fn rd32(off: usize) -> u32 {
+    unsafe { core::ptr::read_volatile((DMA_VA + off) as *const u32) }
+}
+
+/// Place a device-writable descriptor in the RX ring.
+fn put_rx_desc(i: usize, addr: u64, len: u32) {
+    let e = RX_RING_OFF + DESC_OFF + i * 16;
+    wr64(e, addr);
+    wr32(e + 8, len);
+    wr16(e + 12, VIRTQ_DESC_F_WRITE);
+    wr16(e + 14, 0);
+}
+
+/// Offer one RX buffer to the device.
+fn rx_offer(dma_pa: usize, id: usize) {
+    put_rx_desc(
+        id,
+        (dma_pa + RX_BUF0_OFF + id * RX_BUF_SZ) as u64,
+        RX_BUF_SZ as u32,
+    );
+    let avail = RX_RING_OFF + AVAIL_OFF;
+    let idx = rd16(avail + 2);
+    wr16(avail + 4 + (idx as usize % VQ_SIZE) * 2, id as u16);
+    core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
+    wr16(avail + 2, idx.wrapping_add(1));
+    core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
+    w32(VR_QUEUE_NOTIFY, Q_RX);
+}
+
+/// Offer every RX buffer. Until this runs the NIC has nowhere to put an incoming
+/// frame and silently drops it — this is what makes the daemon able to receive.
+fn rx_arm(dma_pa: usize) {
+    let mut i = 0usize;
+    while i < RX_NBUF {
+        rx_offer(dma_pa, i);
+        i += 1;
+    }
+}
+
+/// Block until the device delivers a frame. Returns (buffer id, payload offset,
+/// payload length) with the virtio header already skipped, or None on timeout.
+fn rx_wait(last: &mut u16) -> Option<(usize, usize, usize)> {
+    let used = RX_RING_OFF + USED_OFF;
+    let mut seen = sys_irq_wait(usize::MAX);
+    let mut waits = 0u32;
+    while rd16(used + 2) == *last {
+        seen = sys_irq_wait(seen);
+        waits += 1;
+        if waits > 20_000 {
+            return None;
+        }
+    }
+    // Used ring: flags(2) idx(2) then elements of (id: u32, len: u32).
+    let slot = (*last as usize) % VQ_SIZE;
+    let id = rd32(used + 4 + slot * 8) as usize;
+    let len = rd32(used + 4 + slot * 8 + 4) as usize;
+    *last = last.wrapping_add(1);
+    if id >= RX_NBUF || len <= NET_HDR_LEN {
+        return None;
+    }
+    Some((
+        id,
+        RX_BUF0_OFF + id * RX_BUF_SZ + NET_HDR_LEN,
+        len - NET_HDR_LEN,
+    ))
+}
+
+/// Write an Ethernet header at `o`; returns the offset just past it.
+fn put_eth(o: usize, dst: [u8; 6], ethertype: u16) -> usize {
+    let mut i = 0usize;
+    while i < 6 {
+        wr8(o + i, dst[i]);
+        wr8(o + 6 + i, SRC_MAC[i]);
+        i += 1;
+    }
+    wr8(o + 12, (ethertype >> 8) as u8);
+    wr8(o + 13, ethertype as u8);
+    o + 14
+}
+
+/// Build an ARP request asking who owns `target_ip`. Returns the frame length.
+fn build_arp_request(target_ip: [u8; 4]) -> usize {
+    let o = put_eth(FRAME_OFF, [0xff; 6], ETHERTYPE_ARP);
+    wr8(o, 0);
+    wr8(o + 1, 1); // hardware type: Ethernet
+    wr8(o + 2, 0x08);
+    wr8(o + 3, 0x00); // protocol type: IPv4
+    wr8(o + 4, 6); // hardware address length
+    wr8(o + 5, 4); // protocol address length
+    wr8(o + 6, 0);
+    wr8(o + 7, 1); // opcode: request
+    let mut i = 0usize;
+    while i < 6 {
+        wr8(o + 8 + i, SRC_MAC[i]); // sender hardware address
+        wr8(o + 18 + i, 0); // target hardware address: unknown
+        i += 1;
+    }
+    i = 0;
+    while i < 4 {
+        wr8(o + 14 + i, SRC_IP[i]);
+        wr8(o + 24 + i, target_ip[i]);
+        i += 1;
+    }
+    14 + 28
+}
+
+/// If the received frame is an ARP reply from `from_ip`, return its MAC.
+fn parse_arp_reply(off: usize, len: usize, from_ip: [u8; 4]) -> Option<[u8; 6]> {
+    if len < 42 {
+        return None;
+    }
+    let ethertype = ((rd8(off + 12) as u16) << 8) | rd8(off + 13) as u16;
+    if ethertype != ETHERTYPE_ARP {
+        return None;
+    }
+    let a = off + 14;
+    let opcode = ((rd8(a + 6) as u16) << 8) | rd8(a + 7) as u16;
+    if opcode != 2 {
+        return None; // not a reply
+    }
+    let mut i = 0usize;
+    while i < 4 {
+        if rd8(a + 14 + i) != from_ip[i] {
+            return None; // some other host answered
+        }
+        i += 1;
+    }
+    let mut mac = [0u8; 6];
+    i = 0;
+    while i < 6 {
+        mac[i] = rd8(a + 8 + i);
+        i += 1;
+    }
+    Some(mac)
+}
+
+/// Build an ICMP echo request to `dst_ip` via `dst_mac`. Returns the frame length.
+fn build_icmp_echo(dst_mac: [u8; 6], dst_ip: [u8; 4]) -> usize {
+    let payload = b"DEZH-PING";
+    let icmp_len = 8 + payload.len();
+    let ip_len = 20 + icmp_len;
+    let o = put_eth(FRAME_OFF, dst_mac, ETHERTYPE_IPV4);
+
+    wr8(o, 0x45);
+    wr8(o + 1, 0x00);
+    wr8(o + 2, (ip_len >> 8) as u8);
+    wr8(o + 3, ip_len as u8);
+    wr8(o + 4, 0x4d);
+    wr8(o + 5, 0x5b); // id
+    wr8(o + 6, 0x00);
+    wr8(o + 7, 0x00);
+    wr8(o + 8, 64); // TTL
+    wr8(o + 9, IP_PROTO_ICMP);
+    wr8(o + 10, 0);
+    wr8(o + 11, 0);
+    let mut i = 0usize;
+    while i < 4 {
+        wr8(o + 12 + i, SRC_IP[i]);
+        wr8(o + 16 + i, dst_ip[i]);
+        i += 1;
+    }
+    let csum = ip_checksum(o, 20);
+    wr8(o + 10, (csum >> 8) as u8);
+    wr8(o + 11, csum as u8);
+
+    let c = o + 20;
+    wr8(c, 8); // echo request
+    wr8(c + 1, 0);
+    wr8(c + 2, 0);
+    wr8(c + 3, 0); // checksum placeholder
+    wr8(c + 4, (PING_ID >> 8) as u8);
+    wr8(c + 5, PING_ID as u8);
+    wr8(c + 6, (PING_SEQ >> 8) as u8);
+    wr8(c + 7, PING_SEQ as u8);
+    i = 0;
+    while i < payload.len() {
+        wr8(c + 8 + i, payload[i]);
+        i += 1;
+    }
+    // ICMP's checksum covers the whole message, not just a header.
+    let icsum = ip_checksum(c, icmp_len);
+    wr8(c + 2, (icsum >> 8) as u8);
+    wr8(c + 3, icsum as u8);
+
+    14 + ip_len
+}
+
+/// True if the frame is the ICMP echo REPLY to the request we just sent.
+fn is_our_echo_reply(off: usize, len: usize, from_ip: [u8; 4]) -> bool {
+    if len < 42 {
+        return false;
+    }
+    let ethertype = ((rd8(off + 12) as u16) << 8) | rd8(off + 13) as u16;
+    if ethertype != ETHERTYPE_IPV4 {
+        return false;
+    }
+    let ip = off + 14;
+    let ihl = (rd8(ip) & 0x0f) as usize * 4;
+    if rd8(ip) >> 4 != 4 || rd8(ip + 9) != IP_PROTO_ICMP {
+        return false;
+    }
+    let mut i = 0usize;
+    while i < 4 {
+        if rd8(ip + 12 + i) != from_ip[i] {
+            return false; // not from the host we pinged
+        }
+        i += 1;
+    }
+    let c = ip + ihl;
+    if rd8(c) != 0 {
+        return false; // type 0 = echo reply
+    }
+    let id = ((rd8(c + 4) as u16) << 8) | rd8(c + 5) as u16;
+    let seq = ((rd8(c + 6) as u16) << 8) | rd8(c + 7) as u16;
+    id == PING_ID && seq == PING_SEQ
+}
+
 /// Transmit one frame and wait for the device to consume it.
 fn transmit(dma_pa: usize, frame_len: usize) -> bool {
     // A zeroed legacy virtio_net_hdr: no offload, no GSO.
@@ -330,8 +578,71 @@ fn transmit(dma_pa: usize, frame_len: usize) -> bool {
     true
 }
 
+/// `marz-ping`: resolve the destination with ARP, then exchange a real ICMP echo.
+/// Unlike a send, this needs the RECEIVE path — the daemon must offer the NIC
+/// buffers, block on the device's interrupt, and parse what actually came back.
+fn do_ping(dma_pa: usize, dst_ip: [u8; 4]) -> ! {
+    rx_arm(dma_pa);
+    sys_print(b"  [marz] receive queue armed (buffers offered to the NIC)\n");
+    let mut last_used = 0u16;
+
+    // 1. Who owns the destination address?
+    let arp_len = build_arp_request(dst_ip);
+    if !transmit(dma_pa, arp_len) {
+        sys_print(b"  [marz] ARP request transmit timed out\n");
+        sys_exit(1);
+    }
+    sys_print(b"  [marz] ARP request sent; waiting for a reply from the wire\n");
+    let mut gw_mac = [0u8; 6];
+    let mut tries = 0;
+    loop {
+        let Some((id, off, len)) = rx_wait(&mut last_used) else {
+            sys_print(b"  [marz] no ARP reply arrived\n");
+            sys_exit(1);
+        };
+        let hit = parse_arp_reply(off, len, dst_ip);
+        rx_offer(dma_pa, id); // hand the buffer back to the device
+        if let Some(mac) = hit {
+            gw_mac = mac;
+            break;
+        }
+        tries += 1;
+        if tries > 8 {
+            sys_print(b"  [marz] no ARP reply arrived\n");
+            sys_exit(1);
+        }
+    }
+    sys_print(b"  [marz] ARP reply received: the destination is reachable\n");
+
+    // 2. A real ICMP echo, and a real reply.
+    let icmp_len = build_icmp_echo(gw_mac, dst_ip);
+    if !transmit(dma_pa, icmp_len) {
+        sys_print(b"  [marz] ICMP echo transmit timed out\n");
+        sys_exit(1);
+    }
+    sys_print(b"  [marz] ICMP echo request sent; waiting for the reply\n");
+    tries = 0;
+    loop {
+        let Some((id, off, len)) = rx_wait(&mut last_used) else {
+            sys_print(b"  [marz] no ICMP echo reply arrived\n");
+            sys_exit(1);
+        };
+        let hit = is_our_echo_reply(off, len, dst_ip);
+        rx_offer(dma_pa, id);
+        if hit {
+            sys_print(b"  [marz] PING-OK: ICMP echo reply received and matched (id+seq)\n");
+            sys_exit(0);
+        }
+        tries += 1;
+        if tries > 8 {
+            sys_print(b"  [marz] no ICMP echo reply arrived\n");
+            sys_exit(1);
+        }
+    }
+}
+
 #[no_mangle]
-extern "C" fn main(_op: usize, dma_pa: usize, dest: usize, _a3: usize) -> ! {
+extern "C" fn main(op: usize, dma_pa: usize, dest: usize, _a3: usize) -> ! {
     sys_print(b"  [marz] egress daemon started; holds ONLY the granted NIC page + DMA\n");
     if !nic_init(dma_pa) {
         sys_print(b"  [marz] no virtio-net on the granted page (device init failed)\n");
@@ -348,6 +659,10 @@ extern "C" fn main(_op: usize, dma_pa: usize, dest: usize, _a3: usize) -> ! {
         dest as u8,
     ];
     let dst_port = (dest >> 32) as u16;
+    if op == OP_PING {
+        do_ping(dma_pa, dst_ip);
+    }
+    let _ = OP_SEND;
     let payload = b"DEZH-MARZ-EGRESS-v0";
     let frame_len = build_frame(payload, dst_ip, dst_port);
     sys_print(b"  [marz] frame built: Ethernet+IPv4+UDP len=");

@@ -2340,6 +2340,55 @@ fn marz_send_to(plan: &KernelPlan, arg: &str, ahd: u16) {
     );
 }
 
+/// `marz-ping <dest>`: the same authority as a send (the wire is the wire), but it
+/// exercises the RECEIVE path — ARP resolution and a real ICMP echo whose reply the
+/// daemon has to parse. Ingress is not yet a ledgered effect or DIFC-labelled; the
+/// packet is dropped after matching, which is why this reads and reports only.
+fn run_marz_ping(arg: &str) {
+    let name = arg.trim();
+    let name = if name.is_empty() { "ops" } else { name };
+    let Some(d) = marz_dest_id(name) else {
+        kprintln!("[marz] unknown destination '{name}' (known: ops vault-sync)");
+        return;
+    };
+    if find_virtio_mmio(VIRTIO_DEVICE_ID_NET).is_none() {
+        kprintln!("[marz] no virtio-net device (see net-probe)");
+        return;
+    }
+    if !dev_authority_live(DEV_OBJ_NET) {
+        record_event("kernel", "marz.ping", "device", "DENIED");
+        return;
+    }
+    if !marz_gate(d) {
+        record_event("kernel", "marz.ping", MARZ_DESTS[d].name, "DENIED");
+        return;
+    }
+    let dest = &MARZ_DESTS[d];
+    kprintln!(
+        "[marz] authorized probe of '{}' ({}.{}.{}.{}); the daemon must RECEIVE to succeed",
+        dest.name, dest.ip[0], dest.ip[1], dest.ip[2], dest.ip[3]
+    );
+    run_foreground_processes(&[ProcessSpec::new(
+        MARZ_ELF,
+        TASK_PRINT | TASK_DEVICE_VIRTIO_NET,
+        1, // op = ping
+    )
+    .args(marz_dma_pa(), marz_dest_packed(dest), 0)
+    .virtio_net()]);
+    let st = unsafe { TEXIT[FIRST_FOREGROUND_TASK] };
+    record_event(
+        "kernel",
+        "marz.ping",
+        dest.name,
+        if st == 0 { "OK" } else { "fail" },
+    );
+    if st == 0 {
+        kprintln!("[marz] NET-RX-OK: the host answered and Dezh parsed the reply (ARP + ICMP echo)");
+    } else {
+        kprintln!("[marz] probe failed (status={st})");
+    }
+}
+
 fn marz_dest_authority(arg: &str, grant: bool) {
     let Some(d) = marz_dest_id(arg.trim()) else {
         kprintln!("[marz] unknown destination (known: ops vault-sync)");
@@ -7016,6 +7065,13 @@ const COMMANDS: &[CommandSpec] = &[
         help: "Marz: transmit one real frame to an authorized destination. marz-send <dest>",
     },
     CommandSpec {
+        name: "marz-ping",
+        cap: cap::SPAWN,
+        cap_name: "SPAWN",
+        group: "Effects",
+        help: "Marz: probe an authorized destination and RECEIVE the answer (ARP + ICMP echo). marz-ping <dest>",
+    },
+    CommandSpec {
         name: "dev-revoke",
         cap: cap::SPAWN,
         cap_name: "SPAWN",
@@ -8142,6 +8198,7 @@ fn dispatch(cmd: &str, arg: &str, plan: &KernelPlan, memory: &[MemoryRegion], he
         "irq-stat" => irq_stat(),
         "net-probe" => net_probe(),
         "marz-send" => run_marz_send(plan, arg),
+        "marz-ping" => run_marz_ping(arg),
         "dev-revoke" => dev_authority_set(arg, false),
         "dev-grant" => dev_authority_set(arg, true),
         "dev-demo" => run_dev_demo(plan),
