@@ -47,6 +47,10 @@ architectural and security-model review.
 | Isolation | Sv39 U-mode process isolation with contained page faults |
 | Authority | Capability-gated syscalls, IPC, storage namespaces, and device grants |
 | Driver model | `virtio-block` runs as a U-mode service with explicit MMIO/DMA grants |
+| Device I/O | Interrupt-driven: PLIC-routed virtio IRQs, drivers sleep on the device, scheduler idles with `wfi` |
+| SMP | SBI HSM bring-up, ticket spinlock, one shared run queue — U-mode tasks scheduled symmetrically, each in its own address space |
+| Network | Bidirectional edge: per-destination egress capability, plus ARP resolution and a real ICMP echo exchange |
+| Information flow | Both axes: secrecy blocks write-down/exfiltration, integrity blocks unvalidated ingress becoming trusted state |
 | IPC | Typed request/reply path with status codes, timeouts, and counters |
 | Persistence | Cairn v1 commit log with rollbackable refs and per-app namespaces |
 | Apps | `.dzp` packages with manifest-scoped caps and transactional lifecycle |
@@ -155,6 +159,18 @@ flowchart LR
   capability-gated; the same bytes also run on real riscv64 Linux.
 - Sv39 U-mode process isolation and contained page faults.
 - Capability-gated syscalls for print, time, IPC, device, and block access.
+- **Interrupt-driven I/O**: a PLIC routes virtio interrupts to the boot hart,
+  drivers block on `sys_irq_wait` instead of spinning, and the scheduler idles
+  (`wfi`) for a device when nothing else is runnable.
+- **SMP**: secondary harts brought up over SBI HSM, a fair ticket spinlock, and a
+  shared run queue from which every hart pulls — U-mode tasks are scheduled
+  symmetrically, several running at the same instant, each in its **own address
+  space** so parallelism costs no isolation.
+- **A network edge that works in both directions**: guarded per-destination
+  egress, plus a receive path doing ARP resolution and a real ICMP echo exchange.
+- **Information flow on both axes**: secrecy stops a secret being written down or
+  exported; integrity stops unvalidated network input becoming trusted state, with
+  `declassify` and `endorse` as the separate, privileged, recorded escapes.
 - User-space `virtio-block` daemon with explicit MMIO and DMA grants.
 - Typed IPC v0 with status codes, request ids, timeouts, and counters.
 - Boot-managed service registry with stop, restart, and controlled fault demo.
@@ -235,7 +251,7 @@ enumeration** over the capability space in
 
 ```mermaid
 flowchart LR
-    Console["Capability-scoped console"] --> Client["Foreground client task"]
+    Console["Capability-scoped console<br/>(boot hart)"] --> Client["Foreground client task"]
     Client -->|typed IPC| VBlk["U-mode virtio-block daemon"]
     VBlk -->|explicit MMIO + DMA grants| Disk["QEMU raw disk image"]
 
@@ -244,6 +260,15 @@ flowchart LR
     Kernel --> VBlk
     Kernel --> Registry["Service registry"]
     Registry --> VBlk
+
+    Kernel --> Q[("Shared run queue<br/>ticket lock")]
+    Q --> Harts["Secondary harts<br/>U-mode tasks, own address space each"]
+    Kernel --> PLIC["PLIC<br/>drivers sleep on the device"]
+
+    Console -->|per-destination capability| Marz["U-mode Marz daemon"]
+    Marz -->|its own NIC page + DMA| Wire["the wire<br/>egress + ARP/ICMP receive"]
+    Wire -.->|what arrives is unvalidated| IFC["Integrity gate"]
+    Marz -.->|what leaves is checked| IFC2["Secrecy gate"]
 
     SDK["SDK .dzp package"] --> Pkg["Transactional package store"]
     Pkg -->|service-mediated sectors| VBlk
@@ -339,6 +364,17 @@ cairn-log note
 cairn-rollback note 1
 cairn-verify note
 agent
+overnight
+irq-stat
+smp-sched
+smp-isolate
+marz-demo
+marz-ping ops
+taintflow-demo
+ingress-demo
+taint
+why-denied
+tbar
 bench-all
 halt
 ```
@@ -432,6 +468,13 @@ High-level layout:
 - The block driver uses QEMU legacy virtio-mmio.
 - DMA isolation is modeled through page-table discipline and fixed grants; real
   IOMMU integration is future work.
+- SMP is symmetric for queued tasks only: harts run them to completion (no
+  preemption or migration on a secondary yet), and the console's own scheduler
+  is still single-hart.
+- The network edge is a guarded probe, not a stack: ARP and ICMP echo, no TCP,
+  DNS, DHCP, listening, or routing.
+- Information flow taints at operator granularity, not per byte, and neither
+  axis is enforced across the client→daemon IPC hop yet.
 - Package checksums are deterministic v0 checks, not production signatures.
 - App bundles and package limits are intentionally small for reviewability.
 - The installer initializes a prototype disk layout; it is not a production boot

@@ -30,14 +30,19 @@ shape.
 
 ### Boot Flow
 
-1. OpenSBI starts the RISC-V kernel in S-mode on QEMU `virt`.
+1. OpenSBI starts the RISC-V kernel in S-mode on QEMU `virt`. The boot hart is
+   whichever one firmware chose — it is never assumed to be hart 0.
 2. The kernel validates the boot contract from `dezh-kernel`.
 3. The kernel installs trap handling, timer support, and Sv39 paging.
-4. A capability-scoped console starts over UART.
-5. Services are declared from the boot plan and materialized in the service
+4. The PLIC is programmed to route virtio interrupts to the boot hart's S-mode
+   context, so device I/O can block instead of spin.
+5. Secondary harts are started over the SBI HSM protocol, each with its own
+   stack, trap stack, and per-hart `ApCtx` reached through `sscratch`.
+6. A capability-scoped console starts over UART on the boot hart.
+7. Services are declared from the boot plan and materialized in the service
    registry.
-6. Long-lived services such as `virtio-block` are started explicitly or lazily
-   from the registry.
+8. Long-lived services such as `virtio-block` and `marz` are started explicitly
+   or lazily from the registry.
 
 ### Kernel Responsibilities
 
@@ -45,14 +50,19 @@ The kernel owns the confinement boundary:
 
 - address-space construction
 - trap and syscall handling
-- task scheduling
+- task scheduling, on the boot hart and symmetrically across secondary harts
+- device interrupt routing (PLIC) and blocking I/O, so a waiting driver costs no CPU
+- multi-hart bring-up (SBI HSM) and the mutual exclusion that shared state needs
 - IPC queues and typed receive timeout support
+- information-flow gates on both axes: secrecy on export, integrity on ingress
 - service registry state
 - explicit process launch grants
 - frame ownership and reclaim
-- fault containment for U-mode tasks
+- fault containment for U-mode tasks, including on a secondary hart
 
-The kernel does not implement the current block I/O path directly.
+The kernel does not implement the block or network I/O path directly — both are
+U-mode daemons holding nothing but the one device page and DMA window each was
+granted.
 
 ### Process Model
 
@@ -79,6 +89,15 @@ Task capability bits currently cover:
 - block read
 - block write
 - Cairn namespaces 0..7 (bits 8..15): one bit per named storage namespace
+- egress destinations (bits 16+): one bit per *named destination*, not one bit
+  for "the network" — revoking `vault-sync` leaves `ops` intact
+
+Device authority is separately live-checked (`dev-grant` / `dev-revoke`), so a
+daemon that already holds a mapped device page can still be refused at the gate.
+
+Information-flow labels (secrecy taint, integrity endorsements) are **not**
+capability bits: a task can hold every bit it needs and still be denied because
+the flow itself is illegal. See [Information Flow](#information-flow-secrecy-and-integrity).
 
 The important property is attenuation: a task can only transfer capabilities it
 already holds. Manifest-declared package capabilities are separately translated
@@ -128,6 +147,84 @@ The daemon handles:
 - package registry, journal, and blob sectors
 - note/lab/calc/vault private storage
 - stop and controlled fault demo
+
+### User-Space Network Daemon (Marz)
+
+The network edge is a second U-mode ELF, and deliberately not the same one. Marz
+receives its **own** virtio-net MMIO page and its **own** DMA window: two devices,
+two grants, so neither daemon can reach the other's hardware or corrupt the
+other's virtqueue.
+
+Authority to send is not "network access". It is a capability for a named
+**destination** (address, port, and the secrecy label that destination is cleared
+to receive), so egress can be revoked one destination at a time.
+
+Both directions exist:
+
+- **Egress** — the gate runs before a packet exists: device authority live, then
+  destination capability held, then the secrecy check against that destination's
+  label. Only then does a frame leave, and the transmission is recorded on the
+  ledger as irreversible.
+- **Ingress** — Marz offers the NIC receive buffers, blocks on the device
+  interrupt, resolves the destination by ARP, and completes an ICMP echo
+  exchange, matching the reply by id and sequence. What comes back is
+  attacker-chosen, so consuming it lowers integrity.
+
+### Interrupts And Blocking I/O
+
+Device I/O is interrupt-driven. A driver submits a request, calls `sys_irq_wait`
+with the interrupt count it last saw, and is parked if nothing new arrived — its
+`SEPC` rewound so the `ecall` re-runs on wake. When no task is Ready but one is
+waiting on a device, the scheduler idles on `wfi` instead of returning.
+
+The kernel services the PLIC by hand in that idle path deliberately: hardware
+clears `sstatus.SIE` on trap entry, so a pending interrupt would wake `wfi` and
+never be taken, stranding the sleeping driver. Counters are visible from
+`irq-stat`.
+
+### SMP
+
+Secondary harts come up over SBI HSM and pull U-mode tasks off one shared run
+queue protected by a fair ticket spinlock. Tasks land wherever a hart is free and
+several run in U-mode at the same instant.
+
+Parallelism does not cost isolation: each task carries its own address space
+(only its own stack region is U-mapped), so a task reaching into a concurrent
+neighbour's memory page-faults and dies on its own hart while the neighbour runs
+on. Per-hart trap state is reached through `sscratch`, never `tp` — a U-mode task
+owns every integer register and will have clobbered `tp` by the time it traps.
+
+Honest scope: tasks on secondary harts run to completion (no preemption or
+migration there yet), and the console's own scheduler is still single-hart.
+
+### Information Flow: Secrecy And Integrity
+
+Capabilities answer "may this actor touch this object?". Information flow answers
+the separate question "may these *bits* go there?", and it has two axes
+(`dezh_core::difc`):
+
+- **Secrecy** — reading a labelled namespace raises the actor's taint, and taint
+  only ever rises. A tainted actor cannot write down into a less-secret sink or
+  export to a destination not cleared for that label.
+- **Integrity** — a sink may *require* endorsements; a value flows in only if it
+  carries them (no write-up). Consuming unvalidated input can only ever lower an
+  actor's integrity — the exact dual of taint only ever rising.
+
+The escapes are explicit, privileged, and recorded: `declassify` for secrecy,
+`endorse` for integrity. They stay separate on purpose — `declassify` does not
+return lost integrity and `endorse` does not clear secrecy, so one privileged act
+never grants two. The lattice rules are proven exhaustively over the 8-bit label
+space, including that the two axes are independent so one gate cannot mask the
+other.
+
+Live paths: `ns=note` and `ns=vault` require an endorsement, `ns=lab` (scratch)
+requires none; completing a network exchange lowers the operator's integrity, so
+a commit into a demanding namespace is refused with an explainable denial until a
+recorded endorsement (`taintflow-demo`, `ingress-demo`).
+
+Honest scope: the ingress taint is at **operator granularity** — consuming any
+network reply lowers integrity wholesale rather than tracking individual bytes —
+and neither axis is enforced across the client→daemon IPC hop yet.
 
 ### Cairn v1 (Commit-Log Store)
 
@@ -231,6 +328,12 @@ Useful review commands:
 - `pkg-gc`
 - `cairn-demo` / `cairn-log <ns>` / `cairn-rollback <ns> [n]` / `cairn-verify <ns>`
 - `agent`
+- `overnight` (the W8 intent → effect flagship, end to end)
+- `irq-stat` (interrupt counts and sleeping drivers)
+- `smp-sched` / `smp-isolate` (symmetric scheduling, isolation under parallelism)
+- `marz-demo` / `marz-ping` (guarded egress, ARP + ICMP receive)
+- `taintflow-demo` / `ingress-demo` / `taint` / `declassify` / `endorse`
+- `why-denied` / `tbar`
 - `bench-all`
 
 Useful review tools:
@@ -257,8 +360,11 @@ flowchart TB
     subgraph Kernel["Kernel boundary"]
         Trap["Trap + syscall handling"]
         VM["Address-space builder"]
-        Sched["Task scheduler"]
+        Sched["Task scheduler (boot hart)"]
+        SMP["SMP: ticket lock + shared run queue"]
+        IRQ["PLIC: device interrupts -> S-mode"]
         IPC["IPC queues + typed timeout"]
+        DIFC["Information flow: secrecy + integrity"]
         Services["Service registry"]
         Frames["Frame ownership + reclaim"]
     end
@@ -268,6 +374,7 @@ flowchart TB
 
     subgraph User["U-mode processes"]
         VBlk["virtio-block daemon"]
+        Marz["Marz egress daemon"]
         Client["Foreground clients"]
         Apps["Installed apps"]
         Bench["Benchmark app"]
@@ -277,10 +384,105 @@ flowchart TB
     IPC --> VBlk
     Client -->|typed IPC| VBlk
     Apps -->|declared caps only| IPC
+    SMP -->|dispatch onto secondary harts| User
 
     VBlk -->|explicit MMIO grant| MMIO["virtio-mmio page"]
     VBlk -->|explicit DMA window| DMA["DMA bounce window"]
     DMA --> Disk["QEMU raw disk image"]
+
+    Marz -->|its OWN NIC page + DMA| NIC["virtio-net page"]
+    NIC --> Wire["the wire"]
+    Wire -.->|reply lowers integrity| DIFC
+
+    IRQ -.->|wakes a sleeping driver| VBlk
+    IRQ -.->|wakes a sleeping driver| Marz
+```
+
+Every arrow into a device is an explicit grant, and the two daemons hold
+*different* ones: neither can reach the other's hardware or DMA window.
+
+### Blocking I/O Sequence
+
+Device I/O is interrupt-driven, not polled. A driver that is waiting occupies no
+CPU, and the kernel has somewhere to idle when nothing is runnable — without
+which blocking on I/O is impossible, since the scheduler would simply return.
+
+```mermaid
+sequenceDiagram
+    participant D as Driver (U-mode)
+    participant K as Kernel
+    participant P as PLIC
+    participant Dev as virtio device
+
+    D->>Dev: submit request (queue notify)
+    D->>K: sys_irq_wait(last_seen)
+    Note over K: count unchanged -> park the task,<br/>rewind SEPC so the ecall re-runs
+    K->>K: nothing Ready, but a task waits on a DEVICE
+    K->>K: wfi + service the PLIC by hand
+    Dev-->>P: raises its interrupt line
+    P-->>K: claim
+    K->>Dev: ACK (InterruptStatus / InterruptACK)
+    K->>P: complete
+    K->>D: mark Ready
+    D->>K: ecall re-runs, returns the new count
+```
+
+The kernel services the PLIC by hand in its idle path deliberately: the hardware
+clears `sstatus.SIE` on trap entry, so a pending interrupt would wake `wfi` and
+never be taken, stranding the sleeping driver.
+
+### SMP: Symmetric Scheduling
+
+The boot hart runs the console; secondary harts pull U-mode tasks off a shared
+queue and run them in parallel. Each task carries its own address space, so
+parallelism does not cost isolation.
+
+```mermaid
+flowchart LR
+    Boot["Boot hart<br/>(console, service registry)"] -->|fills| Q[("Shared run queue<br/>(ticket lock)")]
+    Q --> H1["Secondary hart 1"]
+    Q --> H2["Secondary hart 2"]
+    Q --> H3["Secondary hart 3"]
+
+    H1 --> T1["Task A<br/>own satp, own stack"]
+    H2 --> T2["Task B<br/>own satp, own stack"]
+    H3 --> T3["Task C<br/>own satp, own stack"]
+
+    T1 -. "cross-task write<br/>page-faults" .-> T2
+
+    H1 --> AP1["per-hart ApCtx<br/>frame + trap stack + kctx"]
+    H2 --> AP2["per-hart ApCtx"]
+    H3 --> AP3["per-hart ApCtx"]
+```
+
+Per-hart state is reached through `sscratch` (whose value is that hart's `ApCtx`,
+frame first), never through `tp` — a U-mode task owns every integer register and
+will have clobbered `tp` by the time it traps.
+
+### The Network Edge, Both Directions
+
+Egress names a *destination*, not "the network", and is checked against secrecy
+before a packet exists. Ingress is the mirror: what arrives is unvalidated, so
+consuming it lowers integrity until an explicit endorsement.
+
+```mermaid
+flowchart TB
+    Op["Operator / agent"]
+
+    Op -->|"send to <dest>"| G1{"device capability live?"}
+    G1 -->|no| D1["DENIED"]
+    G1 -->|yes| G2{"destination capability held?"}
+    G2 -->|no| D2["DENIED"]
+    G2 -->|yes| G3{"secrecy: taint fits<br/>the destination?"}
+    G3 -->|no| D3["DENIED: would exfiltrate"]
+    G3 -->|yes| TX["Marz transmits"]
+    TX --> L["irreversible effect on the ledger"]
+
+    Op -->|"probe <dest>"| RX["Marz: ARP + ICMP echo,<br/>parses the reply"]
+    RX --> I["integrity LOWERED<br/>(input is unvalidated)"]
+    I --> G4{"write into a namespace<br/>requiring endorsement?"}
+    G4 -->|not endorsed| D4["DENIED: would become trusted state"]
+    G4 -->|after endorse| W["write permitted"]
 ```
 
 ### Boot And Service Graph
@@ -464,6 +666,8 @@ map for reviewers.
 | --- | --- |
 | `dezh-boot/` | Main RISC-V QEMU `virt` boot target. Contains kernel entry, console, task model, service registry, package store, package lifecycle, embedded apps, and user-space process launch. |
 | `dezh-boot/virtio-blk/` | User-space `virtio-block` daemon. It receives explicit MMIO and DMA grants and performs the prototype disk I/O path. |
+| `dezh-boot/marz/` | User-space network daemon. It receives its own virtio-net MMIO page and its own DMA window — separate from the block daemon's — and performs guarded egress plus the ARP/ICMP receive path. |
+| `dezh-boot/linux-guest/` | Static Linux/RISC-V ELF used by Pol (`linux-elf`); the same bytes run on real riscv64 Linux. |
 | `dezh-boot/userprog/` | Small user program used by legacy demos and process-launch smoke paths. |
 | `dezh-boot/bench-app/` | U-mode benchmark app used by `bench-all`. |
 | `dezh-boot/note-app/` | Embedded note demo app. |

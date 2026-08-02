@@ -146,6 +146,15 @@ one — and the DIFC gate is what stands in the way.
   exchange, matching the reply by id and sequence (`marz-ping <dest>`, reported as
   `NET-RX-OK`). Ingress carries the same authority as egress — a revoked device or
   destination refuses the probe — because reaching the wire is reaching the wire.
+- **M5 — the integrity axis. DONE.** A receive path opens a hole secrecy does not
+  close: bytes off the wire are not secret, they are attacker-chosen, and the
+  danger is that they quietly become *trusted state*. Completing a network
+  exchange therefore **lowers** the operator's integrity, and a sink that requires
+  endorsement (`ns=note`, `ns=vault`; `ns=lab` is scratch and requires none)
+  refuses the write with an explainable denial until a privileged, recorded
+  `endorse`. `endorse` is the dual of `declassify` and the two stay separate —
+  neither privileged act grants the other. `ingress-demo` walks it end to end
+  (`INGRESS-OK`).
 - **Verification.** QEMU's packet capture (`-object filter-dump`) lets CI assert
   the permitted frame actually left **and that the refused one did not** — a real
   test, not a printed claim. CI **decodes** the capture as packets rather than
@@ -158,8 +167,10 @@ one — and the DIFC gate is what stands in the way.
 
 No TCP, no DNS, no inbound listening (nothing accepts a connection), no routing,
 no DHCP — the address is static. ARP and ICMP echo exist because they are what a
-reachability probe needs; ingress is **not** yet a ledgered effect or DIFC-labelled
-(a received packet is matched and dropped). No cryptographic transport. This is the
+reachability probe needs. Ingress is DIFC-labelled on the integrity axis (M5), but
+only at **operator granularity** — completing any exchange lowers integrity
+wholesale rather than tracking individual bytes — and a received packet is still
+not a ledgered effect of its own. No cryptographic transport. This is the
 authority + accountability mechanism at the network edge, plus enough of a stack to
 prove the edge is real — not a general network stack.
 
