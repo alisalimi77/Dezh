@@ -32,11 +32,39 @@ pub fn can_flow(src: Label, sink: Label) -> bool {
     src & !sink == 0
 }
 
-/// An actor's accumulated secrecy taint. It only ever rises as the actor reads
-/// more-secret data, so its permitted set of sinks only ever shrinks.
+/// An **integrity** label: the set of endorsements a value carries. This is the
+/// dual of secrecy and it is what the *network* needs.
+///
+/// Secrecy answers "may this leave?". It says nothing about data arriving from
+/// outside, which is the opposite problem: bytes off the wire are attacker-chosen
+/// and must not silently become trusted state (Biba's integrity lattice; the
+/// endorsement half of HiStar/Flume). A sink can *require* endorsements; a value
+/// may flow into it only if it carries them. Reading untrusted input can only
+/// ever *lower* an actor's integrity, exactly as reading secrets only ever raises
+/// its secrecy.
+pub type Integrity = u32;
+
+/// Carries every endorsement — the top of the integrity lattice.
+pub const TRUSTED: Integrity = !0;
+
+/// Carries none. Data straight off the network starts here.
+pub const UNTRUSTED: Integrity = 0;
+
+/// May a value whose endorsements are `data` flow into a sink that *requires*
+/// `sink_requires`? Only if the value carries every endorsement demanded
+/// (`sink_requires ⊆ data`). This is the no-write-**up** rule.
+#[inline]
+pub fn integrity_ok(data: Integrity, sink_requires: Integrity) -> bool {
+    sink_requires & !data == 0
+}
+
+/// An actor's accumulated labels: secrecy that only rises as it reads secrets,
+/// and integrity that only falls as it reads untrusted input. Both movements
+/// shrink the set of sinks the actor may write to.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Taint {
     secrecy: Label,
+    integrity: Integrity,
 }
 
 impl Default for Taint {
@@ -46,9 +74,13 @@ impl Default for Taint {
 }
 
 impl Taint {
-    /// A fresh, untainted (public) actor.
+    /// A fresh actor: public, and fully endorsed until it reads something that
+    /// is not.
     pub const fn new() -> Self {
-        Taint { secrecy: PUBLIC }
+        Taint {
+            secrecy: PUBLIC,
+            integrity: TRUSTED,
+        }
     }
 
     /// The actor reads/observes an object of label `object`; its taint rises to
@@ -57,9 +89,35 @@ impl Taint {
         self.secrecy |= object;
     }
 
+    /// The actor consumes input carrying only the endorsements `object`; its own
+    /// integrity falls to the intersection. Reading untrusted input can never
+    /// *raise* integrity — the dual of `observe`.
+    pub fn observe_input(&mut self, object: Integrity) {
+        self.integrity &= object;
+    }
+
     /// The actor's current secrecy taint.
     pub fn secrecy(&self) -> Label {
         self.secrecy
+    }
+
+    /// The endorsements the actor still carries.
+    pub fn integrity(&self) -> Integrity {
+        self.integrity
+    }
+
+    /// May this actor write into a sink that *requires* `sink_requires`? Only if
+    /// it still carries those endorsements. An actor that has consumed network
+    /// input cannot write into a sink demanding an endorsement it lost.
+    pub fn may_endorse_to(&self, sink_requires: Integrity) -> bool {
+        integrity_ok(self.integrity, sink_requires)
+    }
+
+    /// Privileged **endorsement**: restore the actor's integrity. The exact dual
+    /// of declassification — an explicit, auditable act by someone who has
+    /// validated the input, never something that happens implicitly.
+    pub fn endorse(&mut self) {
+        self.integrity = TRUSTED;
     }
 
     /// May this actor write/send to a sink labelled `sink`? Only if the sink can
@@ -120,6 +178,68 @@ mod tests {
             for sink in 0u32..=255 {
                 assert_eq!(t.may_flow_to(sink), (taint & !sink) == 0);
                 assert_eq!(can_flow(taint, sink), (taint & !sink) == 0);
+            }
+        }
+    }
+
+    // --- Integrity: the ingress half. -------------------------------------
+    const ENDORSED: Integrity = 1 << 0;
+    const REVIEWED: Integrity = 1 << 1;
+
+    #[test]
+    fn a_fresh_actor_carries_every_endorsement() {
+        let t = Taint::new();
+        assert!(t.may_endorse_to(ENDORSED));
+        assert!(t.may_endorse_to(ENDORSED | REVIEWED));
+    }
+
+    #[test]
+    fn consuming_network_input_blocks_writing_to_a_trusted_sink() {
+        // The ingress case: read bytes off the wire, then try to write them into
+        // a namespace that requires an endorsement.
+        let mut t = Taint::new();
+        t.observe_input(UNTRUSTED);
+        assert!(t.may_endorse_to(UNTRUSTED), "an unendorsed sink still accepts it");
+        assert!(
+            !t.may_endorse_to(ENDORSED),
+            "unvalidated network input must not become trusted state"
+        );
+    }
+
+    #[test]
+    fn integrity_only_falls_until_explicitly_endorsed() {
+        let mut t = Taint::new();
+        t.observe_input(ENDORSED | REVIEWED);
+        assert!(t.may_endorse_to(ENDORSED));
+        t.observe_input(ENDORSED); // reading something less endorsed
+        assert!(!t.may_endorse_to(REVIEWED), "integrity cannot rise by reading");
+        assert!(t.may_endorse_to(ENDORSED));
+        t.endorse();
+        assert!(t.may_endorse_to(ENDORSED | REVIEWED), "endorsement is the escape");
+    }
+
+    #[test]
+    fn the_two_axes_are_independent() {
+        // Reading a secret must not change integrity, and reading untrusted input
+        // must not change secrecy — otherwise one gate could mask the other.
+        let mut t = Taint::new();
+        t.observe(SECRET_VAULT);
+        assert_eq!(t.integrity(), TRUSTED);
+        let mut u = Taint::new();
+        u.observe_input(UNTRUSTED);
+        assert_eq!(u.secrecy(), PUBLIC);
+    }
+
+    #[test]
+    fn integrity_ok_iff_superset_exhaustive() {
+        // Exhaustive over the 8-bit space: a write is permitted iff the value
+        // carries every endorsement the sink requires (no-write-up).
+        for data in 0u32..=255 {
+            let mut t = Taint::new();
+            t.observe_input(data);
+            for requires in 0u32..=255 {
+                assert_eq!(t.may_endorse_to(requires), (requires & !data) == 0);
+                assert_eq!(integrity_ok(data, requires), (requires & !data) == 0);
             }
         }
     }

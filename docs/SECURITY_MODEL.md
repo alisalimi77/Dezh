@@ -122,12 +122,25 @@ Naming these is part of the honesty rule.
   [RELATED_WORK.md](RELATED_WORK.md) §2), and it is *enforced on the live Cairn
   console path* (`taintflow-demo`): reading `ns=vault` (labelled secret) taints
   the operator, after which a commit to a lower-secrecy namespace is refused
-  until an explicit, privileged `declassify`. What is **not** yet enforced is the
-  same taint across the U-mode client→daemon hop, IPC generally, and above all
-  networking (which does not exist yet). So confidentiality is real on the
-  storage path but not yet pervasive. Treat Dezh as strong on *integrity and
-  attribution*, and on *confidentiality* as enforced where data lives (Cairn) but
-  not yet across every channel.
+  until an explicit, privileged `declassify`. It is enforced at the **network
+  edge** too: a secret-tainted operator cannot export to a destination not cleared
+  for that secret (`exfil-demo`, [Marz](SUBSYSTEMS.md#marz-guarded-egress)).
+
+  The **integrity** axis — the dual, and the one *ingress* needs — is enforced as
+  well (`ingress-demo`). Secrecy asks "may this leave?"; it says nothing about
+  bytes arriving from outside, which are attacker-chosen and must not silently
+  become trusted state (Biba; the endorsement half of HiStar/Flume). A namespace
+  can *require* an endorsement; consuming network input lowers the operator's
+  integrity, so a write into such a namespace is refused until a privileged
+  `endorse`. The two escapes are deliberately separate: `declassify` does not hand
+  back integrity, and `endorse` does not clear secrecy, so one privileged act never
+  grants two.
+
+  What is **not** yet enforced: either taint across the U-mode client→daemon hop
+  or IPC generally, and the ingress taint is at *operator* granularity — consuming
+  any network reply lowers integrity wholesale rather than tracking the individual
+  bytes. So information-flow control is real on the storage path and at the network
+  edge in both directions, but not yet pervasive per-value.
 - **Side channels and covert channels.** No defense against timing, cache,
   Spectre/Meltdown-class, or power side channels; no mitigation of covert
   channels between principals.

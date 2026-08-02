@@ -667,6 +667,19 @@ def run_riscv64(qemu: str, kernel: Path) -> None:
             # Persisted namespace revocation: revoke ns=calc at the object owner
             # (the daemon writes it to the superblock). The reboot phase proves it
             # survives a power cycle.
+            # The ingress half of information flow: what comes off the wire is not
+            # secret, it is UNVALIDATED, and it must not become trusted state
+            # without an explicit endorsement. Secrecy alone never catches this.
+            (
+                "ingress-demo",
+                [
+                    "operator integrity LOWERED by consuming input from the network",
+                    "would let UNVALIDATED input become trusted state",
+                    "operator integrity restored (privileged endorsement",
+                    "the gate to ns=note reopens",
+                    "PASS: INGRESS-OK",
+                ],
+            ),
             # The network is bidirectional now: the daemon arms the NIC's receive
             # queue, resolves the destination with ARP, sends a real ICMP echo and
             # PARSES the reply that comes back off the wire. Receiving is what a

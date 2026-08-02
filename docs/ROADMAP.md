@@ -303,6 +303,18 @@ Both are now addressed on RISC-V, in order:
   would misread as extra egress. Landing this also fixed a real bug: the internet
   checksum dropped the final byte of an odd-length body, so our echo request was
   silently discarded by the host and no reply ever came.
+- **Information flow on ingress. — DONE.** Having a receive path creates a new
+  hole, and it is not the one secrecy solves. Bytes off the wire are not *secret*;
+  they are *unvalidated*, and the danger is that they quietly become trusted state.
+  `dezh_core::difc` gained the **integrity** axis (Biba's dual: a sink may
+  *require* endorsements, and reading untrusted input can only lower an actor's
+  integrity, never raise it), proven exhaustively over the label space. In the
+  kernel, `ns=note` and `ns=vault` require an endorsement, talking to the network
+  lowers the operator's integrity, and a write into a demanding namespace is
+  refused until a privileged, recorded `endorse` (`ingress-demo` → `INGRESS-OK`).
+  The two escapes stay separate on purpose: `declassify` does not restore
+  integrity and `endorse` does not clear secrecy, so one privileged act cannot
+  grant two.
 - **Remaining SMP work. — NOT started.** Tasks run to completion on the hart that
   picked them: there is no preemption or migration on a secondary hart (no timer
   armed there yet), and the *console's* own scheduler — task table, IPC mailboxes,

@@ -23,6 +23,7 @@ true today, so a reviewer never has to guess.
 | U-mode task on a secondary hart | A real U-mode task is dispatched onto a secondary hart, drops to U-mode via a per-hart trap path, has its syscalls serviced **on that hart**, and runs to completion while the boot hart stays on the console (`smp-task`, `U-MODE-ON-AP`). |
 | Symmetric scheduling | One task queue, every hart pulling from it: tasks land wherever a hart is free and several run in U-mode **at the same instant** (`smp-sched` — 4 tasks across 3 harts, each exactly once, peak 3 live → `SCHED-OK`). Per-hart trap state is reached via `sscratch`, so harts can trap simultaneously. |
 | Isolation under parallelism | Each task gets its **own address space** (only its stack region is U-mapped), so concurrent tasks on different harts cannot reach each other's memory: an intruder page-faults and dies on its own hart while its neighbour runs on (`smp-isolate`, `ISOLATION-OK`). |
+| Information flow, both directions | Secrecy **and** integrity are enforced on the live storage path. Reading a labelled namespace raises secrecy so a secret cannot be written down or exported (`taintflow-demo`); consuming **network input** lowers integrity so unvalidated bytes cannot become trusted state (`ingress-demo`, `INGRESS-OK`). The escapes are explicit, privileged and recorded: `declassify` for secrecy, `endorse` for integrity — and neither grants the other. |
 | Bidirectional networking | The Marz daemon **receives**, not just transmits: it offers the NIC receive buffers, blocks on the device interrupt, resolves the destination by **ARP**, and completes a real **ICMP echo** exchange, matching the reply by id and sequence (`marz-ping`, `NET-RX-OK`). CI decodes the packet capture structurally and asserts the echo left and the reply came back. |
 
 ## What is measured, and how honestly
@@ -94,12 +95,13 @@ true today, so a reviewer never has to guess.
   not yet.** The information-flow-control primitive is built (`dezh_core::difc`)
   and **enforced on the live Cairn path** (`taintflow-demo`): reading `ns=vault`
   (labelled secret) taints the operator, then a commit to a lower namespace is
-  refused (no write-down) until a privileged `declassify`. What is not done is
-  enforcing the same taint across the U-mode client→daemon hop and IPC.
-  Confidentiality is real where data lives (Cairn) and on **outbound** network
-  export (a secret-tainted operator cannot send to a destination not cleared for
-  it), but **inbound** packets are not labelled: `marz-ping` matches a reply and
-  drops it, so nothing yet flows in for DIFC to track. See
+  refused (no write-down) until a privileged `declassify`. The **integrity** axis
+  is enforced too (`ingress-demo`): talking to the network lowers the operator's
+  integrity, so unvalidated input cannot be written into a namespace that demands
+  an endorsement until a privileged `endorse`. What is **not** done is enforcing
+  either taint across the U-mode client→daemon hop and IPC, and the ingress taint
+  is at **operator granularity** — consuming *any* network reply lowers integrity
+  wholesale rather than tracking the individual bytes through the system. See
   [Threat model](SECURITY_MODEL.md#threat-model) §5.
 - **Networking is a probe, not a stack.** Marz does Ethernet, ARP, IPv4, UDP
   egress and ICMP echo — enough to prove the edge is real and reachable in both

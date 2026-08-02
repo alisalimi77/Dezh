@@ -2384,6 +2384,10 @@ fn run_marz_ping(arg: &str) {
     );
     if st == 0 {
         kprintln!("[marz] NET-RX-OK: the host answered and Dezh parsed the reply (ARP + ICMP echo)");
+        // Ingress is an information flow INTO the system. What came back was
+        // chosen by whoever is on the other end, so consuming it lowers the
+        // operator's integrity until someone validates it.
+        difc_ingress("the network");
     } else {
         kprintln!("[marz] probe failed (status={st})");
     }
@@ -4743,7 +4747,11 @@ fn run_nsrevoke_demo(plan: &KernelPlan) {
 // `dezh_core::difc`.
 
 const NS_SECRET_VAULT: dezh_core::difc::Label = 1 << 0;
+/// The endorsement a namespace can demand of anything written into it. A
+/// namespace requiring it will not accept data derived from unvalidated input.
+const NS_ENDORSED: dezh_core::difc::Integrity = 1 << 0;
 static mut NS_LABEL: [dezh_core::difc::Label; 8] = [0; 8];
+static mut NS_REQUIRES: [dezh_core::difc::Integrity; 8] = [0; 8];
 static mut OP_TAINT: dezh_core::difc::Taint = dezh_core::difc::Taint::new();
 static mut DIFC_INIT: bool = false;
 
@@ -4754,6 +4762,11 @@ fn difc_init() {
         }
         // vault (ns id 3) holds secrets; other namespaces are public here.
         NS_LABEL[3] = NS_SECRET_VAULT;
+        // note (0) and vault (3) are trusted state: they demand an endorsement,
+        // so raw network input cannot become their content without review. lab
+        // (1) is the scratch namespace and demands nothing.
+        NS_REQUIRES[0] = NS_ENDORSED;
+        NS_REQUIRES[3] = NS_ENDORSED;
         DIFC_INIT = true;
     }
 }
@@ -4761,6 +4774,11 @@ fn difc_init() {
 fn ns_label(ns: usize) -> dezh_core::difc::Label {
     difc_init();
     unsafe { *NS_LABEL.get(ns).unwrap_or(&0) }
+}
+
+fn ns_requires(ns: usize) -> dezh_core::difc::Integrity {
+    difc_init();
+    unsafe { *NS_REQUIRES.get(ns).unwrap_or(&0) }
 }
 
 /// After a successful READ of `ns`, raise the operator's taint by that
@@ -4780,29 +4798,75 @@ fn difc_observe(ns: usize) {
 /// (`taint ⊆ ns label`); otherwise the write would exfiltrate a secret to a
 /// lower sink. Prints an explainable denial and returns false when refused.
 fn difc_may_write(ns: usize) -> bool {
-    if unsafe { OP_TAINT.may_flow_to(ns_label(ns)) } {
-        return true;
+    if !unsafe { OP_TAINT.may_flow_to(ns_label(ns)) } {
+        kprintln!(
+            "[difc] DENIED: writing to ns='{}' would leak secret-tainted data to a lower sink (taint={:#x}, sink label={:#x}); declassify first",
+            CAIRN_NS_NAMES.get(ns).copied().unwrap_or("?"),
+            unsafe { OP_TAINT.secrecy() },
+            ns_label(ns)
+        );
+        return false;
     }
+    // The other direction: data derived from unvalidated input must not become
+    // trusted state. Secrecy alone never catches this — the bytes are not secret,
+    // they are simply attacker-chosen.
+    if !unsafe { OP_TAINT.may_endorse_to(ns_requires(ns)) } {
+        kprintln!(
+            "[difc] DENIED: writing to ns='{}' would let UNVALIDATED input become trusted state (operator integrity={:#x}, sink requires={:#x}); endorse first",
+            CAIRN_NS_NAMES.get(ns).copied().unwrap_or("?"),
+            unsafe { OP_TAINT.integrity() },
+            ns_requires(ns)
+        );
+        return false;
+    }
+    true
+}
+
+/// Called after the operator consumes bytes that came from outside the machine.
+/// Integrity can only fall this way; nothing but an explicit `endorse` raises it.
+fn difc_ingress(source: &'static str) {
+    difc_init();
+    unsafe { OP_TAINT.observe_input(dezh_core::difc::UNTRUSTED) };
     kprintln!(
-        "[difc] DENIED: writing to ns='{}' would leak secret-tainted data to a lower sink (taint={:#x}, sink label={:#x}); declassify first",
-        CAIRN_NS_NAMES.get(ns).copied().unwrap_or("?"),
-        unsafe { OP_TAINT.secrecy() },
-        ns_label(ns)
+        "[difc] operator integrity LOWERED by consuming input from {source} (integrity now {:#x}) -- it is not secret, it is unvalidated",
+        unsafe { OP_TAINT.integrity() }
     );
-    false
+    record_event("kernel", "difc.ingress", source, "tainted");
 }
 
 fn declassify() {
     difc_init();
+    let integrity = unsafe { OP_TAINT.integrity() };
     unsafe { OP_TAINT = dezh_core::difc::Taint::new() };
+    // Declassification is about secrecy only; it must not silently hand back
+    // integrity the operator lost, or one privileged act would grant two.
+    unsafe {
+        if integrity != dezh_core::difc::TRUSTED {
+            OP_TAINT.observe_input(integrity);
+        }
+    }
     kprintln!("[declassify] operator taint cleared (privileged declassification)");
     record_event("kernel", "difc.declassify", "operator", "OK");
 }
 
+/// The dual of declassify: an explicit, recorded act saying the operator has
+/// validated what it read from outside, restoring its integrity.
+fn endorse() {
+    difc_init();
+    unsafe { OP_TAINT.endorse() };
+    kprintln!("[endorse] operator integrity restored (privileged endorsement of reviewed input)");
+    record_event("kernel", "difc.endorse", "operator", "OK");
+}
+
 fn taint_show() {
-    kprintln!("[taint] operator secrecy taint = {:#x}", unsafe {
-        OP_TAINT.secrecy()
-    });
+    kprintln!(
+        "[taint] operator secrecy taint = {:#x} (rises by reading secrets; cleared by declassify)",
+        unsafe { OP_TAINT.secrecy() }
+    );
+    kprintln!(
+        "[taint] operator integrity     = {:#x} (falls by consuming outside input; restored by endorse)",
+        unsafe { OP_TAINT.integrity() }
+    );
 }
 
 /// Prove DIFC enforcement on the real storage path: read a secret namespace,
@@ -4832,6 +4896,52 @@ fn run_taintflow_demo(plan: &KernelPlan) {
         kprintln!("[taintflow-demo] PASS: a secret read taints the operator and blocks the write-down; declassification is the explicit, privileged escape -- confidentiality enforced on real data flow");
     } else {
         kprintln!("[taintflow-demo] FAIL: blocked={blocked} allowed={allowed}");
+    }
+}
+
+/// The ingress half of information-flow control: data that came off the wire is
+/// not secret, it is **unvalidated**, and it must not silently become trusted
+/// state. Read from the network, be refused writing into a namespace that demands
+/// an endorsement, then endorse explicitly and be allowed.
+fn run_ingress_demo(plan: &KernelPlan) {
+    const NOTE: usize = 0; // trusted state: demands an endorsement
+    const LAB: usize = 1; // scratch: demands nothing
+    kprintln!("[ingress-demo] the network can be READ from; what arrives is attacker-chosen, so it starts unendorsed");
+    // Start from a known state: fully endorsed, untainted.
+    endorse();
+    declassify();
+
+    kprintln!("[ingress-demo] 1/4 talk to the network and consume what comes back:");
+    run_marz_ping("ops");
+    let lowered = unsafe { OP_TAINT.integrity() } != dezh_core::difc::TRUSTED;
+
+    kprintln!("[ingress-demo] 2/4 try to write it into ns=note (trusted state) -> REFUSED:");
+    cairn_cmd_commit(plan, "note from-the-wire");
+    let blocked = !unsafe { OP_TAINT.may_endorse_to(ns_requires(NOTE)) };
+
+    kprintln!("[ingress-demo] 3/4 the same data may still go to ns=lab, which demands no endorsement:");
+    let scratch_ok = unsafe { OP_TAINT.may_endorse_to(ns_requires(LAB)) };
+    cairn_cmd_commit(plan, "lab from-the-wire");
+
+    kprintln!("[ingress-demo] 4/4 endorse (privileged, recorded); the gate to ns=note reopens:");
+    endorse();
+    let allowed = unsafe { OP_TAINT.may_endorse_to(ns_requires(NOTE)) };
+    // Write to the scratch namespace rather than ns=note: the point is proven by
+    // the gate, and clobbering trusted state would be a poor way to prove we
+    // protect it.
+    cairn_cmd_commit(plan, "lab after-endorsement");
+
+    let pass = lowered && blocked && scratch_ok && allowed;
+    record_event(
+        "kernel",
+        "ingress.demo",
+        "integrity",
+        if pass { "OK" } else { "fail" },
+    );
+    if pass {
+        kprintln!("[ingress-demo] PASS: INGRESS-OK -- reading the network lowers integrity, unvalidated input cannot become trusted state, and endorsement is the explicit, privileged escape");
+    } else {
+        kprintln!("[ingress-demo] FAIL: lowered={lowered} blocked={blocked} scratch_ok={scratch_ok} allowed={allowed}");
     }
 }
 
@@ -7163,6 +7273,20 @@ const COMMANDS: &[CommandSpec] = &[
         help: "privileged declassification: clear the operator's DIFC taint",
     },
     CommandSpec {
+        name: "endorse",
+        cap: cap::SPAWN,
+        cap_name: "SPAWN",
+        group: "Effects",
+        help: "privileged endorsement (the dual of declassify): restore integrity after validating outside input",
+    },
+    CommandSpec {
+        name: "ingress-demo",
+        cap: cap::SPAWN,
+        cap_name: "SPAWN",
+        group: "Demos",
+        help: "proof: data read from the network is unvalidated and cannot become trusted state without an explicit endorsement",
+    },
+    CommandSpec {
         name: "intent-list",
         cap: cap::INSPECT,
         cap_name: "INSPECT",
@@ -8210,6 +8334,8 @@ fn dispatch(cmd: &str, arg: &str, plan: &KernelPlan, memory: &[MemoryRegion], he
         "taintflow-demo" => run_taintflow_demo(plan),
         "taint" => taint_show(),
         "declassify" => declassify(),
+        "endorse" => endorse(),
+        "ingress-demo" => run_ingress_demo(plan),
         "intent-list" => pkg::intent_list(),
         "intent-run" => pkg::intent_run(plan, arg),
         "intent-demo" => pkg::intent_demo(plan),
