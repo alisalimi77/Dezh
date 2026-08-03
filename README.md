@@ -5,7 +5,7 @@
 <p align="center">
   <a href="https://github.com/alisalimi77/Dezh/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/alisalimi77/Dezh/actions/workflows/ci.yml/badge.svg"></a>
   <a href="LICENSE"><img alt="Apache-2.0" src="https://img.shields.io/badge/license-Apache--2.0-blue.svg"></a>
-  <a href="https://github.com/alisalimi77/Dezh/releases/tag/v0.2-review"><img alt="Review release" src="https://img.shields.io/badge/release-v0.2--review-0f766e.svg"></a>
+  <a href="https://github.com/alisalimi77/Dezh/releases/tag/v0.3-review"><img alt="Review release" src="https://img.shields.io/badge/release-v0.3--review-0f766e.svg"></a>
   <a href="dezh-boot/"><img alt="RISC-V" src="https://img.shields.io/badge/arch-RISC--V-283272.svg"></a>
   <a href="dezh-boot-x86/"><img alt="x86_64" src="https://img.shields.io/badge/arch-x86__64-546e7a.svg"></a>
   <a href="Cargo.toml"><img alt="Rust" src="https://img.shields.io/badge/made%20with-Rust-b7410e.svg"></a>
@@ -54,7 +54,7 @@ architectural and security-model review.
 | IPC | Typed request/reply path with status codes, timeouts, and counters |
 | Persistence | Cairn v1 commit log with rollbackable refs and per-app namespaces |
 | Apps | `.dzp` packages with manifest-scoped caps and transactional lifecycle |
-| Review release | [`v0.2-review`](https://github.com/alisalimi77/Dezh/releases/tag/v0.2-review) with a bootable x86_64 ISO, kernels, `.dzp` package, transcript, docs, checksums |
+| Review release | [`v0.3-review`](https://github.com/alisalimi77/Dezh/releases/tag/v0.3-review) with a bootable x86_64 ISO, kernels, `.dzp` package, transcript, docs, checksums |
 
 ## Review Snapshot
 

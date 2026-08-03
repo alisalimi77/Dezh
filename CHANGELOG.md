@@ -24,7 +24,54 @@ VM. Since v0.1-review:
   answer in `SECURITY_MODEL.md#enforcement-model`, and a `REVIEWER_GUIDE.md` rewritten around the
   four demos.
 
-## Unreleased
+## v0.3-review Candidate
+
+Two milestones since v0.2-review. W8 made intent and effect first-class, so an
+agent's night can be read back and undone honestly. W9 took the same rule down
+to the hardware — real device interrupts, several harts, and a network edge —
+and showed the no-ambient-authority thesis survives all three.
+
+Three limitations named in the v0.2 notes are now closed: runtime revocation,
+package signing, and SMP. The IOMMU is still open, and still the honest gap in
+the driver story.
+
+### W9 — Hardware And Information Flow
+
+- **Device interrupts:** the kernel is interrupt-driven rather than polled. A
+  PLIC routes virtio IRQs into the boot hart's S-mode context, drivers **sleep**
+  on `sys_irq_wait` until the device wakes them, and the scheduler idles on
+  `wfi` for a device when nothing is runnable (`irq-stat`).
+- **SMP, up to symmetric scheduling:** secondary harts come up over the real SBI
+  HSM protocol (`smp-demo`); a fair **ticket spinlock** makes a non-atomic
+  counter come out exact under every hart at once (`MUTEX-OK`) — something
+  atomics cannot demonstrate; 48 jobs drain from one shared queue, each running
+  exactly once (`QUEUE-OK`); and U-mode tasks are dispatched across harts and
+  run **at the same instant** (`smp-sched`, `SCHED-OK`). The boot hart is taken
+  from firmware and never assumed to be hart 0.
+- **Isolation survives parallelism:** each task carries its own address space, so
+  concurrent tasks on different harts cannot reach each other. An intruder
+  page-faults and dies on its own hart while its neighbour keeps running
+  (`smp-isolate`, `ISOLATION-OK`).
+- **Marz, a bidirectional network edge:** egress names a *destination* rather
+  than "the network" and is checked before a packet exists. The daemon now also
+  **receives** — it offers the NIC receive buffers, blocks on the interrupt,
+  resolves by **ARP**, and completes a real **ICMP echo**, matched on id and
+  sequence (`marz-ping`, `NET-RX-OK`). CI decodes the capture structurally
+  instead of grepping console text.
+- **Information flow on both axes:** secrecy stops a labelled value being written
+  down or exported (`taintflow-demo`); integrity stops unvalidated **network
+  input** becoming trusted state (`ingress-demo`, `INGRESS-OK`). Each axis has
+  exactly one explicit, privileged, recorded escape — `declassify` and
+  `endorse` — and neither grants the other.
+- **Object capabilities:** the Cairn namespace capability is an ocap handle with
+  generation-stamped, per-object revocation that survives reboot, and device
+  authority is a revocable handle rather than an ambient grant.
+- **Package signing:** a `.dzp` can be wrapped in a signed `DZSP` envelope whose
+  Ed25519 signature binds the *authority the package asks for*, verified in the
+  kernel against an audited crate (`sig-demo`). The distribution layer — a
+  signing CLI and an on-disk trust store — is deliberately still open; see
+  [STATUS](docs/STATUS.md).
+- **Docs:** 31 files consolidated into 15, held there by a CI check.
 
 ### W8 — Intent + Effect Runtime (complete)
 

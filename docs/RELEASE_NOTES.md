@@ -1,5 +1,59 @@
 # Release Notes
 
+## v0.3-review Candidate
+
+The milestone where the no-ambient-authority rule stops being a single-core,
+single-threaded claim. Two bodies of work land here: an intent-to-effect runtime
+that can undo an agent's night honestly, and the hardware work — real device
+interrupts, symmetric multiprocessing, and a bidirectional network edge — that
+tests whether the rule holds when the machine gets harder.
+
+### What a reviewer can now do
+
+- Run `overnight` — leave a coding agent loose under **one intent**, then in the
+  morning forecast the rollback, retract what is reversible, run and record a
+  compensating action for what is compensatable, and watch the system **refuse**
+  the irreversible rather than pretend. The agent's attempt to act outside its
+  intent is denied by the kernel, and `why-denied` names the boundary.
+- Boot under `-smp 4` and watch U-mode tasks run on several harts **at the same
+  instant**, each in its own address space — then watch an intruder page-fault
+  and die on its own hart while its neighbour keeps running.
+- Send a real ICMP echo to a destination the caller holds a capability for, and
+  see the reply come back through ARP resolution — then watch consuming that
+  reply **lower integrity**, so unvalidated network bytes cannot quietly become
+  trusted state.
+- Verify a signed `.dzp`: the Ed25519 envelope binds the authority the package
+  asks for, and the kernel checks it.
+
+### Flagship demos
+
+Everything from v0.2-review (F1 containment, F2 Cairn, F3 multi-ISA, F4 Pol)
+still runs, joined by `overnight`, `smp-sched`, `smp-isolate`, `marz-ping`,
+`ingress-demo`, `taintflow-demo`, `redteam`, `sig-demo` and `lease-demo` — all
+green in `tools/ci/qemu_smoke.py`.
+
+### Honest scope
+
+Three limitations named in the v0.2 notes are closed: runtime revocation,
+package signing, and SMP. Still open, and stated plainly rather than buried:
+
+- **No IOMMU.** User-space drivers buy fault isolation and least privilege of
+  the driver *process*, not memory safety against a malicious driver that
+  programs the device to DMA anywhere. This is core to the story, not polish.
+- **No formal verification**, and no in-flight capability clawback — revocation
+  is at the intent-lease and object-generation level, which is coarse but
+  honest.
+- **Package signing has no distribution layer** yet: no standalone signing CLI,
+  no on-disk root-signed trust store.
+- QEMU and VirtualBox targets only. Emulated benchmarks are labelled as such.
+
+Full detail, including what reviewers should push on, in `docs/STATUS.md`.
+
+### Artifacts
+
+RISC-V and x86_64 kernels, the bootable `dezh-<tag>-x86_64.iso`, a `.dzp` sample
+package, a `RUN.txt`, the docs bundle, a manifest, and `SHA256SUMS`.
+
 ## v0.2-review Candidate
 
 The milestone where all four flagship demos are green in CI and a reviewer can
