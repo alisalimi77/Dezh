@@ -9,7 +9,7 @@ dezh-cairn = { path = "../dezh-cairn" }
 dezh-identity = { path = "../dezh-identity" }
 dezh-ir = { path = "../dezh-ir" }
 wat = "1"
-wasmtime = "27"
+wasmtime = "47"
 
 [lib]
 path = "src/lib.rs"
