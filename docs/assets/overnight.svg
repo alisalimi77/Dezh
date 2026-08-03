@@ -1,27 +1,30 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="621" height="420" viewBox="0 0 621 420" font-family="SFMono-Regular,Consolas,Liberation Mono,Menlo,monospace">
-<rect width="621" height="420" rx="10" fill="#0d1117" stroke="#30363d"/>
-<rect width="621" height="44" rx="10" fill="#161b22"/>
-<rect y="34" width="621" height="10" fill="#161b22"/>
-<circle cx="20" cy="22.0" r="6" fill="#ff5f56"/>
-<circle cx="40" cy="22.0" r="6" fill="#ffbd2e"/>
-<circle cx="60" cy="22.0" r="6" fill="#27c93f"/>
-<text x="310.5" y="26.0" fill="#6e7681" font-size="12" text-anchor="middle">Dezh &#8212; RISC-V kernel (QEMU) &#183; the overnight flagship</text>
-<text x="18" y="64" font-size="12.5"><tspan fill="#3fb950" font-weight="700">dezh&gt; </tspan><tspan fill="#e6edf3" font-weight="700">overnight</tspan></text>
-<text x="18" y="84" fill="#58a6ff" font-size="12.5" font-weight="400">[overnight] leave a coding agent loose overnight under ONE intent</text>
-<text x="18" y="104" fill="#58a6ff" font-size="12.5" font-weight="400">[overnight] 1/6 opened the agent's intent Ahd#8 (a writer ceiling)</text>
-<text x="18" y="124" fill="#58a6ff" font-size="12.5" font-weight="400">[overnight] 2/6 the night: 1 irreversible deploy + 2 reversible writes</text>
-<text x="18" y="144" fill="#58a6ff" font-size="12.5" font-weight="400">            (ns=lab), 1 compensatable external action (ns=calc)</text>
-<text x="18" y="164" fill="#6e7681" font-size="12.5" font-weight="400">  [cairn] commit ns=lab  intent=Ahd#8  x3</text>
-<text x="18" y="184" fill="#6e7681" font-size="12.5" font-weight="400">  [cairn] commit ns=calc intent=Ahd#8</text>
-<text x="18" y="204" fill="#58a6ff" font-size="12.5" font-weight="400">[overnight] 3/6 morning: forecast the rollback, read the provenance</text>
-<text x="18" y="224" fill="#79c0ff" font-size="12.5" font-weight="400">  [sfar] plan: reversible=2 compensatable=1 irreversible=1  -&gt; partial</text>
-<text x="18" y="244" fill="#79c0ff" font-size="12.5" font-weight="400">  [tbar] 4 effect(s) attributed to intent Ahd#8 (actor -&gt; intent -&gt; effect)</text>
-<text x="18" y="264" fill="#58a6ff" font-size="12.5" font-weight="400">[overnight] 4/6 undo the night honestly:</text>
-<text x="18" y="284" fill="#ff7b72" font-size="12.5" font-weight="400">    [sfar] REFUSED ns=lab: irreversible - already happened outside</text>
-<text x="18" y="304" fill="#e3b341" font-size="12.5" font-weight="400">    [sfar] COMPENSATED ns=calc: ran "revoke api-key:tmp/42", recorded</text>
-<text x="18" y="324" fill="#79c0ff" font-size="12.5" font-weight="400">  [sfar] rolled back: retracted=2 compensations=1 refused_irreversible=1</text>
-<text x="18" y="344" fill="#58a6ff" font-size="12.5" font-weight="400">[overnight] 5/6 the agent also TRIED to escape its intent:</text>
-<text x="18" y="364" fill="#ff7b72" font-size="12.5" font-weight="400">  [redteam] kernel DENIED the out-of-intent write (derived cap &lt;= Ahd)</text>
-<text x="18" y="384" fill="#58a6ff" font-size="12.5" font-weight="400">[overnight] 6/6 why-denied -&gt; boundary: intent-derivation ceiling</text>
-<text x="18" y="404" fill="#3fb950" font-size="12.5" font-weight="700">[overnight] PASS: undone, compensated, the irreversible refused, escape contained</text>
+<svg xmlns="http://www.w3.org/2000/svg" width="677" height="436" viewBox="0 0 677 436" role="img" aria-labelledby="t d">
+<title id="t">The Dezh overnight flagship run</title>
+<desc id="d">Terminal transcript. A coding agent is left running overnight under one intent. In the morning Dezh forecasts the rollback, retracts the two reversible writes, compensates the external action, refuses the irreversible deploy rather than pretending to undo it, and reports that the agent's attempt to act outside its intent was denied by the kernel.</desc>
+<style>:root{--canvas:#ffffff;--surface:#f6f8fa;--surface-2:#eaeef2;--border:#d1d9e0;--border-strong:#b7bfc7;--fg:#1f2328;--fg-muted:#59636e;--fg-subtle:#818b98;--accent:#0969da;--accent-wash:#ddf4ff;--success:#1a7f37;--attention:#9a6700;--danger:#cf222e;--term-canvas:#f6f8fa;--term-chrome:#eaeef2;--term-fg:#1f2328;--term-dim:#59636e;--term-info:#0550ae;--term-note:#0969da;--term-ok:#1a7f37;--term-warn:#9a6700;--term-bad:#cf222e;}@media(prefers-color-scheme:dark){:root{--canvas:#0d1117;--surface:#161b22;--surface-2:#21262d;--border:#30363d;--border-strong:#3d444d;--fg:#e6edf3;--fg-muted:#8b949e;--fg-subtle:#6e7681;--accent:#58a6ff;--accent-wash:#0c2d6b;--success:#3fb950;--attention:#d29922;--danger:#f85149;--term-canvas:#0d1117;--term-chrome:#161b22;--term-fg:#e6edf3;--term-dim:#6e7681;--term-info:#58a6ff;--term-note:#79c0ff;--term-ok:#3fb950;--term-warn:#e3b341;--term-bad:#ff7b72;}}.m{font:400 13px ui-monospace,SFMono-Regular,'SF Mono',Menlo,Consolas,'Liberation Mono',monospace}.b{font:700 13px ui-monospace,SFMono-Regular,'SF Mono',Menlo,Consolas,'Liberation Mono',monospace}.cap{fill:var(--fg-muted);font:400 11px -apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,'Noto Sans',sans-serif}</style>
+<rect width="677" height="436" rx="10" fill="var(--term-canvas)" stroke="var(--border)" stroke-width="1"/>
+<path d="M 0 40 V 10 A 10 10 0 0 1 10 0 H 667 A 10 10 0 0 1 677 10 V 40 Z" fill="var(--term-chrome)"/>
+<path d="M 0 40 H 677" stroke="var(--border)" stroke-width="1"/>
+<circle cx="18" cy="20.0" r="5" fill="var(--danger)" opacity="0.85"/>
+<circle cx="36" cy="20.0" r="5" fill="var(--attention)" opacity="0.85"/>
+<circle cx="54" cy="20.0" r="5" fill="var(--success)" opacity="0.85"/>
+<text x="338.5" y="24.0" class="cap" text-anchor="middle">Dezh — RISC-V kernel (QEMU) · the overnight flagship</text>
+<text x="18" y="66" class="b"><tspan fill="var(--term-ok)">dezh&gt; </tspan><tspan fill="var(--term-fg)">overnight</tspan></text>
+<text x="18" y="86" class="m" fill="var(--term-info)" xml:space="preserve">[overnight] leave a coding agent loose overnight under ONE intent</text>
+<text x="18" y="106" class="m" fill="var(--term-info)" xml:space="preserve">[overnight] 1/6 opened the agent's intent Ahd#8 (a writer ceiling)</text>
+<text x="18" y="126" class="m" fill="var(--term-info)" xml:space="preserve">[overnight] 2/6 the night: 1 irreversible deploy + 2 reversible writes</text>
+<text x="18" y="146" class="m" fill="var(--term-info)" xml:space="preserve">            (ns=lab), 1 compensatable external action (ns=calc)</text>
+<text x="18" y="166" class="m" fill="var(--term-dim)" xml:space="preserve">  [cairn] commit ns=lab  intent=Ahd#8  x3</text>
+<text x="18" y="186" class="m" fill="var(--term-dim)" xml:space="preserve">  [cairn] commit ns=calc intent=Ahd#8</text>
+<text x="18" y="206" class="m" fill="var(--term-info)" xml:space="preserve">[overnight] 3/6 morning: forecast the rollback, read the provenance</text>
+<text x="18" y="226" class="m" fill="var(--term-note)" xml:space="preserve">  [sfar] plan: reversible=2 compensatable=1 irreversible=1  -&gt; partial</text>
+<text x="18" y="246" class="m" fill="var(--term-note)" xml:space="preserve">  [tbar] 4 effect(s) attributed to intent Ahd#8 (actor -&gt; intent -&gt; effect)</text>
+<text x="18" y="266" class="m" fill="var(--term-info)" xml:space="preserve">[overnight] 4/6 undo the night honestly:</text>
+<text x="18" y="286" class="m" fill="var(--term-bad)" xml:space="preserve">    [sfar] REFUSED ns=lab: irreversible - already happened outside</text>
+<text x="18" y="306" class="m" fill="var(--term-warn)" xml:space="preserve">    [sfar] COMPENSATED ns=calc: ran &quot;revoke api-key:tmp/42&quot;, recorded</text>
+<text x="18" y="326" class="m" fill="var(--term-note)" xml:space="preserve">  [sfar] rolled back: retracted=2 compensations=1 refused_irreversible=1</text>
+<text x="18" y="346" class="m" fill="var(--term-info)" xml:space="preserve">[overnight] 5/6 the agent also TRIED to escape its intent:</text>
+<text x="18" y="366" class="m" fill="var(--term-bad)" xml:space="preserve">  [redteam] kernel DENIED the out-of-intent write (derived cap &lt;= Ahd)</text>
+<text x="18" y="386" class="m" fill="var(--term-info)" xml:space="preserve">[overnight] 6/6 why-denied -&gt; boundary: intent-derivation ceiling</text>
+<text x="18" y="406" class="b" fill="var(--term-ok)" xml:space="preserve">[overnight] PASS: undone, compensated, the irreversible refused, escape contained</text>
 </svg>

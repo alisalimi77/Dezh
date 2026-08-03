@@ -1,63 +1,36 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="420" viewBox="0 0 1280 420" role="img" aria-labelledby="title desc">
-  <title id="title">Dezh OS capability-secure architecture banner</title>
-  <desc id="desc">A clean architecture banner showing the Dezh OS kernel boundary, user-space services, typed IPC, package lifecycle, and service-mediated storage.</desc>
-  <defs>
-    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0" stop-color="#0b1020"/>
-      <stop offset="0.55" stop-color="#15263a"/>
-      <stop offset="1" stop-color="#10251f"/>
-    </linearGradient>
-    <linearGradient id="line" x1="0" y1="0" x2="1" y2="0">
-      <stop offset="0" stop-color="#5eead4"/>
-      <stop offset="0.5" stop-color="#93c5fd"/>
-      <stop offset="1" stop-color="#bef264"/>
-    </linearGradient>
-    <filter id="soft" x="-20%" y="-20%" width="140%" height="140%">
-      <feDropShadow dx="0" dy="12" stdDeviation="18" flood-color="#020617" flood-opacity="0.45"/>
-    </filter>
-    <style>
-      .title { fill: #f8fafc; font: 700 76px Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; letter-spacing: 0; }
-      .tag { fill: #cbd5e1; font: 500 27px Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; letter-spacing: 0; }
-      .small { fill: #94a3b8; font: 500 18px Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; letter-spacing: 0; }
-      .label { fill: #e2e8f0; font: 700 21px Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; letter-spacing: 0; }
-      .note { fill: #b6c4d3; font: 500 16px Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; letter-spacing: 0; }
-      .box { fill: #111827; stroke: #334155; stroke-width: 1.5; rx: 8; filter: url(#soft); }
-      .accent { stroke: url(#line); stroke-width: 4; stroke-linecap: round; fill: none; }
-      .thin { stroke: #64748b; stroke-width: 1.2; stroke-linecap: round; fill: none; opacity: 0.8; }
-    </style>
-  </defs>
-  <rect width="1280" height="420" fill="url(#bg)"/>
-  <path d="M0 343 C160 316 252 372 407 337 C563 301 651 238 808 275 C960 311 1052 368 1280 312 L1280 420 L0 420 Z" fill="#07111f" opacity="0.55"/>
-  <path d="M92 92 H1188" class="accent"/>
-  <text x="92" y="175" class="title">Dezh OS</text>
-  <text x="96" y="225" class="tag">Intent-native capability security for services, storage, and apps</text>
-  <text x="98" y="262" class="small">User-space drivers · Typed IPC · Transactional app lifecycle · Reboot-safe QEMU demos</text>
-
-  <g transform="translate(700 128)">
-    <rect class="box" width="176" height="82"/>
-    <text x="22" y="36" class="label">Kernel</text>
-    <text x="22" y="62" class="note">isolation gates</text>
-  </g>
-  <g transform="translate(938 62)">
-    <rect class="box" width="206" height="82"/>
-    <text x="22" y="36" class="label">U-mode driver</text>
-    <text x="22" y="62" class="note">virtio-block grants</text>
-  </g>
-  <g transform="translate(932 202)">
-    <rect class="box" width="222" height="82"/>
-    <text x="22" y="36" class="label">Package store</text>
-    <text x="22" y="62" class="note">journal + rollback</text>
-  </g>
-  <g transform="translate(686 286)">
-    <rect class="box" width="210" height="82"/>
-    <text x="22" y="36" class="label">Apps</text>
-    <text x="22" y="62" class="note">manifest-scoped caps</text>
-  </g>
-
-  <path d="M876 169 C916 147 914 108 938 102" class="thin"/>
-  <path d="M876 180 C923 198 908 238 932 244" class="thin"/>
-  <path d="M782 210 C785 242 788 269 792 286" class="thin"/>
-  <circle cx="900" cy="153" r="4" fill="#5eead4"/>
-  <circle cx="904" cy="214" r="4" fill="#93c5fd"/>
-  <circle cx="790" cy="256" r="4" fill="#bef264"/>
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="400" viewBox="0 0 1280 400" role="img" aria-labelledby="t d">
+<title id="t">Dezh OS -- intent-native, capability-secure operating-system prototype</title>
+<desc id="d">Banner. Left: the Dezh OS wordmark with the project's rule -- no program starts with ambient authority. Right: a layer diagram. Apps, the virtio-block driver and agents run in user mode; every call crosses a kernel that grants no ambient authority; effects land in the Cairn commit log, which is rollbackable.</desc>
+<style>:root{--canvas:#ffffff;--surface:#f6f8fa;--surface-2:#eaeef2;--border:#d1d9e0;--border-strong:#b7bfc7;--fg:#1f2328;--fg-muted:#59636e;--fg-subtle:#818b98;--accent:#0969da;--accent-wash:#ddf4ff;--success:#1a7f37;--attention:#9a6700;--danger:#cf222e;--term-canvas:#f6f8fa;--term-chrome:#eaeef2;--term-fg:#1f2328;--term-dim:#59636e;--term-info:#0550ae;--term-note:#0969da;--term-ok:#1a7f37;--term-warn:#9a6700;--term-bad:#cf222e;}@media(prefers-color-scheme:dark){:root{--canvas:#0d1117;--surface:#161b22;--surface-2:#21262d;--border:#30363d;--border-strong:#3d444d;--fg:#e6edf3;--fg-muted:#8b949e;--fg-subtle:#6e7681;--accent:#58a6ff;--accent-wash:#0c2d6b;--success:#3fb950;--attention:#d29922;--danger:#f85149;--term-canvas:#0d1117;--term-chrome:#161b22;--term-fg:#e6edf3;--term-dim:#6e7681;--term-info:#58a6ff;--term-note:#79c0ff;--term-ok:#3fb950;--term-warn:#e3b341;--term-bad:#ff7b72;}}.hero{fill:var(--fg);font:700 64px -apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,'Noto Sans',sans-serif}.eyebrow{fill:var(--accent);font:700 11px -apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,'Noto Sans',sans-serif;letter-spacing:.16em}.lead{fill:var(--fg);font:600 26px -apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,'Noto Sans',sans-serif}.body{fill:var(--fg-muted);font:400 15px -apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,'Noto Sans',sans-serif}.boxt{fill:var(--fg);font:700 13px -apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,'Noto Sans',sans-serif}.boxn{fill:var(--fg-muted);font:400 11px -apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,'Noto Sans',sans-serif}.card{fill:var(--surface);stroke:var(--border);stroke-width:1.5}.wire{stroke:var(--border-strong);stroke-width:1.5;fill:none}</style>
+<rect width="1280" height="400" fill="var(--canvas)"/>
+<path d="M 80 64 H 1200" stroke="var(--border)" stroke-width="1"/>
+<text x="80" y="112" class="eyebrow">CAPABILITY-SECURE OS PROTOTYPE · RISC-V · x86_64</text>
+<text x="80" y="192" class="hero">Dezh OS</text>
+<rect x="80" y="214" width="72" height="4" rx="2" fill="var(--accent)"/>
+<text x="80" y="264" class="lead">No program starts with ambient authority.</text>
+<text x="80" y="300" class="body">Every effect is backed by an explicit capability, grant or lease —</text>
+<text x="80" y="324" class="body">and every effect stays attributable, and reversible where it can be.</text>
+<rect x="700.0" y="92" width="156.0" height="60" rx="6" class="card"/>
+<text x="714.0" y="118" class="boxt">Apps</text>
+<text x="714.0" y="137" class="boxn">manifest caps</text>
+<path d="M 778.0 152 V 196" class="wire"/>
+<circle cx="778.0" cy="196" r="3" fill="var(--accent)"/>
+<rect x="872.0" y="92" width="156.0" height="60" rx="6" class="card"/>
+<text x="886.0" y="118" class="boxt">Driver</text>
+<text x="886.0" y="137" class="boxn">virtio-block</text>
+<path d="M 950.0 152 V 196" class="wire"/>
+<circle cx="950.0" cy="196" r="3" fill="var(--accent)"/>
+<rect x="1044.0" y="92" width="156.0" height="60" rx="6" class="card"/>
+<text x="1058.0" y="118" class="boxt">Agents</text>
+<text x="1058.0" y="137" class="boxn">one intent</text>
+<path d="M 1122.0 152 V 196" class="wire"/>
+<circle cx="1122.0" cy="196" r="3" fill="var(--accent)"/>
+<rect x="700" y="196" width="500" height="60" rx="6" fill="var(--accent-wash)" stroke="var(--accent)" stroke-width="1.5"/>
+<text x="716" y="222" class="boxt">Kernel</text>
+<text x="716" y="241" class="boxn">typed IPC · capability check on every effect · no ambient authority</text>
+<path d="M 950.0 256 V 284" class="wire"/>
+<circle cx="950.0" cy="284" r="3" fill="var(--accent)"/>
+<rect x="700" y="284" width="500" height="60" rx="6" class="card"/>
+<text x="716" y="310" class="boxt">Cairn</text>
+<text x="716" y="329" class="boxn">commit log · per-app namespaces · rollback and compensation</text>
 </svg>

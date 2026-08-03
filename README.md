@@ -229,7 +229,7 @@ network is a probe rather than a stack (**no TCP, DNS, DHCP, listening or
 routing**) — see [STATUS](docs/STATUS.md) and the [roadmap](docs/ROADMAP.md).
 
 <p align="center">
-  <img src="docs/assets/overnight.svg" alt="The overnight flagship run: an agent's night forecast, rolled back honestly, and its escape contained" width="720">
+  <img src="docs/assets/overnight.svg" alt="The overnight flagship run: an agent's night forecast, rolled back honestly, and its escape contained" width="677">
 </p>
 
 *One command (`overnight`) — the whole differentiator. Full captured transcript:

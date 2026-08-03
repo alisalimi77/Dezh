@@ -1,120 +1,122 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="832" height="556" viewBox="0 0 832 556" font-family="-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif">
-<rect width="832" height="556" rx="10" fill="#0d1117"/>
-<text x="16" y="30" fill="#e6edf3" font-size="18" font-weight="700">Dezh vs capability / isolation systems &#8212; what each already does, and where Dezh differs</text>
-<text x="16" y="46" fill="#8b949e" font-size="12">Honest matrix: Dezh concedes formal verification (seL4), IOMMU (Genode/Fuchsia) and signed packages (Fuchsia). It owns the effect / mission / intent / agent rows.</text>
-<rect x="16" y="52" width="340" height="40" fill="#0d1117"/>
-<rect x="356" y="52" width="92" height="40" fill="#1f6feb"/>
-<text x="402.0" y="77.0" fill="#e6edf3" font-size="14" font-weight="700" text-anchor="middle">Dezh</text>
-<rect x="448" y="52" width="92" height="40" fill="#161b22"/>
-<text x="494.0" y="77.0" fill="#e6edf3" font-size="14" font-weight="600" text-anchor="middle">seL4</text>
-<rect x="540" y="52" width="92" height="40" fill="#161b22"/>
-<text x="586.0" y="77.0" fill="#e6edf3" font-size="14" font-weight="600" text-anchor="middle">Genode</text>
-<rect x="632" y="52" width="92" height="40" fill="#161b22"/>
-<text x="678.0" y="77.0" fill="#e6edf3" font-size="14" font-weight="600" text-anchor="middle">Fuchsia</text>
-<rect x="724" y="52" width="92" height="40" fill="#161b22"/>
-<text x="770.0" y="77.0" fill="#e6edf3" font-size="14" font-weight="600" text-anchor="middle">gVisor</text>
-<rect x="16" y="92" width="800" height="34" fill="#161b22" opacity="0.5"/>
-<text x="24" y="114.0" fill="#e6edf3" font-size="13">No ambient authority (from-scratch)</text>
-<rect x="356" y="92" width="92" height="34" fill="#1f6feb" opacity="0.10"/>
-<text x="402.0" y="115.0" fill="#3fb950" font-size="18" font-weight="700" text-anchor="middle">✔</text>
-<text x="494.0" y="115.0" fill="#3fb950" font-size="18" font-weight="700" text-anchor="middle">✔</text>
-<text x="586.0" y="115.0" fill="#3fb950" font-size="18" font-weight="700" text-anchor="middle">✔</text>
-<text x="678.0" y="115.0" fill="#3fb950" font-size="18" font-weight="700" text-anchor="middle">✔</text>
-<text x="770.0" y="115.0" fill="#f85149" font-size="18" font-weight="700" text-anchor="middle">✗</text>
-<text x="24" y="148.0" fill="#e6edf3" font-size="13">Capability-based access control</text>
-<rect x="356" y="126" width="92" height="34" fill="#1f6feb" opacity="0.10"/>
-<text x="402.0" y="149.0" fill="#3fb950" font-size="18" font-weight="700" text-anchor="middle">✔</text>
-<text x="494.0" y="149.0" fill="#3fb950" font-size="18" font-weight="700" text-anchor="middle">✔</text>
-<text x="586.0" y="149.0" fill="#3fb950" font-size="18" font-weight="700" text-anchor="middle">✔</text>
-<text x="678.0" y="149.0" fill="#3fb950" font-size="18" font-weight="700" text-anchor="middle">✔</text>
-<text x="770.0" y="149.0" fill="#f85149" font-size="18" font-weight="700" text-anchor="middle">✗</text>
-<rect x="16" y="160" width="800" height="34" fill="#161b22" opacity="0.5"/>
-<text x="24" y="182.0" fill="#e6edf3" font-size="13">Drivers in user space</text>
-<rect x="356" y="160" width="92" height="34" fill="#1f6feb" opacity="0.10"/>
-<text x="402.0" y="183.0" fill="#3fb950" font-size="18" font-weight="700" text-anchor="middle">✔</text>
-<text x="494.0" y="183.0" fill="#3fb950" font-size="18" font-weight="700" text-anchor="middle">✔</text>
-<text x="586.0" y="183.0" fill="#3fb950" font-size="18" font-weight="700" text-anchor="middle">✔</text>
-<text x="678.0" y="183.0" fill="#3fb950" font-size="18" font-weight="700" text-anchor="middle">✔</text>
-<text x="770.0" y="183.0" fill="#f85149" font-size="18" font-weight="700" text-anchor="middle">✗</text>
-<text x="24" y="216.0" fill="#e6edf3" font-size="13">Formally verified kernel</text>
-<rect x="356" y="194" width="92" height="34" fill="#1f6feb" opacity="0.10"/>
-<text x="402.0" y="217.0" fill="#f85149" font-size="18" font-weight="700" text-anchor="middle">✗</text>
-<text x="494.0" y="217.0" fill="#3fb950" font-size="18" font-weight="700" text-anchor="middle">✔</text>
-<text x="586.0" y="217.0" fill="#f85149" font-size="18" font-weight="700" text-anchor="middle">✗</text>
-<text x="678.0" y="217.0" fill="#f85149" font-size="18" font-weight="700" text-anchor="middle">✗</text>
-<text x="770.0" y="217.0" fill="#f85149" font-size="18" font-weight="700" text-anchor="middle">✗</text>
-<rect x="16" y="228" width="800" height="34" fill="#161b22" opacity="0.5"/>
-<text x="24" y="250.0" fill="#e6edf3" font-size="13">Effect ledger ON the authorization path</text>
-<rect x="356" y="228" width="92" height="34" fill="#1f6feb" opacity="0.10"/>
-<text x="402.0" y="251.0" fill="#3fb950" font-size="18" font-weight="700" text-anchor="middle">✔</text>
-<text x="494.0" y="251.0" fill="#f85149" font-size="18" font-weight="700" text-anchor="middle">✗</text>
-<text x="586.0" y="251.0" fill="#f85149" font-size="18" font-weight="700" text-anchor="middle">✗</text>
-<text x="678.0" y="251.0" fill="#f85149" font-size="18" font-weight="700" text-anchor="middle">✗</text>
-<text x="770.0" y="251.0" fill="#f85149" font-size="18" font-weight="700" text-anchor="middle">✗</text>
-<text x="24" y="284.0" fill="#e6edf3" font-size="13">Per-effect reversibility class</text>
-<rect x="356" y="262" width="92" height="34" fill="#1f6feb" opacity="0.10"/>
-<text x="402.0" y="285.0" fill="#3fb950" font-size="18" font-weight="700" text-anchor="middle">✔</text>
-<text x="494.0" y="285.0" fill="#f85149" font-size="18" font-weight="700" text-anchor="middle">✗</text>
-<text x="586.0" y="285.0" fill="#f85149" font-size="18" font-weight="700" text-anchor="middle">✗</text>
-<text x="678.0" y="285.0" fill="#f85149" font-size="18" font-weight="700" text-anchor="middle">✗</text>
-<text x="770.0" y="285.0" fill="#f85149" font-size="18" font-weight="700" text-anchor="middle">✗</text>
-<rect x="16" y="296" width="800" height="34" fill="#161b22" opacity="0.5"/>
-<text x="24" y="318.0" fill="#e6edf3" font-size="13">Whole-mission rollback + compensation</text>
-<rect x="356" y="296" width="92" height="34" fill="#1f6feb" opacity="0.10"/>
-<text x="402.0" y="319.0" fill="#3fb950" font-size="18" font-weight="700" text-anchor="middle">✔</text>
-<text x="494.0" y="319.0" fill="#f85149" font-size="18" font-weight="700" text-anchor="middle">✗</text>
-<text x="586.0" y="319.0" fill="#f85149" font-size="18" font-weight="700" text-anchor="middle">✗</text>
-<text x="678.0" y="319.0" fill="#f85149" font-size="18" font-weight="700" text-anchor="middle">✗</text>
-<text x="770.0" y="319.0" fill="#f85149" font-size="18" font-weight="700" text-anchor="middle">✗</text>
-<text x="24" y="352.0" fill="#e6edf3" font-size="13">Explainable denial + provenance graph</text>
-<rect x="356" y="330" width="92" height="34" fill="#1f6feb" opacity="0.10"/>
-<text x="402.0" y="353.0" fill="#3fb950" font-size="18" font-weight="700" text-anchor="middle">✔</text>
-<text x="494.0" y="353.0" fill="#f85149" font-size="18" font-weight="700" text-anchor="middle">✗</text>
-<text x="586.0" y="353.0" fill="#f85149" font-size="18" font-weight="700" text-anchor="middle">✗</text>
-<text x="678.0" y="353.0" fill="#f85149" font-size="18" font-weight="700" text-anchor="middle">✗</text>
-<text x="770.0" y="353.0" fill="#d29922" font-size="18" font-weight="700" text-anchor="middle">~</text>
-<rect x="16" y="364" width="800" height="34" fill="#161b22" opacity="0.5"/>
-<text x="24" y="386.0" fill="#e6edf3" font-size="13">Intent-scoped authority + leases</text>
-<rect x="356" y="364" width="92" height="34" fill="#1f6feb" opacity="0.10"/>
-<text x="402.0" y="387.0" fill="#3fb950" font-size="18" font-weight="700" text-anchor="middle">✔</text>
-<text x="494.0" y="387.0" fill="#d29922" font-size="18" font-weight="700" text-anchor="middle">~</text>
-<text x="586.0" y="387.0" fill="#d29922" font-size="18" font-weight="700" text-anchor="middle">~</text>
-<text x="678.0" y="387.0" fill="#d29922" font-size="18" font-weight="700" text-anchor="middle">~</text>
-<text x="770.0" y="387.0" fill="#f85149" font-size="18" font-weight="700" text-anchor="middle">✗</text>
-<text x="24" y="420.0" fill="#e6edf3" font-size="13">Agent as a first-class principal</text>
-<rect x="356" y="398" width="92" height="34" fill="#1f6feb" opacity="0.10"/>
-<text x="402.0" y="421.0" fill="#3fb950" font-size="18" font-weight="700" text-anchor="middle">✔</text>
-<text x="494.0" y="421.0" fill="#f85149" font-size="18" font-weight="700" text-anchor="middle">✗</text>
-<text x="586.0" y="421.0" fill="#f85149" font-size="18" font-weight="700" text-anchor="middle">✗</text>
-<text x="678.0" y="421.0" fill="#f85149" font-size="18" font-weight="700" text-anchor="middle">✗</text>
-<text x="770.0" y="421.0" fill="#f85149" font-size="18" font-weight="700" text-anchor="middle">✗</text>
-<rect x="16" y="432" width="800" height="34" fill="#161b22" opacity="0.5"/>
-<text x="24" y="454.0" fill="#e6edf3" font-size="13">IOMMU-enforced DMA</text>
-<rect x="356" y="432" width="92" height="34" fill="#1f6feb" opacity="0.10"/>
-<text x="402.0" y="455.0" fill="#f85149" font-size="18" font-weight="700" text-anchor="middle">✗</text>
-<text x="494.0" y="455.0" fill="#d29922" font-size="18" font-weight="700" text-anchor="middle">~</text>
-<text x="586.0" y="455.0" fill="#3fb950" font-size="18" font-weight="700" text-anchor="middle">✔</text>
-<text x="678.0" y="455.0" fill="#3fb950" font-size="18" font-weight="700" text-anchor="middle">✔</text>
-<text x="770.0" y="455.0" fill="#f85149" font-size="18" font-weight="700" text-anchor="middle">✗</text>
-<text x="24" y="488.0" fill="#e6edf3" font-size="13">Signed packages (+ publisher attenuation)</text>
-<rect x="356" y="466" width="92" height="34" fill="#1f6feb" opacity="0.10"/>
-<text x="402.0" y="489.0" fill="#3fb950" font-size="18" font-weight="700" text-anchor="middle">✔</text>
-<text x="494.0" y="489.0" fill="#f85149" font-size="18" font-weight="700" text-anchor="middle">✗</text>
-<text x="586.0" y="489.0" fill="#d29922" font-size="18" font-weight="700" text-anchor="middle">~</text>
-<text x="678.0" y="489.0" fill="#3fb950" font-size="18" font-weight="700" text-anchor="middle">✔</text>
-<text x="770.0" y="489.0" fill="#f85149" font-size="18" font-weight="700" text-anchor="middle">✗</text>
-<line x1="356" y1="52" x2="356" y2="500" stroke="#30363d" stroke-width="1"/>
-<line x1="448" y1="52" x2="448" y2="500" stroke="#30363d" stroke-width="1"/>
-<line x1="540" y1="52" x2="540" y2="500" stroke="#30363d" stroke-width="1"/>
-<line x1="632" y1="52" x2="632" y2="500" stroke="#30363d" stroke-width="1"/>
-<line x1="724" y1="52" x2="724" y2="500" stroke="#30363d" stroke-width="1"/>
-<line x1="816" y1="52" x2="816" y2="500" stroke="#30363d" stroke-width="1"/>
-<line x1="16" y1="52" x2="16" y2="500" stroke="#30363d" stroke-width="1"/>
-<line x1="16" y1="52" x2="816" y2="52" stroke="#30363d"/>
-<line x1="16" y1="92" x2="816" y2="92" stroke="#30363d"/>
-<line x1="16" y1="500" x2="816" y2="500" stroke="#30363d"/>
-<text x="16" y="526" fill="#3fb950" font-size="15" font-weight="700">✔</text><text x="34" y="526" fill="#8b949e" font-size="12">yes</text>
-<text x="86" y="526" fill="#d29922" font-size="15" font-weight="700">~</text><text x="102" y="526" fill="#8b949e" font-size="12">partial</text>
-<text x="166" y="526" fill="#f85149" font-size="15" font-weight="700">✗</text><text x="184" y="526" fill="#8b949e" font-size="12">no</text>
-<text x="816" y="526" fill="#8b949e" font-size="11" text-anchor="end">Dezh: research prototype, QEMU-only. See docs/RELATED_WORK.md &amp; docs/THREAT_MODEL.md</text>
+<svg xmlns="http://www.w3.org/2000/svg" width="960" height="692" viewBox="0 0 960 692" role="img" aria-labelledby="t d">
+<title id="t">Dezh compared with capability and isolation systems</title>
+<desc id="d">A twelve-row capability matrix comparing Dezh with seL4, Genode, Fuchsia and gVisor across three groups. Foundations: Dezh matches prior art on ambient authority, capabilities and user-space drivers, and concedes formal verification to seL4. Effect accountability: Dezh is the only system marked yes on effect ledger, per-effect reversibility, whole-mission rollback, provenance and agent-as-principal. Hardening: Dezh concedes IOMMU-enforced DMA to Genode and Fuchsia.</desc>
+<style>:root{--canvas:#ffffff;--surface:#f6f8fa;--surface-2:#eaeef2;--border:#d1d9e0;--border-strong:#b7bfc7;--fg:#1f2328;--fg-muted:#59636e;--fg-subtle:#818b98;--accent:#0969da;--accent-wash:#ddf4ff;--success:#1a7f37;--attention:#9a6700;--danger:#cf222e;--term-canvas:#f6f8fa;--term-chrome:#eaeef2;--term-fg:#1f2328;--term-dim:#59636e;--term-info:#0550ae;--term-note:#0969da;--term-ok:#1a7f37;--term-warn:#9a6700;--term-bad:#cf222e;}@media(prefers-color-scheme:dark){:root{--canvas:#0d1117;--surface:#161b22;--surface-2:#21262d;--border:#30363d;--border-strong:#3d444d;--fg:#e6edf3;--fg-muted:#8b949e;--fg-subtle:#6e7681;--accent:#58a6ff;--accent-wash:#0c2d6b;--success:#3fb950;--attention:#d29922;--danger:#f85149;--term-canvas:#0d1117;--term-chrome:#161b22;--term-fg:#e6edf3;--term-dim:#6e7681;--term-info:#58a6ff;--term-note:#79c0ff;--term-ok:#3fb950;--term-warn:#e3b341;--term-bad:#ff7b72;}}.ttl{fill:var(--fg);font:700 18px -apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,'Noto Sans',sans-serif}.sub{fill:var(--fg-muted);font:400 12px -apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,'Noto Sans',sans-serif}.sys{fill:var(--fg);font:600 13px -apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,'Noto Sans',sans-serif}.sysx{fill:var(--fg);font:700 13px -apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,'Noto Sans',sans-serif}.grp{fill:var(--fg);font:700 11px -apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,'Noto Sans',sans-serif;letter-spacing:.09em}.grpn{fill:var(--fg-subtle);font:400 11px -apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,'Noto Sans',sans-serif}.row{fill:var(--fg);font:400 13px -apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,'Noto Sans',sans-serif}.leg{fill:var(--fg-muted);font:400 12px -apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,'Noto Sans',sans-serif}.foot{fill:var(--fg-subtle);font:400 11px -apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,'Noto Sans',sans-serif}.hair{stroke:var(--border);stroke-width:1;fill:none}</style>
+<rect width="960" height="692" rx="10" fill="var(--canvas)"/>
+<text x="20" y="36" class="ttl">Dezh vs capability &amp; isolation systems</text>
+<text x="20" y="56" class="sub">An honest matrix. Dezh concedes formal verification and IOMMU-enforced DMA; what it holds alone is the middle group.</text>
+<rect x="410" y="74" width="106" height="548" rx="6" fill="var(--accent-wash)"/>
+<path d="M 20 118 H 940" class="hair" stroke="var(--border-strong)"/>
+<path d="M 410 74 V 622" class="hair"/>
+<path d="M 516 74 V 622" class="hair"/>
+<path d="M 622 74 V 622" class="hair"/>
+<path d="M 728 74 V 622" class="hair"/>
+<path d="M 834 74 V 622" class="hair"/>
+<path d="M 940 74 V 622" class="hair"/>
+<path d="M 20 184 H 940" class="hair"/>
+<path d="M 20 218 H 940" class="hair"/>
+<path d="M 20 252 H 940" class="hair"/>
+<path d="M 20 286 H 940" class="hair"/>
+<path d="M 20 352 H 940" class="hair"/>
+<path d="M 20 386 H 940" class="hair"/>
+<path d="M 20 420 H 940" class="hair"/>
+<path d="M 20 454 H 940" class="hair"/>
+<path d="M 20 488 H 940" class="hair"/>
+<path d="M 20 522 H 940" class="hair"/>
+<path d="M 20 588 H 940" class="hair"/>
+<path d="M 20 622 H 940" class="hair"/>
+<rect x="20" y="118" width="920" height="32" fill="var(--surface)"/>
+<rect x="20" y="286" width="920" height="32" fill="var(--surface)"/>
+<rect x="20" y="522" width="920" height="32" fill="var(--surface)"/>
+<text x="463.0" y="101" class="sysx" text-anchor="middle">Dezh</text>
+<text x="569.0" y="101" class="sys" text-anchor="middle">seL4</text>
+<text x="675.0" y="101" class="sys" text-anchor="middle">Genode</text>
+<text x="781.0" y="101" class="sys" text-anchor="middle">Fuchsia</text>
+<text x="887.0" y="101" class="sys" text-anchor="middle">gVisor</text>
+<text x="30" y="139" class="grp">FOUNDATIONS</text>
+<text x="126.28" y="139" class="grpn">mature prior art already does these</text>
+<text x="30" y="172" class="row">No ambient authority (from scratch)</text>
+<g transform="translate(463.0 167.0)"><title>yes</title><circle r="9" fill="var(--success)"/><path d="M -3.6 0.27 L -1.17 2.88 L 3.78 -2.6999999999999997" fill="none" stroke="var(--canvas)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></g>
+<g transform="translate(569.0 167.0)"><title>yes</title><circle r="9" fill="var(--success)"/><path d="M -3.6 0.27 L -1.17 2.88 L 3.78 -2.6999999999999997" fill="none" stroke="var(--canvas)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></g>
+<g transform="translate(675.0 167.0)"><title>yes</title><circle r="9" fill="var(--success)"/><path d="M -3.6 0.27 L -1.17 2.88 L 3.78 -2.6999999999999997" fill="none" stroke="var(--canvas)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></g>
+<g transform="translate(781.0 167.0)"><title>yes</title><circle r="9" fill="var(--success)"/><path d="M -3.6 0.27 L -1.17 2.88 L 3.78 -2.6999999999999997" fill="none" stroke="var(--canvas)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></g>
+<g transform="translate(887.0 167.0)"><title>no</title><circle r="9" fill="none" stroke="var(--danger)" stroke-width="2"/><path d="M -4.05 0 L 4.05 0" stroke="var(--danger)" stroke-width="2" stroke-linecap="round"/></g>
+<text x="30" y="206" class="row">Capability-based access control</text>
+<g transform="translate(463.0 201.0)"><title>yes</title><circle r="9" fill="var(--success)"/><path d="M -3.6 0.27 L -1.17 2.88 L 3.78 -2.6999999999999997" fill="none" stroke="var(--canvas)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></g>
+<g transform="translate(569.0 201.0)"><title>yes</title><circle r="9" fill="var(--success)"/><path d="M -3.6 0.27 L -1.17 2.88 L 3.78 -2.6999999999999997" fill="none" stroke="var(--canvas)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></g>
+<g transform="translate(675.0 201.0)"><title>yes</title><circle r="9" fill="var(--success)"/><path d="M -3.6 0.27 L -1.17 2.88 L 3.78 -2.6999999999999997" fill="none" stroke="var(--canvas)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></g>
+<g transform="translate(781.0 201.0)"><title>yes</title><circle r="9" fill="var(--success)"/><path d="M -3.6 0.27 L -1.17 2.88 L 3.78 -2.6999999999999997" fill="none" stroke="var(--canvas)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></g>
+<g transform="translate(887.0 201.0)"><title>no</title><circle r="9" fill="none" stroke="var(--danger)" stroke-width="2"/><path d="M -4.05 0 L 4.05 0" stroke="var(--danger)" stroke-width="2" stroke-linecap="round"/></g>
+<text x="30" y="240" class="row">Drivers in user space</text>
+<g transform="translate(463.0 235.0)"><title>yes</title><circle r="9" fill="var(--success)"/><path d="M -3.6 0.27 L -1.17 2.88 L 3.78 -2.6999999999999997" fill="none" stroke="var(--canvas)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></g>
+<g transform="translate(569.0 235.0)"><title>yes</title><circle r="9" fill="var(--success)"/><path d="M -3.6 0.27 L -1.17 2.88 L 3.78 -2.6999999999999997" fill="none" stroke="var(--canvas)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></g>
+<g transform="translate(675.0 235.0)"><title>yes</title><circle r="9" fill="var(--success)"/><path d="M -3.6 0.27 L -1.17 2.88 L 3.78 -2.6999999999999997" fill="none" stroke="var(--canvas)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></g>
+<g transform="translate(781.0 235.0)"><title>yes</title><circle r="9" fill="var(--success)"/><path d="M -3.6 0.27 L -1.17 2.88 L 3.78 -2.6999999999999997" fill="none" stroke="var(--canvas)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></g>
+<g transform="translate(887.0 235.0)"><title>no</title><circle r="9" fill="none" stroke="var(--danger)" stroke-width="2"/><path d="M -4.05 0 L 4.05 0" stroke="var(--danger)" stroke-width="2" stroke-linecap="round"/></g>
+<text x="30" y="274" class="row">Formally verified kernel</text>
+<g transform="translate(463.0 269.0)"><title>no</title><circle r="9" fill="none" stroke="var(--danger)" stroke-width="2"/><path d="M -4.05 0 L 4.05 0" stroke="var(--danger)" stroke-width="2" stroke-linecap="round"/></g>
+<g transform="translate(569.0 269.0)"><title>yes</title><circle r="9" fill="var(--success)"/><path d="M -3.6 0.27 L -1.17 2.88 L 3.78 -2.6999999999999997" fill="none" stroke="var(--canvas)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></g>
+<g transform="translate(675.0 269.0)"><title>no</title><circle r="9" fill="none" stroke="var(--danger)" stroke-width="2"/><path d="M -4.05 0 L 4.05 0" stroke="var(--danger)" stroke-width="2" stroke-linecap="round"/></g>
+<g transform="translate(781.0 269.0)"><title>no</title><circle r="9" fill="none" stroke="var(--danger)" stroke-width="2"/><path d="M -4.05 0 L 4.05 0" stroke="var(--danger)" stroke-width="2" stroke-linecap="round"/></g>
+<g transform="translate(887.0 269.0)"><title>no</title><circle r="9" fill="none" stroke="var(--danger)" stroke-width="2"/><path d="M -4.05 0 L 4.05 0" stroke="var(--danger)" stroke-width="2" stroke-linecap="round"/></g>
+<text x="30" y="307" class="grp">EFFECT ACCOUNTABILITY</text>
+<text x="201.08" y="307" class="grpn">the axis this project exists for</text>
+<text x="30" y="340" class="row">Effect ledger ON the authorization path</text>
+<g transform="translate(463.0 335.0)"><title>yes</title><circle r="9" fill="var(--success)"/><path d="M -3.6 0.27 L -1.17 2.88 L 3.78 -2.6999999999999997" fill="none" stroke="var(--canvas)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></g>
+<g transform="translate(569.0 335.0)"><title>no</title><circle r="9" fill="none" stroke="var(--danger)" stroke-width="2"/><path d="M -4.05 0 L 4.05 0" stroke="var(--danger)" stroke-width="2" stroke-linecap="round"/></g>
+<g transform="translate(675.0 335.0)"><title>no</title><circle r="9" fill="none" stroke="var(--danger)" stroke-width="2"/><path d="M -4.05 0 L 4.05 0" stroke="var(--danger)" stroke-width="2" stroke-linecap="round"/></g>
+<g transform="translate(781.0 335.0)"><title>no</title><circle r="9" fill="none" stroke="var(--danger)" stroke-width="2"/><path d="M -4.05 0 L 4.05 0" stroke="var(--danger)" stroke-width="2" stroke-linecap="round"/></g>
+<g transform="translate(887.0 335.0)"><title>no</title><circle r="9" fill="none" stroke="var(--danger)" stroke-width="2"/><path d="M -4.05 0 L 4.05 0" stroke="var(--danger)" stroke-width="2" stroke-linecap="round"/></g>
+<text x="30" y="374" class="row">Per-effect reversibility class</text>
+<g transform="translate(463.0 369.0)"><title>yes</title><circle r="9" fill="var(--success)"/><path d="M -3.6 0.27 L -1.17 2.88 L 3.78 -2.6999999999999997" fill="none" stroke="var(--canvas)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></g>
+<g transform="translate(569.0 369.0)"><title>no</title><circle r="9" fill="none" stroke="var(--danger)" stroke-width="2"/><path d="M -4.05 0 L 4.05 0" stroke="var(--danger)" stroke-width="2" stroke-linecap="round"/></g>
+<g transform="translate(675.0 369.0)"><title>no</title><circle r="9" fill="none" stroke="var(--danger)" stroke-width="2"/><path d="M -4.05 0 L 4.05 0" stroke="var(--danger)" stroke-width="2" stroke-linecap="round"/></g>
+<g transform="translate(781.0 369.0)"><title>no</title><circle r="9" fill="none" stroke="var(--danger)" stroke-width="2"/><path d="M -4.05 0 L 4.05 0" stroke="var(--danger)" stroke-width="2" stroke-linecap="round"/></g>
+<g transform="translate(887.0 369.0)"><title>no</title><circle r="9" fill="none" stroke="var(--danger)" stroke-width="2"/><path d="M -4.05 0 L 4.05 0" stroke="var(--danger)" stroke-width="2" stroke-linecap="round"/></g>
+<text x="30" y="408" class="row">Whole-mission rollback + compensation</text>
+<g transform="translate(463.0 403.0)"><title>yes</title><circle r="9" fill="var(--success)"/><path d="M -3.6 0.27 L -1.17 2.88 L 3.78 -2.6999999999999997" fill="none" stroke="var(--canvas)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></g>
+<g transform="translate(569.0 403.0)"><title>no</title><circle r="9" fill="none" stroke="var(--danger)" stroke-width="2"/><path d="M -4.05 0 L 4.05 0" stroke="var(--danger)" stroke-width="2" stroke-linecap="round"/></g>
+<g transform="translate(675.0 403.0)"><title>no</title><circle r="9" fill="none" stroke="var(--danger)" stroke-width="2"/><path d="M -4.05 0 L 4.05 0" stroke="var(--danger)" stroke-width="2" stroke-linecap="round"/></g>
+<g transform="translate(781.0 403.0)"><title>no</title><circle r="9" fill="none" stroke="var(--danger)" stroke-width="2"/><path d="M -4.05 0 L 4.05 0" stroke="var(--danger)" stroke-width="2" stroke-linecap="round"/></g>
+<g transform="translate(887.0 403.0)"><title>no</title><circle r="9" fill="none" stroke="var(--danger)" stroke-width="2"/><path d="M -4.05 0 L 4.05 0" stroke="var(--danger)" stroke-width="2" stroke-linecap="round"/></g>
+<text x="30" y="442" class="row">Explainable denial + provenance graph</text>
+<g transform="translate(463.0 437.0)"><title>yes</title><circle r="9" fill="var(--success)"/><path d="M -3.6 0.27 L -1.17 2.88 L 3.78 -2.6999999999999997" fill="none" stroke="var(--canvas)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></g>
+<g transform="translate(569.0 437.0)"><title>no</title><circle r="9" fill="none" stroke="var(--danger)" stroke-width="2"/><path d="M -4.05 0 L 4.05 0" stroke="var(--danger)" stroke-width="2" stroke-linecap="round"/></g>
+<g transform="translate(675.0 437.0)"><title>no</title><circle r="9" fill="none" stroke="var(--danger)" stroke-width="2"/><path d="M -4.05 0 L 4.05 0" stroke="var(--danger)" stroke-width="2" stroke-linecap="round"/></g>
+<g transform="translate(781.0 437.0)"><title>no</title><circle r="9" fill="none" stroke="var(--danger)" stroke-width="2"/><path d="M -4.05 0 L 4.05 0" stroke="var(--danger)" stroke-width="2" stroke-linecap="round"/></g>
+<g transform="translate(887.0 437.0)"><title>partial</title><path d="M 0 -9 A 9 9 0 0 0 0 9 Z" fill="var(--attention)"/><circle r="9" fill="none" stroke="var(--attention)" stroke-width="2"/></g>
+<text x="30" y="476" class="row">Intent-scoped authority + leases</text>
+<g transform="translate(463.0 471.0)"><title>yes</title><circle r="9" fill="var(--success)"/><path d="M -3.6 0.27 L -1.17 2.88 L 3.78 -2.6999999999999997" fill="none" stroke="var(--canvas)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></g>
+<g transform="translate(569.0 471.0)"><title>partial</title><path d="M 0 -9 A 9 9 0 0 0 0 9 Z" fill="var(--attention)"/><circle r="9" fill="none" stroke="var(--attention)" stroke-width="2"/></g>
+<g transform="translate(675.0 471.0)"><title>partial</title><path d="M 0 -9 A 9 9 0 0 0 0 9 Z" fill="var(--attention)"/><circle r="9" fill="none" stroke="var(--attention)" stroke-width="2"/></g>
+<g transform="translate(781.0 471.0)"><title>partial</title><path d="M 0 -9 A 9 9 0 0 0 0 9 Z" fill="var(--attention)"/><circle r="9" fill="none" stroke="var(--attention)" stroke-width="2"/></g>
+<g transform="translate(887.0 471.0)"><title>no</title><circle r="9" fill="none" stroke="var(--danger)" stroke-width="2"/><path d="M -4.05 0 L 4.05 0" stroke="var(--danger)" stroke-width="2" stroke-linecap="round"/></g>
+<text x="30" y="510" class="row">Agent as a first-class principal</text>
+<g transform="translate(463.0 505.0)"><title>yes</title><circle r="9" fill="var(--success)"/><path d="M -3.6 0.27 L -1.17 2.88 L 3.78 -2.6999999999999997" fill="none" stroke="var(--canvas)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></g>
+<g transform="translate(569.0 505.0)"><title>no</title><circle r="9" fill="none" stroke="var(--danger)" stroke-width="2"/><path d="M -4.05 0 L 4.05 0" stroke="var(--danger)" stroke-width="2" stroke-linecap="round"/></g>
+<g transform="translate(675.0 505.0)"><title>no</title><circle r="9" fill="none" stroke="var(--danger)" stroke-width="2"/><path d="M -4.05 0 L 4.05 0" stroke="var(--danger)" stroke-width="2" stroke-linecap="round"/></g>
+<g transform="translate(781.0 505.0)"><title>no</title><circle r="9" fill="none" stroke="var(--danger)" stroke-width="2"/><path d="M -4.05 0 L 4.05 0" stroke="var(--danger)" stroke-width="2" stroke-linecap="round"/></g>
+<g transform="translate(887.0 505.0)"><title>no</title><circle r="9" fill="none" stroke="var(--danger)" stroke-width="2"/><path d="M -4.05 0 L 4.05 0" stroke="var(--danger)" stroke-width="2" stroke-linecap="round"/></g>
+<text x="30" y="543" class="grp">HARDENING</text>
+<text x="111.32000000000001" y="543" class="grpn">where Dezh concedes today</text>
+<text x="30" y="576" class="row">IOMMU-enforced DMA</text>
+<g transform="translate(463.0 571.0)"><title>no</title><circle r="9" fill="none" stroke="var(--danger)" stroke-width="2"/><path d="M -4.05 0 L 4.05 0" stroke="var(--danger)" stroke-width="2" stroke-linecap="round"/></g>
+<g transform="translate(569.0 571.0)"><title>partial</title><path d="M 0 -9 A 9 9 0 0 0 0 9 Z" fill="var(--attention)"/><circle r="9" fill="none" stroke="var(--attention)" stroke-width="2"/></g>
+<g transform="translate(675.0 571.0)"><title>yes</title><circle r="9" fill="var(--success)"/><path d="M -3.6 0.27 L -1.17 2.88 L 3.78 -2.6999999999999997" fill="none" stroke="var(--canvas)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></g>
+<g transform="translate(781.0 571.0)"><title>yes</title><circle r="9" fill="var(--success)"/><path d="M -3.6 0.27 L -1.17 2.88 L 3.78 -2.6999999999999997" fill="none" stroke="var(--canvas)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></g>
+<g transform="translate(887.0 571.0)"><title>no</title><circle r="9" fill="none" stroke="var(--danger)" stroke-width="2"/><path d="M -4.05 0 L 4.05 0" stroke="var(--danger)" stroke-width="2" stroke-linecap="round"/></g>
+<text x="30" y="610" class="row">Signed packages (+ publisher attenuation)</text>
+<g transform="translate(463.0 605.0)"><title>yes</title><circle r="9" fill="var(--success)"/><path d="M -3.6 0.27 L -1.17 2.88 L 3.78 -2.6999999999999997" fill="none" stroke="var(--canvas)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></g>
+<g transform="translate(569.0 605.0)"><title>no</title><circle r="9" fill="none" stroke="var(--danger)" stroke-width="2"/><path d="M -4.05 0 L 4.05 0" stroke="var(--danger)" stroke-width="2" stroke-linecap="round"/></g>
+<g transform="translate(675.0 605.0)"><title>partial</title><path d="M 0 -9 A 9 9 0 0 0 0 9 Z" fill="var(--attention)"/><circle r="9" fill="none" stroke="var(--attention)" stroke-width="2"/></g>
+<g transform="translate(781.0 605.0)"><title>yes</title><circle r="9" fill="var(--success)"/><path d="M -3.6 0.27 L -1.17 2.88 L 3.78 -2.6999999999999997" fill="none" stroke="var(--canvas)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></g>
+<g transform="translate(887.0 605.0)"><title>no</title><circle r="9" fill="none" stroke="var(--danger)" stroke-width="2"/><path d="M -4.05 0 L 4.05 0" stroke="var(--danger)" stroke-width="2" stroke-linecap="round"/></g>
+<g transform="translate(29 652)"><title>yes</title><circle r="7" fill="var(--success)"/><path d="M -2.8000000000000003 0.21 L -0.91 2.24 L 2.94 -2.1" fill="none" stroke="var(--canvas)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></g>
+<text x="43" y="656" class="leg">yes</text>
+<g transform="translate(94.5 652)"><title>partial</title><path d="M 0 -7 A 7 7 0 0 0 0 7 Z" fill="var(--attention)"/><circle r="7" fill="none" stroke="var(--attention)" stroke-width="2"/></g>
+<text x="108.5" y="656" class="leg">partial</text>
+<g transform="translate(194.0 652)"><title>no</title><circle r="7" fill="none" stroke="var(--danger)" stroke-width="2"/><path d="M -3.15 0 L 3.15 0" stroke="var(--danger)" stroke-width="2" stroke-linecap="round"/></g>
+<text x="208.0" y="656" class="leg">no</text>
+<text x="940" y="656" class="leg" text-anchor="end">Marks are readable without colour: filled / half / open.</text>
+<text x="20" y="678" class="foot">Dezh is a research prototype (QEMU + bootable x86_64 ISO). Sources: docs/RELATED_WORK.md and docs/SECURITY_MODEL.md#threat-model</text>
 </svg>

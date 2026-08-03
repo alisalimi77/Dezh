@@ -44,9 +44,14 @@ jobs:
       - name: Check documentation links and sprawl
         run: python3 tools/ci/check_docs.py
 
+      - name: Check docs/assets diagrams match their generator
+        run: python3 tools/docs/build_diagrams.py --check
+
       - name: Compile Python review tooling
         run: >
           python3 -m py_compile
+          tools/docs/build_diagrams.py
+          tools/docs/diagram_tokens.py
           tools/review/run_full_review.py
           tools/review/build_release_artifacts.py
           tools/review/scan_public.py
