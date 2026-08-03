@@ -483,7 +483,16 @@ flowchart TB
     I --> G4{"write into a namespace<br/>requiring endorsement?"}
     G4 -->|not endorsed| D4["DENIED: would become trusted state"]
     G4 -->|after endorse| W["write permitted"]
+
+    classDef deny stroke:#e5534b,stroke-width:2.5px;
+    classDef ledger stroke:#8250df,stroke-width:2.5px;
+    class D1,D2,D3,D4 deny
+    class L ledger
 ```
+
+Across every diagram here a red border marks a refusal and a purple one marks
+something the ledger now carries. Only the stroke is set, so both borders keep
+their meaning whichever theme GitHub renders the page in.
 
 ### Boot And Service Graph
 
@@ -553,19 +562,19 @@ Lifecycle rules:
 ### Disk Layout
 
 ```mermaid
-flowchart LR
-    S0["sector 0\ninstall marker"] --> S2["sector 2\nCairn v0 current"]
-    S2 --> S3["sector 3\nCairn v0 previous"]
-    S3 --> S4["sector 4\nroot metadata"]
-    S4 --> S5["sectors 5..7\napp registry v0"]
-    S5 --> S24["sector 24\npackage marker"]
-    S24 --> S25["sectors 25..31\npackage registry"]
-    S25 --> S32["sectors 32..39\npackage journal"]
-    S32 --> S64["sectors 64..575\nactive package blobs"]
-    S64 --> P["sectors 576..1087\nprevious blobs"]
-    P --> ST["sectors 1088..1599\nstage blobs"]
-    ST --> C1["sector 1600\nCairn v1 superblock"]
-    C1 --> C2["sectors 1601..1855\nCairn v1 commit log"]
+flowchart TB
+    S0["sector 0<br/>install marker"] --> S2["sector 2<br/>Cairn v0 current"]
+    S2 --> S3["sector 3<br/>Cairn v0 previous"]
+    S3 --> S4["sector 4<br/>root metadata"]
+    S4 --> S5["sectors 5..7<br/>app registry v0"]
+    S5 --> S24["sector 24<br/>package marker"]
+    S24 --> S25["sectors 25..31<br/>package registry"]
+    S25 --> S32["sectors 32..39<br/>package journal"]
+    S32 --> S64["sectors 64..575<br/>active package blobs"]
+    S64 --> P["sectors 576..1087<br/>previous blobs"]
+    P --> ST["sectors 1088..1599<br/>stage blobs"]
+    ST --> C1["sector 1600<br/>Cairn v1 superblock"]
+    C1 --> C2["sectors 1601..1855<br/>Cairn v1 commit log"]
 ```
 
 The package store is intentionally small and inspectable in v0:
@@ -588,8 +597,8 @@ flowchart RL
         Next["next free slot"]
     end
 
-    C2["commit slot 2\nvalue: bad-write\nparent: 1\nhash + actor"] --> C1["commit slot 1\nvalue: note-v2\nparent: 0\nhash + actor"]
-    C1 --> C0["commit slot 0\nvalue: note-v1\nparent: none\nhash + actor"]
+    C2["commit slot 2<br/>value: bad-write<br/>parent: 1<br/>hash + actor"] --> C1["commit slot 1<br/>value: note-v2<br/>parent: 0<br/>hash + actor"]
+    C1 --> C0["commit slot 0<br/>value: note-v1<br/>parent: none<br/>hash + actor"]
 
     NSnote -. before rollback .-> C2
     NSnote == after rollback 1 ==> C1
@@ -628,10 +637,10 @@ bindings differ per ISA.
 
 ```mermaid
 flowchart TB
-    Source[".dzs source (SDK assembler)"] --> IR["Dezh-IR bytecode\n(verified, capability-gated)"]
-    IR --> Engine["dezh-core engine\n(one shared no_std crate)"]
-    Engine --> RV["RISC-V kernel host\nprint → UART, cairn → storage daemon"]
-    Engine --> X86["x86_64 kernel host\nprint → COM1"]
+    Source[".dzs source (SDK assembler)"] --> IR["Dezh-IR bytecode<br/>(verified, capability-gated)"]
+    IR --> Engine["dezh-core engine<br/>(one shared no_std crate)"]
+    Engine --> RV["RISC-V kernel host<br/>print → UART, cairn → storage daemon"]
+    Engine --> X86["x86_64 kernel host<br/>print → COM1"]
 ```
 
 ### Authority And Denial
@@ -644,6 +653,11 @@ flowchart TB
     Route --> Effect["Effect record or command result"]
     CapCheck -->|denied| Denial["Structured denial"]
     Denial --> Explain["why-denied direction"]
+
+    classDef deny stroke:#e5534b,stroke-width:2.5px;
+    classDef ledger stroke:#8250df,stroke-width:2.5px;
+    class Denial deny
+    class Effect ledger
 ```
 
 The current implementation has capability-gated operations and audit events.

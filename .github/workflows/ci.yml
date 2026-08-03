@@ -12,6 +12,13 @@ on:
   # Allow re-running CI by hand (GitHub occasionally drops a push event).
   workflow_dispatch:
 
+# CI only ever reads the tree. Releasing needs a repository-wide default of
+# read-and-write so the release job can create a release and push its image;
+# stating the floor here keeps that default from silently widening this
+# workflow's token too.
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
 
