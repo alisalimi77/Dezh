@@ -33,7 +33,14 @@ mod ocap;
 mod pkg;
 mod proc;
 mod service;
+mod vblk;
 
+use vblk::{
+    prepare_virtio_input_bytes, read_virtio_output_sector, run_registered_virtio_client,
+    run_registered_virtio_client_ns, run_registered_virtio_client_status,
+    run_registered_virtio_sector_status, run_virtio_blk_daemon_demo,
+    run_virtio_client_ns_raw, run_virtio_no_grant_probe, virtio_dma_pa,
+};
 use service::{
     build_service_registry, ensure_virtio_block_service, print_services,
     refresh_virtio_service_state,
@@ -2995,157 +3002,6 @@ fn run_ipc_typed_demo() {
         ipc_status_name(IPC_STATUS_TIMEOUT),
         ipc_status_name(IPC_STATUS_DENIED)
     );
-}
-
-fn virtio_dma_pa() -> usize {
-    core::ptr::addr_of!(VIRTIO_DMA) as usize
-}
-
-fn prepare_virtio_input(text: &str) -> usize {
-    let bytes = text.as_bytes();
-    let n = bytes.len().min(511);
-    unsafe {
-        let base = core::ptr::addr_of_mut!(VIRTIO_DMA) as *mut u8;
-        core::ptr::write_bytes(base.add(VIRTIO_INPUT_OFF), 0, 512);
-        core::ptr::copy_nonoverlapping(bytes.as_ptr(), base.add(VIRTIO_INPUT_OFF), n);
-    }
-    n
-}
-
-fn prepare_virtio_input_bytes(bytes: &[u8]) {
-    let n = bytes.len().min(512);
-    unsafe {
-        let base = core::ptr::addr_of_mut!(VIRTIO_DMA) as *mut u8;
-        core::ptr::write_bytes(base.add(VIRTIO_INPUT_OFF), 0, 512);
-        core::ptr::copy_nonoverlapping(bytes.as_ptr(), base.add(VIRTIO_INPUT_OFF), n);
-    }
-}
-
-pub(crate) fn read_virtio_output_sector(out: &mut [u8]) {
-    let n = out.len().min(512);
-    unsafe {
-        let base = core::ptr::addr_of!(VIRTIO_DMA) as *const u8;
-        core::ptr::copy_nonoverlapping(base.add(VIRTIO_DATA_OFF), out.as_mut_ptr(), n);
-    }
-}
-
-fn run_virtio_no_grant_probe() {
-    run_foreground_processes(&[ProcessSpec::new(
-        VIRTIO_BLK_ELF,
-        TASK_PRINT,
-        BLK_OP_NO_GRANT_PROBE,
-    )]);
-}
-
-fn run_registered_virtio_client(plan: &KernelPlan, req: usize, input: &str) {
-    let Some(daemon) = ensure_virtio_block_service(plan) else {
-        kprintln!("[services] virtio-block unavailable; command failed cleanly");
-        return;
-    };
-    let input_len = prepare_virtio_input(input);
-    let client_caps = TASK_PRINT | TASK_IPC | TASK_BLOCK_READ | TASK_BLOCK_WRITE;
-    kprintln!(
-        "[services] resolved service virtio-block task={daemon}; launching foreground client"
-    );
-    run_foreground_processes(&[
-        ProcessSpec::new(VIRTIO_BLK_ELF, client_caps, BLK_OP_CLIENT_REQ)
-            .args(daemon, input_len, req)
-            .virtio_dma(),
-    ]);
-    refresh_virtio_service_state();
-}
-
-/// Like `run_registered_virtio_client_status`, but the client is spawned with
-/// `extra_caps` on top of the base client set. Used for Cairn namespace caps:
-/// the console (operator) decides which namespace authority the client holds,
-/// and the kernel attests exactly that to the storage daemon.
-fn run_registered_virtio_client_ns(
-    plan: &KernelPlan,
-    req: usize,
-    input: &str,
-    extra_caps: usize,
-) -> usize {
-    let input_len = prepare_virtio_input(input);
-    run_virtio_client_ns_raw(plan, req, input_len, extra_caps)
-}
-
-/// Lowest-level Cairn client launch: the DMA input window is already prepared
-/// by the caller (string or raw bytes).
-fn run_virtio_client_ns_raw(
-    plan: &KernelPlan,
-    req: usize,
-    input_len: usize,
-    extra_caps: usize,
-) -> usize {
-    let Some(daemon) = ensure_virtio_block_service(plan) else {
-        kprintln!("[services] virtio-block unavailable; command failed cleanly");
-        return SYS_DENIED;
-    };
-    let client_caps = TASK_PRINT | TASK_IPC | TASK_BLOCK_READ | TASK_BLOCK_WRITE | extra_caps;
-    run_foreground_processes(&[
-        ProcessSpec::new(VIRTIO_BLK_ELF, client_caps, BLK_OP_CLIENT_REQ)
-            .args(daemon, input_len, req)
-            .virtio_dma(),
-    ]);
-    refresh_virtio_service_state();
-    unsafe { TEXIT[FIRST_FOREGROUND_TASK] }
-}
-
-fn run_registered_virtio_client_status(plan: &KernelPlan, req: usize, input: &str) -> usize {
-    let Some(daemon) = ensure_virtio_block_service(plan) else {
-        kprintln!("[services] virtio-block unavailable; command failed cleanly");
-        return SYS_DENIED;
-    };
-    let input_len = prepare_virtio_input(input);
-    let client_caps = TASK_PRINT | TASK_IPC | TASK_BLOCK_READ | TASK_BLOCK_WRITE;
-    kprintln!(
-        "[services] resolved service virtio-block task={daemon}; launching foreground client"
-    );
-    run_foreground_processes(&[
-        ProcessSpec::new(VIRTIO_BLK_ELF, client_caps, BLK_OP_CLIENT_REQ)
-            .args(daemon, input_len, req)
-            .virtio_dma(),
-    ]);
-    refresh_virtio_service_state();
-    unsafe { TEXIT[FIRST_FOREGROUND_TASK] }
-}
-
-pub(crate) fn run_registered_virtio_sector_status(
-    plan: &KernelPlan,
-    req: usize,
-    sector: usize,
-    input: Option<&[u8]>,
-) -> usize {
-    let Some(daemon) = ensure_virtio_block_service(plan) else {
-        kprintln!("[services] virtio-block unavailable; command failed cleanly");
-        return SYS_DENIED;
-    };
-    if let Some(bytes) = input {
-        prepare_virtio_input_bytes(bytes);
-    }
-    let client_caps = TASK_PRINT | TASK_IPC | TASK_BLOCK_READ | TASK_BLOCK_WRITE;
-    run_foreground_processes(&[
-        ProcessSpec::new(VIRTIO_BLK_ELF, client_caps, BLK_OP_CLIENT_REQ)
-            .args(daemon, sector, req)
-            .virtio_dma(),
-    ]);
-    refresh_virtio_service_state();
-    unsafe { TEXIT[FIRST_FOREGROUND_TASK] }
-}
-
-fn run_virtio_blk_daemon_demo(plan: &KernelPlan) {
-    let Some(daemon) = ensure_virtio_block_service(plan) else {
-        kprintln!("[services] virtio-block unavailable; daemon demo failed cleanly");
-        return;
-    };
-    let client_caps = TASK_PRINT | TASK_IPC | TASK_BLOCK_READ | TASK_BLOCK_WRITE;
-    kprintln!("[services] vblkd uses registered daemon task={daemon}; client has IPC+DMA only");
-    run_foreground_processes(&[
-        ProcessSpec::new(VIRTIO_BLK_ELF, client_caps, BLK_OP_CLIENT_DEMO)
-            .args(daemon, 0, 0)
-            .virtio_dma(),
-    ]);
-    refresh_virtio_service_state();
 }
 
 // --- Cairn v1 console front-end -------------------------------------------------
