@@ -5,8 +5,6 @@
 //! but every sector read/write goes through the registered user-space
 //! `virtio-block` daemon.
 
-use core::fmt::Write;
-
 use crate::{kprint, kprintln};
 use dezh_core::{b64, dzp, ir, sig};
 use dezh_core::mcap::{cap_delta, ir_caps_from, parse_mcaps, task_caps_from};
