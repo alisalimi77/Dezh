@@ -3,14 +3,13 @@
 //! Exercises `ocap::ns` on the real storage path: a commit is refused by the
 //! ocap generation check before it ever reaches the daemon.
 
-use crate::ocap::ns::{ns_authority_init, ns_authority_ok, NS_HANDLE, NS_TABLE};
+use crate::ocap::ns::{ns_authority_init, ns_authority_ok, ns_remint_local, ns_revoke_local};
 use crate::{cairn_cmd_commit, kprintln, record_event, KernelPlan};
 
 /// Prove the migration: a namespace capability revoked at runtime stops the live
 /// storage path (a commit is refused by the ocap check before it reaches the
 /// daemon), and re-granting restores it.
 pub(crate) fn run_nsrevoke_demo(plan: &KernelPlan) {
-    use dezh_core::ocap::{R_DELEGATE, R_READ, R_WRITE};
     const CALC: usize = 2;
     ns_authority_init();
     kprintln!("[nsrevoke-demo] runtime revocation of a LIVE namespace capability (ocap generation), enforced on the storage path");
@@ -18,12 +17,12 @@ pub(crate) fn run_nsrevoke_demo(plan: &KernelPlan) {
     cairn_cmd_commit(plan, "calc nsrev-before");
     let live1 = ns_authority_ok(CALC);
     kprintln!("[nsrevoke-demo] 2/4 ns-revoke calc (bump the generation):");
-    unsafe { (*NS_TABLE.get()).revoke(CALC) };
+    ns_revoke_local(CALC);
     kprintln!("[nsrevoke-demo] 3/4 commit after revoke -> the ocap check refuses it before it reaches the daemon:");
     cairn_cmd_commit(plan, "calc nsrev-blocked");
     let blocked = !ns_authority_ok(CALC);
     kprintln!("[nsrevoke-demo] 4/4 ns-grant calc (re-mint) then commit again:");
-    unsafe { (*NS_HANDLE.get())[CALC] = (*NS_TABLE.get()).mint(CALC, R_READ | R_WRITE | R_DELEGATE) };
+    ns_remint_local(CALC);
     cairn_cmd_commit(plan, "calc nsrev-after");
     let live2 = ns_authority_ok(CALC);
     let pass = live1 && blocked && live2;

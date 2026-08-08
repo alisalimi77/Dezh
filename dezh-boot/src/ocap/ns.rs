@@ -14,9 +14,10 @@
 //! into the Cairn IPC path for that second write - the one inbound edge this
 //! module does not own.
 //!
-//! The table and the handle array are `pub(crate)` for one reason only:
-//! `run_nsrevoke_demo` still pokes them directly from main.rs. That demo goes
-//! to `demos/` and these two go private with it.
+//! The table and the handle array are private. Anything that needs to move a
+//! namespace's generation without also writing through to the store goes via
+//! `ns_revoke_local` / `ns_remint_local`, which exist for exactly one caller -
+//! the demo - and say in their names that they are the half-operation.
 //!
 //! Boot hart only: namespace authority is minted, checked and revoked from the
 //! console and from the storage IPC path, both of which run on the boot hart.
@@ -29,9 +30,9 @@ use crate::{
 
 // Boot hart only: namespace authority is minted, checked and revoked from the
 // console and from the storage IPC path, both of which run on the boot hart.
-pub(crate) static NS_TABLE: Global<dezh_core::ocap::CapTable<8>> =
+static NS_TABLE: Global<dezh_core::ocap::CapTable<8>> =
     Global::new(dezh_core::ocap::CapTable::new());
-pub(crate) static NS_HANDLE: Global<[Option<dezh_core::ocap::Cap>; 8]> = Global::new([None; 8]);
+static NS_HANDLE: Global<[Option<dezh_core::ocap::Cap>; 8]> = Global::new([None; 8]);
 static NS_INIT: Global<bool> = Global::new(false);
 
 pub(crate) fn ns_authority_init() {
@@ -68,6 +69,23 @@ pub(crate) fn ns_authority_live(ns: usize) -> bool {
     let name = CAIRN_NS_NAMES.get(ns).copied().unwrap_or("?");
     kprintln!("[cap] DENIED: namespace '{name}' capability was REVOKED (ns-grant {name} to re-mint) -- ocap generation stale");
     false
+}
+
+/// Bump a namespace's generation in the kernel table ONLY, without the
+/// write-through to the store that [`ns_revoke`] also performs. The demo wants
+/// to show the ocap check refusing an operation, not to leave a revocation
+/// persisted in the superblock after it finishes.
+pub(crate) fn ns_revoke_local(ns: usize) {
+    ns_authority_init();
+    unsafe { (*NS_TABLE.get()).revoke(ns) };
+}
+
+/// The inverse of [`ns_revoke_local`]: re-mint the handle at the current
+/// generation, again without touching the store.
+pub(crate) fn ns_remint_local(ns: usize) {
+    use dezh_core::ocap::{R_DELEGATE, R_READ, R_WRITE};
+    ns_authority_init();
+    unsafe { (*NS_HANDLE.get())[ns] = (*NS_TABLE.get()).mint(ns, R_READ | R_WRITE | R_DELEGATE) };
 }
 
 pub(crate) fn ns_revoke(plan: &KernelPlan, arg: &str) {

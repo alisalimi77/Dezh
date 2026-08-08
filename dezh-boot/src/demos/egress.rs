@@ -6,7 +6,9 @@
 //! where they were always going.
 
 use crate::difc::declassify;
-use crate::net::marz::{marz_dest_authority, marz_dest_cap, marz_send_to, run_marz_send, OP_EGRESS};
+use crate::net::marz::{
+    marz_dest_authority, marz_egress_reset_all, marz_send_to, run_marz_send,
+};
 use crate::ocap::device::{dev_authority_init, dev_authority_ok, dev_authority_set, DEV_OBJ_NET};
 use crate::pkg;
 use crate::{
@@ -19,7 +21,7 @@ use crate::{
 /// and is REFUSED by rollback - because it genuinely cannot be undone.
 pub(crate) fn run_marz_effect_demo(plan: &KernelPlan) {
     declassify();
-    unsafe { OP_EGRESS = marz_dest_cap(0) | marz_dest_cap(1) };
+    marz_egress_reset_all();
     kprintln!("[marz-effect-demo] a real send becomes an irreversible, attributable effect");
     let Some((id, _ceiling)) = pkg::open_intent("writer") else {
         kprintln!("[marz-effect-demo] FAIL: no free intent slot");
@@ -61,7 +63,7 @@ fn u16_to_str(v: u16, buf: &mut [u8; 8]) -> &str {
 /// export rule, both enforced before anything reaches the wire.
 pub(crate) fn run_marz_demo(plan: &KernelPlan) {
     declassify();
-    unsafe { OP_EGRESS = marz_dest_cap(0) | marz_dest_cap(1) };
+    marz_egress_reset_all();
     kprintln!("[marz-demo] egress authority names a DESTINATION, and export obeys information flow");
 
     kprintln!("[marz-demo] 1/4 authorized, untainted -> send to 'ops':");
