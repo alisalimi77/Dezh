@@ -25,6 +25,7 @@ true today, so a reviewer never has to guess.
 | Isolation under parallelism | Each task gets its **own address space** (only its stack region is U-mapped), so concurrent tasks on different harts cannot reach each other's memory: an intruder page-faults and dies on its own hart while its neighbour runs on (`smp-isolate`, `ISOLATION-OK`). |
 | Information flow, both directions | Secrecy **and** integrity are enforced on the live storage path. Reading a labelled namespace raises secrecy so a secret cannot be written down or exported (`taintflow-demo`); consuming **network input** lowers integrity so unvalidated bytes cannot become trusted state (`ingress-demo`, `INGRESS-OK`). The escapes are explicit, privileged and recorded: `declassify` for secrecy, `endorse` for integrity — and neither grants the other. |
 | Bidirectional networking | The Marz daemon **receives**, not just transmits: it offers the NIC receive buffers, blocks on the device interrupt, resolves the destination by **ARP**, and completes a real **ICMP echo** exchange, matching the reply by id and sequence (`marz-ping`, `NET-RX-OK`). CI decodes the packet capture structurally and asserts the echo left and the reply came back. |
+| Engineering baseline (W10) | Every tree lints with `-D warnings` on a **pinned** toolchain, so a regression cannot land quietly and "green locally" cannot disagree with CI. No reference to a `static mut` survives anywhere in the kernel — the four clusters that had them (device authority, namespace authority, information flow, the event ring) now go through a pointer, which matters because a `&mut` to a static two harts can reach is UB and secondary harts run real tasks. The superseded Step 1..9 prototypes moved to `spikes/`, off the shipping path. Manifest capability derivation — the narrowest security decision in the system — is unit-tested exhaustively in `dezh_core::mcap` rather than only observed in a transcript. |
 
 ## What is measured, and how honestly
 
@@ -79,7 +80,7 @@ true today, so a reviewer never has to guess.
   a secondary yet) — and the *console's* scheduler with its task table, IPC
   mailboxes and frame allocator is still single-threaded on the boot hart and not
   under the lock, so daemons and console tasks are not yet dispatchable on any hart.
-  Merging the two into one lock-protected scheduler is the next milestone (see
+  Merging the two into one lock-protected scheduler is **W13** (see
   [ROADMAP.md](ROADMAP.md)).
 - No production installer, no side-channel hardening, no formal verification.
 - **The live capabilities are a per-task bitmask; the object-capability

@@ -322,6 +322,255 @@ Both are now addressed on RISC-V, in order:
   lock. Merging the two schedulers into one lock-protected structure, so every task
   in the system (daemons included) is dispatchable on any hart, is the next step.
 
+##### W10 — A foundation that can be developed on
+
+W1–W9 proved the mechanisms. W10 does not add one: it removes the four things
+that made the *next* ten commits cost more than the last ten did.
+
+The problem was measurable. The kernel that ships had **no unit tests** — all
+110 host tests belonged to crates that ran nowhere. `dezh-boot/src/main.rs` was
+**8,722 lines** in one file with 44 `static mut`, 184 `unsafe` blocks and a
+~200-arm console. The root workspace carried **eight superseded prototypes** and
+194 crates of `wasmtime` that nothing shipping needed. And **nothing linted the
+kernel at all**, so its 103 warnings could only grow.
+
+Guardrail for the whole workstream: **no behaviour change**. Every step is
+verified by the *existing* QEMU legs passing unchanged. A step that needs a
+smoke-test edit is a step that got something wrong.
+
+- **Lint ratchet. — DONE.** `cargo clippy -- -D warnings` runs over all five
+  trees (host workspace `--all-targets`, `dezh-core`, `spikes`, `dezh-boot`,
+  `dezh-boot-x86`), and the 103 existing warnings are gone. Most were mechanical
+  (45 function-item-to-integer casts now go through `*const ()`). Four were
+  judgement calls kept with a reason at the site rather than silently "fixed":
+  `AP_OFF_KCTX` and `DEV_OBJ_BLOCK` look dead to the compiler but record the
+  ApCtx layout and the device enumeration; `COM1 + 0` on x86 is the UART
+  register map written out in order; three record-encoding signatures are wide
+  because they *are* the record's fields.
+- **`static mut` → pointer access. — DONE.** Taking `&`/`&mut` to a static a
+  second hart can reach is undefined behaviour, not a style preference, and
+  secondary harts have run real U-mode tasks since W9. All 37 reference-creating
+  sites sat in four clusters — device authority, namespace authority,
+  information flow, and the event ring — each now a `Global<T>` whose only
+  accessor returns `*mut T`, with the hart that may touch it stated at the
+  declaration. Clusters were converted whole; converting one static of a
+  three-static ring buffer would have been worse than either end state.
+- **Superseded spikes moved out. — DONE.** `spikes/` is its own workspace, off
+  the default CI path but still built, with a README recording what each of the
+  eight proved and which subsystem superseded it. The root lockfile went from
+  194 crates to 1. Deleting them was the other option and the wrong one: this
+  repository treats the record of *why* a design is what it is as part of the
+  work. What it must not do is sit in the shipping tree pretending to be live.
+- **First unit tests for kernel logic. — DONE (first slice).** Manifest
+  capability derivation — the narrowest, most load-bearing decision in the
+  system — moved to `dezh_core::mcap` and the kernel now calls it rather than
+  keeping a copy. Nine tests, two exhaustive over the whole manifest bit space
+  and every app name: granted authority never exceeds the manifest, an app
+  reaches its own Cairn namespace and no other, an unknown app name yields no
+  namespace rather than a default, and `cap_delta` reports escalation exactly.
+  Plus four `crc32` tests against the published IEEE 802.3 vectors — it had only
+  ever been exercised in a loop closed on itself. dezh-core: 39 → 52 tests.
+- **Pinned toolchain. — DONE.** The lint gate went red on its first real CI run,
+  on code nobody had touched: the contributor's machine had Rust 1.94, CI
+  resolved `stable` to 1.97, and 1.97 ships lints 1.94 does not know. Three
+  sites were genuinely better fixed than allowed (two `checked_div`, one
+  `sort_by_key`), but the fix is `rust-toolchain.toml`: new lints now arrive when
+  the version is deliberately bumped, and local matches CI by construction.
+  `-D warnings` on a floating `stable` turns Rust's release calendar into a
+  source of red builds, and a gate that fails for reasons unrelated to the
+  change under review is a gate people learn to route around.
+- **Split `main.rs` into modules. — NOT started.** See W11; it is P1.
+- **Edition 2024. — PARTIAL.** Two blockers cleared early because they are valid
+  in 2021 (`gen` is now a reserved keyword; five `extern "C"` blocks are
+  `unsafe extern`). The rest is measured, not guessed: 81 `#[unsafe(no_mangle)]`
+  conversions and 65 `unsafe_op_in_unsafe_fn` sites where an `unsafe fn` body is
+  no longer implicitly an unsafe block. See W15.
+
+---
+
+#### The order after W10, and why
+
+W11–W17 are ranked by one criterion: **how much other work each unblocks per
+unit of cost**, with a second look at where a serious reviewer actually pushes.
+Each entry states what it costs and what it is blocked on, because a roadmap
+that hides those is a wish list.
+
+One honest caveat about the ranking itself. W11 (the split) adds no capability
+and supports no new claim. It is first because every deep change after it lands
+in the code it cleans. **If the near-term goal is a funding pitch rather than a
+codebase**, swap W11 and W12: W12 is the only item that closes a gap in the
+thesis, and W11 can wait a cycle. That is a real fork, not a hedge — pick one
+deliberately.
+
+##### W11 — Split the kernel into modules (P1)
+
+`dezh-boot/src/main.rs` is 8,776 lines and 236 functions. The next three
+workstreams are each deep surgery on the task table and the trap path, and
+attempting them here is how a prototype of this quality stalls.
+
+The file already carries 32 section banners; they are the seams. Current sizes:
+
+| Module | Lines | Module | Lines |
+| --- | --- | --- | --- |
+| `console/` (the ~200-arm dispatcher) | 1,920 | `net/marz.rs` | 300 |
+| `sched.rs` (tasks, IPC, mailboxes) | 1,645 | `proc/loader.rs` | 295 |
+| `cairn/console.rs` | 1,340 | `mm/` (paging, frames) | 235 |
+| `smp/` (HSM, per-hart trap, run queue) | 1,155 | `difc.rs` | 210 |
+| `arch/entry.rs` (boot, trap, switch) | 380 | `ocap/device.rs` | 190 |
+| `demos/` | 370 | `cairn/service.rs` | 145 |
+| `syscall.rs` (ABI + task caps) | 200 | `ocap/ns.rs` | 120 |
+| | | `dev/plic.rs`, `dev/uart.rs`, `time.rs`, `mm/bump.rs` | 215 |
+
+Order: leaves first (`uart`, `plic`, `time`, `frames`), then single-inbound-edge
+(`marz`, `loader`, `difc`, `ocap/*`), then `cairn`, `smp`, `sched`, and
+`console` last — it depends on everything, so it falls out once the rest have
+real interfaces.
+
+Two rules keep it honest. **No logic edits in a split commit**; if something
+must change to compile, that is a separate commit. And the console dispatcher
+becomes a **table** of `(name, help, handler)`, so `help` is generated from the
+same source of truth and a new command is one entry rather than an arm at line
+8,400.
+
+It also carries W10's remaining debt for free: the 47 surviving `static mut` are
+mostly the scheduler tables (`TSTATE`, `MBOX`, `TCAPS`, `CURRENT`, ~150 sites)
+and they become `Global<T>` as they move, rather than being touched twice.
+
+*Cost:* large but mechanical; one module per commit.
+*Blocked on:* nothing.
+*Acceptance:* no file in `dezh-boot/src/` over 1,200 lines; `main.rs` is the
+boot sequence and nothing else; all QEMU legs byte-identical; zero remaining
+bare `static mut` in the moved modules.
+
+##### W12 — A real external effect (P2)
+
+The whole W8 argument is that Dezh attributes and reverses effects. Today every
+effect it can attribute lives inside Dezh's own storage. `email.send`,
+`prod.deploy` and the compensatable `api-key` are **modeled**. The repository
+says so honestly in three places — and that honesty does not remove the gap.
+
+This is the one item that closes a hole in the **thesis** rather than a
+limitation beside it, and it is what a funder or a programme reviewer attacks:
+*"a beautiful accounting system for effects that only exist inside your toy."*
+
+**Scope correction, recorded so it is not underestimated again.** An in-OS
+connector (git, HTTP) needs TCP, DNS and probably TLS. Dezh has ARP, ICMP and
+UDP egress. That is a workstream, not a step.
+
+The tractable design is a **host-side gateway**: a small daemon outside Dezh
+that Dezh reaches over existing UDP egress. It performs the real effect — a git
+commit, an HTTP call — and reports the outcome. The effect genuinely leaves the
+machine, carries a declared schema and a registered compensation, and lands on
+the Sand ledger like any other. The honesty boundary is stated up front: the
+connector is outside the TCB, and a compromised gateway can lie about what it
+did. That is a smaller and much more defensible claim than pretending the OS
+speaks git.
+
+*Cost:* medium. Effect schema, one connector, compensation registration, and the
+`marz` request/response path (which already receives).
+*Blocked on:* nothing — UDP egress and the ICMP receive path exist.
+*Acceptance:* an effect that changes state on a real external system, recorded
+with its intent, forecast by `sfar-plan`, and undone by a registered
+compensating action that also really runs — reproducible in CI against a local
+gateway process.
+
+##### W13 — One scheduler across all harts (P3)
+
+W9's own closing note. Tasks on secondary harts run to completion — no
+preemption, no migration, no timer armed there — and the console's scheduler,
+task table, IPC mailboxes and frame allocator are still single-hart and not
+under the lock. Merging them into one lock-protected structure, so every task in
+the system (daemons included) is dispatchable on any hart, is what moves Dezh
+from "several convincing demos" to "an operating system".
+
+*Cost:* large, and genuinely hard — this is real concurrency work.
+*Blocked on:* W11 in practice; the tables must be modules with owners first.
+*Acceptance:* a daemon migrates between harts under load; a task on a secondary
+is preempted by that hart's own timer; `smp-*` and every existing demo unchanged.
+
+##### W14 — Object-capabilities as the live substrate (P4)
+
+`docs/STATUS.md` calls this "the single largest planned change", and it is still
+ahead of us. Two steps landed before W10 — the Cairn namespace gate and the
+device gate are real `dezh_core::ocap` tables with generation-stamped
+revocation, proven at runtime by `nsrevoke-demo`, `agentrevoke-demo` and
+`dev-demo`. W10 only changed how those statics are *stored*; it moved the
+migration forward by nothing, and it would be easy to misread the diff as
+progress here.
+
+What remains is the substrate itself: the **per-task capability bitmask**. It is
+kernel-attested on every IPC message and attenuable on delegation — so not
+Linux-style ambient authority — but it is a bit per class, not an unforgeable
+per-object reference in the seL4/CHERI sense. The ocap tables today are a gate
+layered above it, not the thing authority is made of.
+
+*Cost:* large; it touches every syscall check and the IPC attestation path.
+*Blocked on:* W11 and W13 (the task table is the thing being changed).
+*Acceptance:* a task holds object handles, not a bitmask; delegation is a graph
+edge; `redteam`'s forgery escape still fails, now against a generation check.
+
+##### W15 — Edition 2024 and the rest of the kernel's tests (P5)
+
+The measured remainder: 81 attribute conversions and 65 `unsafe fn` bodies to
+wrap. Both are mechanical and both are much easier to review once W11 has split
+the trap and boot paths into their own files. The second half of W10.4 rides
+along here: Cairn commit-record encode/decode, the **255-slot boundary with no
+GC** (currently untested), the ticket lock's arithmetic, run-queue push/pop under
+simulated interleaving, and the Marz checksum — whose odd-length-body bug was
+found by hand in W9 and is exactly what a three-line test catches.
+
+*Cost:* medium, entirely mechanical.
+*Blocked on:* W11.
+*Acceptance:* every `Cargo.toml` on edition 2024 with no new `#[allow]`;
+`cargo test` inside `dezh-boot` runs in CI.
+
+##### W16 — x86_64 to system parity (P6)
+
+522 lines against 12,359. No timer, no returnable interrupt path, no scheduler,
+no disk, no drivers. F3 proves the *program format* is portable; it does not
+prove the system is. Until x86 has a runtime, "ISA is an implementation backend,
+not the identity" (D021) is a RISC-V thesis.
+
+This is also **the only practical route to an IOMMU** — see W17.
+
+*Cost:* very large. Timer, returnable IRQ path, scheduler, a virtio-pci disk
+driver, then Cairn.
+*Blocked on:* nothing technically; competes with everything for time.
+*Acceptance:* the x86 kernel runs the console, the scheduler and Cairn; the same
+`.dzp` installs and persists on both ISAs.
+
+##### W17 — IOMMU-enforced DMA isolation (P7)
+
+The most-attacked gap, and deliberately last, because it is **blocked rather
+than hard**. The investigation, recorded so it is not repeated:
+
+- **RISC-V: two prerequisites, neither about DMA.** QEMU 8.2 (the version CI and
+  the dev containers use) models no `riscv-iommu` device at all — only
+  `virtio-iommu`; the RISC-V IOMMU landed in QEMU 9.1. And every IOMMU in QEMU
+  sits on the **PCI** root complex, while Dezh drives legacy **virtio-mmio**
+  (`VIRTIO_BLK_MMIO_PA = 0x1000_1000`). Reaching an IOMMU here means first
+  migrating the block and NIC drivers to virtio-pci with MSI-X — a full
+  workstream that buys nothing on its own.
+- **x86: the hardware is there, the system is not.** `intel-iommu` (VT-d) and
+  `amd-iommu` are available and mature even on QEMU 8.2. But with no scheduler,
+  no disk and no drivers, **there is no DMA to protect.** An IOMMU on x86 today
+  means writing translation tables for a device that does not exist.
+
+So it is a leaf of the dependency tree, and the route is through W16, where VT-d
+is waiting with no QEMU upgrade required.
+
+**A note on how this gap is weighted.** It is the first thing a systems audience
+attacks, and the repository already concedes it by name in `STATUS.md`, the
+threat model, and the comparison matrix — which a serious reviewer accepts. What
+they do not accept is a claim that was never true. W12 closes a gap of that
+second kind, which is why it ranks above this one despite being less famous.
+
+*Cost:* large, after a larger prerequisite.
+*Blocked on:* W16 (x86) or a virtio-pci migration plus QEMU 9.1+ (RISC-V).
+*Acceptance:* the block daemon's DMA is confined by hardware, and a deliberately
+malicious driver programming the device to write outside its window is stopped
+by the IOMMU rather than by convention.
+
 Post-MVP horizon (recorded, deliberately not started in W8): explicit system
 generations / time-travel, multi-agent attenuated sub-delegation with
 provenance chains, full saga/compensation for external effects, human-approval
@@ -329,23 +578,36 @@ gates for sensitive intents, cross-ISA effect-semantics identity, and
 non-storage typed effects (network/service/install). See
 `docs/ROADMAP.md#strategic-direction`.
 
-### Medium Term (post-MVP)
+### Beyond W17
 
-- Convert more services from embedded demos into separate ELF services.
-- Add revocation and lease semantics for long-lived capabilities.
-- Build a richer app lifecycle: install, update, rollback, remove, audit.
-- ARM bring-up (third ISA) once x86 reaches parity.
-- Signed package manifests.
-- Per-client block queues and better storage concurrency.
-- Reusable typed service interface definitions.
+Everything with a named workstream above has an owner, a cost and an acceptance
+test. What is listed here does not yet, and saying so is the point - these are
+directions, not commitments.
 
-### Long Term
+Three items that used to live here have graduated and should not be re-listed:
+intent leases and revocation shipped in W8 (`lease-demo`), signed package
+manifests shipped as the `DZSP` envelope (`sig-demo`), and IOMMU-backed DMA
+isolation is now W17 with its blockers written down.
 
-- IOMMU-backed DMA isolation.
-- Production boot media and installer flow.
-- Capability-aware GUI/compositor boundary.
-- Strong package signing and measured boot integration.
-- Formal verification of the smallest kernel authority rules.
+- Convert the remaining embedded demo apps into separate ELF services.
+- A richer app lifecycle: staged rollout, audit queries over the ledger.
+- Per-client block queues and real storage concurrency (today one daemon
+  serialises every request).
+- Reusable typed service interface definitions, so a service contract is
+  declared once rather than hand-matched on both sides.
+- ARM bring-up as a third ISA - but only after W16, and only if a third backend
+  would teach something the second did not.
+- Production boot media and an installer flow.
+- A capability-aware GUI / compositor boundary.
+- Measured boot, and a root-signed trust store loaded from disk with key
+  rotation (today it is kernel-embedded - see the signing limitation in STATUS).
+- Formal verification of the smallest kernel authority rules. The authority rule
+  is already machine-checked by exhaustive enumeration in `dezh-kernel`; this
+  would be the real thing, and it is honestly a research project.
+- Ledger integrity against a *malicious* storage daemon. Records are
+  parent-linked and hashed for corruption detection, not signed; today the
+  daemon that owns the disk is trusted. The commit log is also a fixed 255 slots
+  with no GC.
 
 ### Non-Goals For MVP
 
