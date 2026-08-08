@@ -19,6 +19,9 @@
 use core::arch::asm;
 use core::sync::atomic::Ordering;
 
+use crate::proc::loader::{EMPTY_TASK_RESOURCES, TaskKind, TaskResources};
+use crate::mm::paging::set_active_task_mem;
+use crate::mm::paging::{task_stack_top};
 use crate::abi::{
     typed_word, FIRST_FOREGROUND_TASK, IPC_OP_TIMEOUT, IPC_SERVICE_SYSTEM, IPC_STATUS_TIMEOUT,
 };
@@ -26,22 +29,14 @@ use crate::arch::finisher::{shutdown, FINISH_FAIL};
 use crate::arch::timer::{rdtime, sbi_set_timer, QUANTUM, TICKS, TIMER_DELTA};
 use crate::mm::global::Global;
 use crate::proc::loader::{build_address_space, kernel_satp, proc_satp, USER_STACK_TOP};
-use crate::{
-    kprintln, plic_handle, reclaim_resources, restore_kernel_ctx, run_first,
-    set_active_task_mem, task_stack_top, trap_entry, utrap, ProcessSpec, TaskKind,
-    TaskResources, Uart, EMPTY_TASK_RESOURCES, EXT_IRQS, SCAUSE_EXTERNAL,
-    TASK_IPC, TASK_PRINT, TASK_TIME,
-};
+use crate::{kprintln, plic_handle, reclaim_resources, restore_kernel_ctx, run_first, trap_entry, utrap, ProcessSpec, Uart, EXT_IRQS, SCAUSE_EXTERNAL, TASK_IPC, TASK_PRINT, TASK_TIME};
 // Every one of these is used as a MATCH PATTERN below. A const that is not in
 // scope does not fail to compile there - it silently becomes an irrefutable
 // binding that matches everything, collapsing the whole syscall dispatch into
 // its first arm. `cargo build` accepted exactly that; only the clippy gate's
 // unreachable-pattern lint caught it. They are named explicitly, not globbed,
 // so a future move cannot lose one quietly.
-use crate::{
-    SYS_DENIED, SYS_EXIT, SYS_IRQ_WAIT, SYS_NULL, SYS_PRINT, SYS_PRINTNUM, SYS_RECV,
-    SYS_RECV_TIMEOUT, SYS_REPORT, SYS_SEND, SYS_UPTIME, SYS_YIELD,
-};
+use crate::{SYS_DENIED, SYS_EXIT, SYS_IRQ_WAIT, SYS_NULL, SYS_PRINT, SYS_PRINTNUM, SYS_RECV, SYS_RECV_TIMEOUT, SYS_REPORT, SYS_SEND, SYS_UPTIME, SYS_YIELD};
 
 pub(crate) const MAX_TASKS: usize = 4;
 

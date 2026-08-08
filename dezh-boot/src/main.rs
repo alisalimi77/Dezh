@@ -34,6 +34,12 @@ mod pkg;
 mod proc;
 mod sched;
 
+use mm::paging::{
+    build_page_tables, enable_paging, stack_base, stack_region_l1_index, task_stack_top, L1,
+    PTE_U, PTE_V, ROOT,
+};
+use proc::loader::TaskKind;
+
 use sched::{
     owned_frames_by_kind, print_ipcstat, process_owned_frames, run_foreground_processes,
     run_processes, run_tasks, task_kind_name, task_owned_frames, TaskState, F_A0, F_A1, F_A7,
@@ -641,174 +647,6 @@ extern "C" fn rogue_task() -> ! {
     sys_exit(0)
 }
 
-// --- Sv39 paging: confine U-mode tasks to their own region. -----------------
-// PMP cannot distinguish S-mode from U-mode, so memory isolation between the
-// kernel and a user task is done with page tables: kernel + MMIO pages are
-// supervisor-only (U=0); only the user region is U=1. A U-mode access anywhere
-// else page-faults.
-#[repr(align(4096))]
-struct PageTable([u64; 512]);
-static mut ROOT: PageTable = PageTable([0; 512]);
-static mut L1: PageTable = PageTable([0; 512]);
-
-const PTE_V: u64 = 1 << 0;
-const PTE_R: u64 = 1 << 1;
-const PTE_W: u64 = 1 << 2;
-const PTE_X: u64 = 1 << 3;
-const PTE_U: u64 = 1 << 4;
-const PTE_A: u64 = 1 << 6;
-const PTE_D: u64 = 1 << 7;
-
-const RAM_BASE: u64 = 0x8000_0000;
-const MEGA: u64 = 0x20_0000; // 2 MiB megapage
-
-fn pte(pa: u64, flags: u64) -> u64 {
-    ((pa >> 12) << 10) | PTE_V | PTE_A | PTE_D | flags
-}
-
-/// Base of the per-task stack regions: the 2 MiB megapage right after the shared
-/// code region. Task `i` owns the megapage `STACK_BASE + i*2MiB`.
-fn stack_base() -> u64 {
-    user_region().1 as u64
-}
-
-fn task_stack_top(i: usize) -> usize {
-    (stack_base() + (i as u64 + 1) * MEGA) as usize
-}
-
-fn stack_region_l1_index(i: usize) -> usize {
-    (((stack_base() - RAM_BASE) / MEGA) as usize) + i
-}
-
-fn build_page_tables() {
-    let (us, ue) = user_region();
-    let code_lo = us as u64;
-    let code_hi = ue as u64;
-    let sbase = stack_base();
-    let stacks_hi = sbase + (MAX_TASKS as u64) * MEGA;
-    unsafe {
-        let root = &mut (*core::ptr::addr_of_mut!(ROOT)).0;
-        let l1 = &mut (*core::ptr::addr_of_mut!(L1)).0;
-        // 0x0..0x4000_0000 as one kernel-only gigapage (covers UART + finisher).
-        root[0] = pte(0x0, PTE_R | PTE_W | PTE_X); // U=0
-                                                   // 0x8000_0000..0xC000_0000 via an L1 table of 2 MiB megapages.
-        let l1_pa = core::ptr::addr_of!(L1) as u64;
-        root[2] = ((l1_pa >> 12) << 10) | PTE_V; // non-leaf pointer
-        // Index form is deliberate: `L1` is still a bare `static mut`, and the
-        // iterator rewrite would take a reference to it - the pattern this
-        // crate no longer has anywhere. It moves to `Global<T>` with the page
-        // tables (W10.3).
-        #[allow(clippy::needless_range_loop)]
-        for i in 0..512usize {
-            let pa = RAM_BASE + (i as u64) * MEGA;
-            let flags = if pa >= code_lo && pa < code_hi {
-                // Shared task code: read+execute for U-mode, no write (W^X).
-                PTE_R | PTE_X | PTE_U
-            } else if pa >= sbase && pa < stacks_hi {
-                // Per-task stack: read+write, U bit toggled per running task.
-                PTE_R | PTE_W
-            } else {
-                // Kernel + MMIO: supervisor-only.
-                PTE_R | PTE_W | PTE_X
-            };
-            l1[i] = pte(pa, flags);
-        }
-    }
-}
-
-/// Make only `active`'s stack region U-accessible; clear U on every other task's
-/// stack. This is what isolates tasks from each other: while task `i` runs, it
-/// can touch its own stack but a load/store into another task's region faults.
-fn set_active_task_mem(active: usize) {
-    unsafe {
-        let l1 = &mut (*core::ptr::addr_of_mut!(L1)).0;
-        for i in 0..MAX_TASKS {
-            let idx = stack_region_l1_index(i);
-            if i == active {
-                l1[idx] |= PTE_U;
-            } else {
-                l1[idx] &= !PTE_U;
-            }
-        }
-        asm!("sfence.vma");
-    }
-}
-
-fn enable_paging() {
-    let root_pa = core::ptr::addr_of!(ROOT) as u64;
-    let satp = (8u64 << 60) | (root_pa >> 12); // mode 8 = Sv39
-    unsafe {
-        asm!("sfence.vma");
-        asm!("csrw satp, {}", in(reg) satp);
-        asm!("sfence.vma");
-        asm!("csrs sstatus, {}", in(reg) 1usize << 18); // SUM: S-mode may read U pages
-    }
-}
-
-const MAX_TASK_OWNED_FRAMES: usize = 384;
-
-#[derive(Clone, Copy, PartialEq)]
-enum TaskKind {
-    Empty,
-    Foreground,
-    Daemon,
-    LegacyBakedTask,
-}
-
-#[derive(Clone, Copy)]
-struct TaskResources {
-    kind: TaskKind,
-    root: usize,
-    count: usize,
-    frames: [usize; MAX_TASK_OWNED_FRAMES],
-}
-
-#[derive(Clone, Copy)]
-struct AddressSpaceBuild {
-    root: usize,
-    entry: usize,
-    resources: TaskResources,
-}
-
-const EMPTY_TASK_RESOURCES: TaskResources = TaskResources {
-    kind: TaskKind::Empty,
-    root: 0,
-    count: 0,
-    frames: [0; MAX_TASK_OWNED_FRAMES],
-};
-
-impl TaskResources {
-    fn new(kind: TaskKind) -> Self {
-        TaskResources {
-            kind,
-            root: 0,
-            count: 0,
-            frames: [0; MAX_TASK_OWNED_FRAMES],
-        }
-    }
-
-    fn add_frame(&mut self, frame: usize) -> bool {
-        if frame == 0 || self.count >= MAX_TASK_OWNED_FRAMES {
-            return false;
-        }
-        self.frames[self.count] = frame;
-        self.count += 1;
-        true
-    }
-
-    fn alloc_frame(&mut self) -> usize {
-        let frame = frame_alloc();
-        if frame == 0 {
-            return 0;
-        }
-        if !self.add_frame(frame) {
-            frame_free(frame);
-            return 0;
-        }
-        frame
-    }
-}
-
 /// The separate user program, compiled to its own riscv ELF by build.rs and
 /// embedded here. The loader maps it into a fresh address space at runtime.
 const USERPROG_ELF: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/userprog.elf"));
@@ -1384,8 +1222,8 @@ fn build_ap_slot_space(slot: usize) -> usize {
         return 0;
     }
     unsafe {
-        let src_root = &(*core::ptr::addr_of!(ROOT)).0;
-        let src_l1 = &(*core::ptr::addr_of!(L1)).0;
+        let src_root = &(*ROOT.get()).0;
+        let src_l1 = &(*L1.get()).0;
         let dr = root_pa as *mut u64;
         let dl = l1_pa as *mut u64;
         for i in 0..512usize {

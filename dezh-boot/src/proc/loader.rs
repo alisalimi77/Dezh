@@ -10,14 +10,82 @@
 //! console's scheduler. The frame allocator underneath has the same constraint
 //! and says so in `mm::frames`; W13 is where both have to answer for it.
 
-use crate::mm::frames::FRAME_SIZE;
+use crate::mm::paging::{L1, PTE_R, PTE_U, PTE_V, PTE_W, PTE_X, ROOT, pte};
+use crate::mm::frames::{frame_alloc, FRAME_SIZE};
 // The length of this list is the honest measure of how coupled the loader still
 // is. Most of it is Sv39 paging vocabulary - PTE_*, L1, ROOT, pte() - which
 // belongs in `mm/paging.rs` and has not been split yet. The rest is the
 // task/process types the scheduler owns. Both shrink this block when their own
 // modules land; until then the import list names the debt instead of hiding it
 // behind a glob.
-use crate::{find_virtio_mmio, frame_free, pte, AddressSpaceBuild, ProcessSpec, TaskKind, TaskResources, DEV_UART_VA, DEV_VIRTIO_BLK_VA, DEV_VIRTIO_NET_VA, EMPTY_TASK_RESOURCES, L1, MARZ_DMA, MARZ_DMA_SIZE, MARZ_DMA_VA, PTE_R, PTE_U, PTE_V, PTE_W, PTE_X, ROOT, TASK_BLOCK_READ, TASK_BLOCK_WRITE, TASK_DEVICE_VIRTIO_BLK, TASK_DEVICE_VIRTIO_NET, UART_BASE, VIRTIO_DEVICE_ID_BLOCK, VIRTIO_DEVICE_ID_NET, VIRTIO_DMA, VIRTIO_DMA_SIZE, VIRTIO_DMA_VA};
+use crate::{find_virtio_mmio, frame_free, ProcessSpec, DEV_UART_VA, DEV_VIRTIO_BLK_VA, DEV_VIRTIO_NET_VA, MARZ_DMA, MARZ_DMA_SIZE, MARZ_DMA_VA, TASK_BLOCK_READ, TASK_BLOCK_WRITE, TASK_DEVICE_VIRTIO_BLK, TASK_DEVICE_VIRTIO_NET, UART_BASE, VIRTIO_DEVICE_ID_BLOCK, VIRTIO_DEVICE_ID_NET, VIRTIO_DMA, VIRTIO_DMA_SIZE, VIRTIO_DMA_VA};
+
+// TaskResources and AddressSpaceBuild live here rather than in main.rs because
+// this is the only module that builds or tears one down. Step 7 said so and
+// left them behind; this is that promise kept.
+pub(crate) const MAX_TASK_OWNED_FRAMES: usize = 384;
+
+#[derive(Clone, Copy, PartialEq)]
+pub(crate) enum TaskKind {
+    Empty,
+    Foreground,
+    Daemon,
+    LegacyBakedTask,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct TaskResources {
+    pub(crate) kind: TaskKind,
+    pub(crate) root: usize,
+    pub(crate) count: usize,
+    pub(crate) frames: [usize; MAX_TASK_OWNED_FRAMES],
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct AddressSpaceBuild {
+    pub(crate) root: usize,
+    pub(crate) entry: usize,
+    pub(crate) resources: TaskResources,
+}
+
+pub(crate) const EMPTY_TASK_RESOURCES: TaskResources = TaskResources {
+    kind: TaskKind::Empty,
+    root: 0,
+    count: 0,
+    frames: [0; MAX_TASK_OWNED_FRAMES],
+};
+
+impl TaskResources {
+    fn new(kind: TaskKind) -> Self {
+        TaskResources {
+            kind,
+            root: 0,
+            count: 0,
+            frames: [0; MAX_TASK_OWNED_FRAMES],
+        }
+    }
+
+    fn add_frame(&mut self, frame: usize) -> bool {
+        if frame == 0 || self.count >= MAX_TASK_OWNED_FRAMES {
+            return false;
+        }
+        self.frames[self.count] = frame;
+        self.count += 1;
+        true
+    }
+
+    fn alloc_frame(&mut self) -> usize {
+        let frame = frame_alloc();
+        if frame == 0 {
+            return 0;
+        }
+        if !self.add_frame(frame) {
+            frame_free(frame);
+            return 0;
+        }
+        frame
+    }
+}
 
 fn u16_at(b: &[u8], o: usize) -> u16 {
     u16::from_le_bytes([b[o], b[o + 1]])
@@ -115,7 +183,7 @@ pub(crate) fn build_address_space(spec: &ProcessSpec, kind: TaskKind) -> Option<
         let r = root as *mut u64;
         // Kernel mappings so traps resolve while this satp is active (U=0):
         *r.add(0) = pte(0x0, PTE_R | PTE_W | PTE_X); // 0..1 GiB gigapage (UART etc)
-        let l1_pa = core::ptr::addr_of!(L1) as u64; // share the kernel's 0x8000_0000 L1
+        let l1_pa = L1.get() as u64; // share the kernel's 0x8000_0000 L1
         *r.add(2) = ((l1_pa >> 12) << 10) | PTE_V;
     }
 
@@ -291,7 +359,6 @@ pub(crate) fn build_address_space(spec: &ProcessSpec, kind: TaskKind) -> Option<
             off += FRAME_SIZE;
         }
     }
-
     Some(AddressSpaceBuild {
         root,
         entry,
@@ -301,7 +368,7 @@ pub(crate) fn build_address_space(spec: &ProcessSpec, kind: TaskKind) -> Option<
 
 /// The kernel's own satp (the global identity address space the console runs in).
 pub(crate) fn kernel_satp() -> usize {
-    (8usize << 60) | ((core::ptr::addr_of!(ROOT) as usize) >> 12)
+    (8usize << 60) | ((ROOT.get() as usize) >> 12)
 }
 
 /// satp value for a process whose page table root is at `root`.

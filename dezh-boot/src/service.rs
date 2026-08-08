@@ -17,6 +17,7 @@
 
 use core::sync::atomic::Ordering;
 
+use crate::proc::loader::{TaskKind};
 use crate::sched::{MAX_TASKS, TEXIT, TSTATE, TaskState, reclaim_task_resources, run_foreground_processes, run_scheduler_from, spawn_process_at};
 use crate::abi::{
     BLK_OP_CLIENT_REQ, BLK_OP_DAEMON, BLK_REQ_FAULT_DEMO, BLK_REQ_STOP,
@@ -25,7 +26,7 @@ use crate::abi::{
 use crate::audit::record_event;
 use crate::arch::timer::TICKS;
 use crate::mm::global::Global;
-use crate::{kprintln, run_registered_virtio_client_status, virtio_dma_pa, KernelCapability, KernelPlan, ProcessSpec, ServiceKind, TaskKind, TASK_BLOCK_READ, TASK_BLOCK_WRITE, TASK_DEVICE_VIRTIO_BLK, TASK_IPC, TASK_PRINT, VIRTIO_BLK_ELF};
+use crate::{kprintln, run_registered_virtio_client_status, virtio_dma_pa, KernelCapability, KernelPlan, ProcessSpec, ServiceKind, TASK_BLOCK_READ, TASK_BLOCK_WRITE, TASK_DEVICE_VIRTIO_BLK, TASK_IPC, TASK_PRINT, VIRTIO_BLK_ELF};
 
 #[derive(Clone, Copy, PartialEq)]
 enum ServiceState {
