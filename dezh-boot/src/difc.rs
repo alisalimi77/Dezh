@@ -14,8 +14,9 @@
 //! two demos that exercise this gate stay in `main.rs` for now - they reach
 //! into Cairn and Marz, and they belong with the rest of `demos/`.
 
+use crate::audit::record_event;
 use crate::mm::global::Global;
-use crate::{kprintln, record_event, CAIRN_NS_NAMES};
+use crate::{kprintln, CAIRN_NS_NAMES};
 
 pub(crate) const NS_SECRET_VAULT: dezh_core::difc::Label = 1 << 0;
 /// The endorsement a namespace can demand of anything written into it. A

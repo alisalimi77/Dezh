@@ -3,8 +3,9 @@
 //! Exercises `ocap::ns` on the real storage path: a commit is refused by the
 //! ocap generation check before it ever reaches the daemon.
 
+use crate::audit::record_event;
 use crate::ocap::ns::{ns_authority_init, ns_authority_ok, ns_remint_local, ns_revoke_local};
-use crate::{cairn_cmd_commit, kprintln, record_event, KernelPlan};
+use crate::{cairn_cmd_commit, kprintln, KernelPlan};
 
 /// Prove the migration: a namespace capability revoked at runtime stops the live
 /// storage path (a commit is refused by the ocap check before it reaches the
