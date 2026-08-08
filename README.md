@@ -54,6 +54,7 @@ architectural and security-model review.
 | IPC | Typed request/reply path with status codes, timeouts, and counters |
 | Persistence | Cairn v1 commit log with rollbackable refs and per-app namespaces |
 | Apps | `.dzp` packages with manifest-scoped caps and transactional lifecycle |
+| Package signing | Ed25519 `DZSP` envelope binding the *authority* a package requests; the grant is attenuated to the publisher's ceiling (`granted = requested ∩ ceiling`) |
 | Review release | [`v0.3-review`](https://github.com/alisalimi77/Dezh/releases/tag/v0.3-review) with a bootable x86_64 ISO, kernels, `.dzp` package, transcript, docs, checksums |
 
 ## Review Snapshot
@@ -430,8 +431,7 @@ High-level layout:
 | `dezh-boot-x86/` | x86_64 smoke target |
 | `dezh-core/` | Shared `.dzp`, base64, and Dezh-IR support |
 | `dezh-kernel/` | Boot contract and kernel plan validation |
-| `dezh-cairn/` | Host-side persistent object/ref prototype |
-| `dezh-ir/` | Shared intermediate representation contracts |
+| `spikes/` | Superseded Step 1..9 host prototypes; nothing shipping depends on them |
 | `tools/ci/` | QEMU smoke and SDK lifecycle acceptance |
 | `tools/sdk/` | `.dzp` package builder, installer, and app templates (`hello`, `agent`) |
 | `tools/demo/` | Review/demo transcript runners (incl. the F1 agent demo) |
@@ -475,7 +475,12 @@ High-level layout:
   DNS, DHCP, listening, or routing.
 - Information flow taints at operator granularity, not per byte, and neither
   axis is enforced across the client→daemon IPC hop yet.
-- Package checksums are deterministic v0 checks, not production signatures.
+- Package signing is built but its distribution layer is not: `.dzp` packages
+  can be wrapped in a signed `DZSP` envelope whose Ed25519 signature binds the
+  requested authority, verified against a root-anchored trust store
+  (`sig-demo`). Still missing: a standalone developer signing CLI, a trust store
+  loaded from disk with key rotation (today it is kernel-embedded), and
+  verification on the live `pkg-recv` upload path. No online PKI.
 - App bundles and package limits are intentionally small for reviewability.
 - The installer initializes a prototype disk layout; it is not a production boot
   media installer yet.

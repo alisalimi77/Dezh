@@ -399,6 +399,10 @@ impl std::error::Error for IdentityError {}
 
 pub type Result<T> = std::result::Result<T, IdentityError>;
 
+// Wide by nature: every parameter is a field that must go into the hash, and
+// each one is load-bearing for the id's uniqueness. Bundling them behind a
+// struct would hide which inputs the identity actually commits to.
+#[allow(clippy::too_many_arguments)]
 fn invocation_id(
     actor: &PrincipalId,
     scope: &Scope,

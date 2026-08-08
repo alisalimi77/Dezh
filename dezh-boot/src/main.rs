@@ -219,7 +219,7 @@ restore_kernel_ctx:
 "#
 );
 
-extern "C" {
+unsafe extern "C" {
     fn trap_entry();
     fn restore_kernel_ctx() -> !;
     fn _hart_start();
@@ -346,7 +346,7 @@ frame_restore:                      # a0 = &frame to resume
 "#
 );
 
-extern "C" {
+unsafe extern "C" {
     fn utrap();
     fn run_first(frame: *const usize);
 }
@@ -420,6 +420,32 @@ macro_rules! kprint {
 #[macro_export]
 macro_rules! kprintln {
     ($($arg:tt)*) => {{ let _ = core::writeln!($crate::Uart, $($arg)*); }};
+}
+
+// --- Mutable globals reached only through a raw pointer. -------------------
+//
+// `static mut` is the wrong tool now that secondary harts run: taking `&` or
+// `&mut` to one is undefined behaviour the moment two harts can reach it, and
+// edition 2024 rejects it outright. `Global<T>` keeps the same storage and the
+// same zero cost, but its only accessor hands back a `*mut T`, so a reference
+// to the global is never created and two overlapping `&mut` cannot exist.
+//
+// The pointer does not by itself make concurrent access safe - it removes the
+// aliasing UB and leaves the ordering argument to the caller. Each `Global`
+// below therefore states, at its declaration, which hart may touch it.
+#[repr(transparent)]
+struct Global<T>(UnsafeCell<T>);
+// Safety: no reference to the inner value is ever handed out; every read and
+// write goes through `get()` inside an `unsafe` block whose concurrency
+// argument is recorded at the declaration site.
+unsafe impl<T> Sync for Global<T> {}
+impl<T> Global<T> {
+    const fn new(value: T) -> Self {
+        Self(UnsafeCell::new(value))
+    }
+    fn get(&self) -> *mut T {
+        self.0.get()
+    }
 }
 
 // --- Minimal bump allocator (alloc is needed by dezh-kernel's Vec/String). --
@@ -621,7 +647,7 @@ extern "C" fn trap_handler(frame: *mut TrapFrame) {
 // The user region bounds come from the linker: a 2 MiB-aligned span that the
 // page tables map U=1. User code lives at the bottom; the user stack grows down
 // from the top. Everything outside this span is supervisor-only.
-extern "C" {
+unsafe extern "C" {
     static __user_start: u8;
     static __user_end: u8;
 }
@@ -743,6 +769,11 @@ fn build_page_tables() {
                                                    // 0x8000_0000..0xC000_0000 via an L1 table of 2 MiB megapages.
         let l1_pa = core::ptr::addr_of!(L1) as u64;
         root[2] = ((l1_pa >> 12) << 10) | PTE_V; // non-leaf pointer
+        // Index form is deliberate: `L1` is still a bare `static mut`, and the
+        // iterator rewrite would take a reference to it - the pattern this
+        // crate no longer has anywhere. It moves to `Global<T>` with the page
+        // tables (W10.3).
+        #[allow(clippy::needless_range_loop)]
         for i in 0..512usize {
             let pa = RAM_BASE + (i as u64) * MEGA;
             let flags = if pa >= code_lo && pa < code_hi {
@@ -972,7 +1003,7 @@ fn plic_init(boot_hart: usize) {
             write_volatile((PLIC_BASE + irq as usize * 4) as *mut u32, 1);
             irq += 1;
         }
-        let mask: u32 = (((1u32 << VIRTIO_MMIO_COUNT) - 1) << VIRTIO_IRQ_BASE) as u32;
+        let mask: u32 = ((1u32 << VIRTIO_MMIO_COUNT) - 1) << VIRTIO_IRQ_BASE;
         write_volatile(enable as *mut u32, mask);
         write_volatile(threshold as *mut u32, 0);
         asm!("csrs sie, {}", in(reg) SEIE);
@@ -1099,6 +1130,10 @@ _hart_start:
 const AP_TRAP_STK: usize = 8192;
 /// Byte offsets inside `ApCtx`, mirrored in the assembly below.
 const AP_OFF_TRAPTOP: usize = 256;
+// Read by the assembly below through its own literal, not by Rust, but it
+// documents half of the ApCtx layout: dropping it would leave the trap path's
+// second offset recorded nowhere a reader of this file would look.
+#[allow(dead_code)]
 const AP_OFF_KCTX: usize = 264;
 global_asm!(
     r#"
@@ -1230,7 +1265,7 @@ ap_return:                          # a0 = &kctx: longjmp back to after ap_run
     OFF_TRAPTOP = const AP_OFF_TRAPTOP,
 );
 
-extern "C" {
+unsafe extern "C" {
     fn utrap_ap();
     fn ap_run(frame: *const usize, kctx: *const usize);
     fn ap_return(kctx: *const usize) -> !;
@@ -1406,12 +1441,12 @@ const EMPTY_AP_CTX: ApCtx = ApCtx {
 };
 static mut AP_CTX: [ApCtx; MAX_HARTS] = [EMPTY_AP_CTX; MAX_HARTS];
 
-extern "C" {
+unsafe extern "C" {
     static ap_trap_stacks: u8;
 }
 
 fn ap_trap_top(hartid: usize) -> usize {
-    (unsafe { core::ptr::addr_of!(ap_trap_stacks) } as usize) + (hartid + 1) * AP_TRAP_STK
+    (core::ptr::addr_of!(ap_trap_stacks) as usize) + (hartid + 1) * AP_TRAP_STK
 }
 
 /// Task slots. One per per-task stack region, so each has an isolated stack.
@@ -1609,7 +1644,7 @@ unsafe fn ap_execute(hartid: usize, slot: usize) {
     asm!("sfence.vma");
     asm!("csrw satp, {}", in(reg) satp);
     asm!("sfence.vma");
-    asm!("csrw stvec, {}", in(reg) utrap_ap as usize);
+    asm!("csrw stvec, {}", in(reg) utrap_ap as *const () as usize);
     asm!("csrs sstatus, {}", in(reg) 1usize << 18); // SUM: S-mode may read the task's U pages
 
     let fp = core::ptr::addr_of!(ctx.frame) as *const usize;
@@ -1700,7 +1735,7 @@ fn smp_bringup(boot: usize) {
         }
         // An absent hart returns a nonzero error and is simply skipped, so the
         // same build works at -smp 1 and -smp 8 with no configuration.
-        if sbi_hart_start(hid, _hart_start as usize, 0) == 0 {
+        if sbi_hart_start(hid, _hart_start as *const () as usize, 0) == 0 {
             started += 1;
         }
     }
@@ -1763,7 +1798,7 @@ fn smp_round() -> SmpRound {
     }
     // Release: orders both resets above before the secondaries observe the new
     // generation and start their work.
-    let gen = SMP_GEN.fetch_add(1, Ordering::Release) + 1;
+    let round_gen = SMP_GEN.fetch_add(1, Ordering::Release) + 1;
 
     // The boot hart joins the drain (it is a hart too), then the lock contention.
     drain_runq(BOOT_HART.load(Ordering::Relaxed));
@@ -1784,8 +1819,8 @@ fn smp_round() -> SmpRound {
     let mut spins = 0u64;
     loop {
         let mut done = 0u64;
-        for hid in 0..MAX_HARTS {
-            if HART_ROUNDS[hid].load(Ordering::Acquire) >= gen {
+        for rounds in HART_ROUNDS.iter() {
+            if rounds.load(Ordering::Acquire) >= round_gen {
                 done += 1;
             }
         }
@@ -1800,8 +1835,8 @@ fn smp_round() -> SmpRound {
     let guarded = unsafe { read_volatile(core::ptr::addr_of!(SMP_GUARDED)) };
     let mut parts = 0u64;
     let mut mask = 0u64;
-    for hid in 0..MAX_HARTS {
-        if HART_ROUNDS[hid].load(Ordering::Acquire) >= gen {
+    for (hid, rounds) in HART_ROUNDS.iter().enumerate() {
+        if rounds.load(Ordering::Acquire) >= round_gen {
             parts += 1;
             mask |= 1 << hid;
         }
@@ -2012,7 +2047,7 @@ fn run_smp_task_demo() {
     kprintln!(
         "[smp-task] dispatching a U-mode task to a secondary hart (boot hart {boot} stays on the console)"
     );
-    if !ap_prepare_slot(0, ap_worker_task as usize, 0) {
+    if !ap_prepare_slot(0, ap_worker_task as *const () as usize, 0) {
         kprintln!("[smp-task] out of frames while building the task's address space.");
         return;
     }
@@ -2048,7 +2083,7 @@ fn run_smp_sched_demo() {
     );
     let mut prepared = 0usize;
     while prepared < AP_SLOTS {
-        if !ap_prepare_slot(prepared, ap_worker_task as usize, 0) {
+        if !ap_prepare_slot(prepared, ap_worker_task as *const () as usize, 0) {
             break;
         }
         prepared += 1;
@@ -2078,11 +2113,11 @@ fn run_smp_sched_demo() {
     let harts_used = hart_mask.count_ones() as u64;
 
     kprint!("[smp-sched] task -> hart placement: ");
-    for s in 0..prepared {
+    for (s, hart) in AP_SLOT_HART.iter().take(prepared).enumerate() {
         if s > 0 {
             kprint!(", ");
         }
-        kprint!("t{}=hart{}", s, AP_SLOT_HART[s].load(Ordering::Relaxed));
+        kprint!("t{}=hart{}", s, hart.load(Ordering::Relaxed));
     }
     kprintln!("");
     for s in 0..prepared {
@@ -2116,8 +2151,8 @@ fn run_smp_isolate_demo() {
     }
     let victim_stack = task_stack_top(0) - 64; // inside slot 0's stack region
     kprintln!("[smp-isolate] task 0 is an ordinary worker; task 1 reaches into task 0's stack at {victim_stack:#x}");
-    if !ap_prepare_slot(0, ap_worker_task as usize, 0)
-        || !ap_prepare_slot(1, ap_rogue_task as usize, victim_stack)
+    if !ap_prepare_slot(0, ap_worker_task as *const () as usize, 0)
+        || !ap_prepare_slot(1, ap_rogue_task as *const () as usize, victim_stack)
     {
         kprintln!("[smp-isolate] out of frames while building address spaces.");
         return;
@@ -2256,12 +2291,12 @@ fn marz_gate(d: usize) -> bool {
         );
         return false;
     }
-    if !unsafe { OP_TAINT.may_flow_to(dest.label) } {
+    if !unsafe { (*OP_TAINT.get()).may_flow_to(dest.label) } {
         kprintln!(
             "[marz] DENIED: sending to '{}' would export secret-tainted data to a destination cleared for {:#x} (taint={:#x}) -- declassify first",
             dest.name,
             dest.label,
-            unsafe { OP_TAINT.secrecy() }
+            unsafe { (*OP_TAINT.get()).secrecy() }
         );
         return false;
     }
@@ -2494,26 +2529,33 @@ fn run_marz_demo(plan: &KernelPlan) {
 // of that device refuse - a hardware kill-switch that sits ABOVE the finer gates
 // (a revoked NIC stops all egress regardless of destination authority).
 
+// Only the net object has a revocation path today, but the block object owns
+// index 0 of DEV_NAMES; naming it keeps the enumeration and the name table
+// legible as one thing.
+#[allow(dead_code)]
 const DEV_OBJ_BLOCK: usize = 0;
 const DEV_OBJ_NET: usize = 1;
 const DEV_NAMES: [&str; 2] = ["block", "net"];
 
-static mut DEV_TABLE: dezh_core::ocap::CapTable<4> = dezh_core::ocap::CapTable::new();
-static mut DEV_HANDLE: [Option<dezh_core::ocap::Cap>; 4] = [None; 4];
-static mut DEV_INIT: bool = false;
+// Boot hart only: device authority is minted, checked and revoked from the
+// console, which does not run on a secondary hart. No other hart reads it.
+static DEV_TABLE: Global<dezh_core::ocap::CapTable<4>> =
+    Global::new(dezh_core::ocap::CapTable::new());
+static DEV_HANDLE: Global<[Option<dezh_core::ocap::Cap>; 4]> = Global::new([None; 4]);
+static DEV_INIT: Global<bool> = Global::new(false);
 
 fn dev_authority_init() {
     use dezh_core::ocap::{R_READ, R_WRITE};
     unsafe {
-        if DEV_INIT {
+        if *DEV_INIT.get() {
             return;
         }
         let mut i = 0usize;
         while i < DEV_NAMES.len() {
-            DEV_HANDLE[i] = DEV_TABLE.mint(i, R_READ | R_WRITE);
+            (*DEV_HANDLE.get())[i] = (*DEV_TABLE.get()).mint(i, R_READ | R_WRITE);
             i += 1;
         }
-        DEV_INIT = true;
+        *DEV_INIT.get() = true;
     }
 }
 
@@ -2521,7 +2563,9 @@ fn dev_authority_init() {
 fn dev_authority_ok(obj: usize) -> bool {
     use dezh_core::ocap::{CapCheck, R_READ};
     dev_authority_init();
-    unsafe { DEV_HANDLE[obj].map(|h| DEV_TABLE.check(&h, R_READ)) == Some(CapCheck::Ok) }
+    unsafe {
+        (*DEV_HANDLE.get())[obj].map(|h| (*DEV_TABLE.get()).check(&h, R_READ)) == Some(CapCheck::Ok)
+    }
 }
 
 fn dev_authority_live(obj: usize) -> bool {
@@ -2548,9 +2592,9 @@ fn dev_authority_set(arg: &str, grant: bool) {
     dev_authority_init();
     unsafe {
         if grant {
-            DEV_HANDLE[obj] = DEV_TABLE.mint(obj, R_READ | R_WRITE);
+            (*DEV_HANDLE.get())[obj] = (*DEV_TABLE.get()).mint(obj, R_READ | R_WRITE);
         } else {
-            DEV_TABLE.revoke(obj);
+            (*DEV_TABLE.get()).revoke(obj);
         }
     }
     kprintln!(
@@ -2871,8 +2915,8 @@ fn build_address_space(spec: &ProcessSpec, kind: TaskKind) -> Option<AddressSpac
     // Device grants are explicit: no process sees MMIO unless its launch spec
     // maps that device. Drivers are user processes with device capabilities,
     // not kernel code with ambient hardware reach.
-    if spec.map_uart {
-        if !map_page(
+    if spec.map_uart
+        && !map_page(
             root,
             DEV_UART_VA,
             UART_BASE as usize,
@@ -2882,7 +2926,6 @@ fn build_address_space(spec: &ProcessSpec, kind: TaskKind) -> Option<AddressSpac
             reclaim_resources(&mut resources);
             return None;
         }
-    }
     // Per-device grant: the kernel finds the block device and maps ONLY its page.
     // (This used to map the whole virtio-mmio transport window, handing the block
     // daemon authority over every other device on the bus.)
@@ -3069,9 +3112,11 @@ const EMPTY_EVENT: EventEntry = EventEntry {
 };
 
 const EVENT_CAP: usize = 32;
-static mut EVENTS: [EventEntry; EVENT_CAP] = [EMPTY_EVENT; EVENT_CAP];
-static mut EVENT_NEXT: usize = 0;
-static mut EVENT_COUNT: usize = 0;
+// Boot hart only: the event ring is written by record_event on the console's
+// own path and read back by why-denied / events, both boot-hart commands.
+static EVENTS: Global<[EventEntry; EVENT_CAP]> = Global::new([EMPTY_EVENT; EVENT_CAP]);
+static EVENT_NEXT: Global<usize> = Global::new(0);
+static EVENT_COUNT: Global<usize> = Global::new(0);
 
 // Small FIFO mailbox per task for capability-passing IPC. A message carries a
 // small payload plus a *granted* capability set (attenuated to what the sender
@@ -3489,11 +3534,7 @@ extern "C" fn utrap_handler(frame_ptr: *mut usize) -> *const usize {
                     let ticks = frame[F_A0];
                     let iters = frame[F_A1];
                     // QEMU `virt` time CSR is 10 MHz => 1 tick = 100 ns.
-                    let ns = if iters > 0 {
-                        ticks.saturating_mul(100) / iters
-                    } else {
-                        0
-                    };
+                    let ns = ticks.saturating_mul(100).checked_div(iters).unwrap_or(0);
                     kprintln!(
                         "  [bench] ecall round-trip: ~{ns} ns/call  ({ticks} ticks / {iters} calls, QEMU-emulated)"
                     );
@@ -3632,6 +3673,11 @@ extern "C" fn utrap_handler(frame_ptr: *mut usize) -> *const usize {
 fn run_tasks(specs: &[(usize, usize, u8)]) {
     let n = specs.len().min(MAX_TASKS);
     unsafe {
+        // Index form is deliberate: `TSTATE` is still a bare `static mut`, and
+        // the iterator rewrite would take a reference to it - the pattern this
+        // crate no longer has anywhere. The scheduler tables move to
+        // `Global<T>` when they move into their own module (W10.3).
+        #[allow(clippy::needless_range_loop)]
         for i in 0..MAX_TASKS {
             reclaim_task_resources(i);
             TSTATE[i] = TaskState::Unused;
@@ -3652,11 +3698,11 @@ fn run_tasks(specs: &[(usize, usize, u8)]) {
         CURRENT = 0;
         set_active_task_mem(0); // expose only task 0's stack region to start
                                 // Switch to the multitasking trap path and arm the preemption timer.
-        asm!("csrw stvec, {}", in(reg) utrap as usize);
+        asm!("csrw stvec, {}", in(reg) utrap as *const () as usize);
         sbi_set_timer(rdtime() + QUANTUM);
         run_first(frame_ptr(0) as *const usize);
         // Returned via restore_kernel_ctx once every task is Done.
-        asm!("csrw stvec, {}", in(reg) trap_entry as usize);
+        asm!("csrw stvec, {}", in(reg) trap_entry as *const () as usize);
         sbi_set_timer(rdtime() + TIMER_DELTA); // restore the console uptime cadence
     }
 }
@@ -3671,6 +3717,11 @@ fn run_processes(specs: &[ProcessSpec]) {
     unsafe {
         // A loaded process must not see any baked-task stack region.
         set_active_task_mem(usize::MAX);
+        // Index form is deliberate: `TSTATE` is still a bare `static mut`, and
+        // the iterator rewrite would take a reference to it - the pattern this
+        // crate no longer has anywhere. The scheduler tables move to
+        // `Global<T>` when they move into their own module (W10.3).
+        #[allow(clippy::needless_range_loop)]
         for i in 0..MAX_TASKS {
             reclaim_task_resources(i);
             TSTATE[i] = TaskState::Unused;
@@ -3705,7 +3756,7 @@ fn run_processes(specs: &[ProcessSpec]) {
             return;
         }
         CURRENT = first_ready;
-        asm!("csrw stvec, {}", in(reg) utrap as usize);
+        asm!("csrw stvec, {}", in(reg) utrap as *const () as usize);
         sbi_set_timer(rdtime() + QUANTUM);
         asm!("csrw satp, {}", in(reg) TSATP[first_ready]); // enter the first process's address space
         asm!("sfence.vma");
@@ -3713,7 +3764,7 @@ fn run_processes(specs: &[ProcessSpec]) {
         // Back in the kernel address space once every process has exited.
         asm!("csrw satp, {}", in(reg) kernel_satp());
         asm!("sfence.vma");
-        asm!("csrw stvec, {}", in(reg) trap_entry as usize);
+        asm!("csrw stvec, {}", in(reg) trap_entry as *const () as usize);
         sbi_set_timer(rdtime() + TIMER_DELTA);
         let mut i = 0usize;
         while i < MAX_TASKS {
@@ -3728,14 +3779,14 @@ fn run_processes(specs: &[ProcessSpec]) {
 fn run_scheduler_from(first: usize) {
     unsafe {
         CURRENT = first;
-        asm!("csrw stvec, {}", in(reg) utrap as usize);
+        asm!("csrw stvec, {}", in(reg) utrap as *const () as usize);
         sbi_set_timer(rdtime() + QUANTUM);
         asm!("csrw satp, {}", in(reg) TSATP[first]);
         asm!("sfence.vma");
         run_first(frame_ptr(first) as *const usize);
         asm!("csrw satp, {}", in(reg) kernel_satp());
         asm!("sfence.vma");
-        asm!("csrw stvec, {}", in(reg) trap_entry as usize);
+        asm!("csrw stvec, {}", in(reg) trap_entry as *const () as usize);
         sbi_set_timer(rdtime() + TIMER_DELTA);
     }
 }
@@ -4200,16 +4251,16 @@ fn record_event(
     result: &'static str,
 ) {
     unsafe {
-        EVENTS[EVENT_NEXT] = EventEntry {
+        (*EVENTS.get())[*EVENT_NEXT.get()] = EventEntry {
             tick: TICKS.load(Ordering::Relaxed),
             actor,
             action,
             target,
             result,
         };
-        EVENT_NEXT = (EVENT_NEXT + 1) % EVENT_CAP;
-        if EVENT_COUNT < EVENT_CAP {
-            EVENT_COUNT += 1;
+        *EVENT_NEXT.get() = (*EVENT_NEXT.get() + 1) % EVENT_CAP;
+        if *EVENT_COUNT.get() < EVENT_CAP {
+            *EVENT_COUNT.get() += 1;
         }
     }
 }
@@ -4218,15 +4269,15 @@ fn print_events() {
     unsafe {
         kprintln!("events:");
         kprintln!("  TICK   ACTOR      ACTION          TARGET          RESULT");
-        let start = if EVENT_COUNT == EVENT_CAP {
-            EVENT_NEXT
+        let start = if *EVENT_COUNT.get() == EVENT_CAP {
+            *EVENT_NEXT.get()
         } else {
             0
         };
         let mut n = 0usize;
-        while n < EVENT_COUNT {
+        while n < *EVENT_COUNT.get() {
             let idx = (start + n) % EVENT_CAP;
-            let e = EVENTS[idx];
+            let e = (*EVENTS.get())[idx];
             kprintln!(
                 "  {:<6} {:<10} {:<15} {:<15} {}",
                 e.tick,
@@ -4237,7 +4288,7 @@ fn print_events() {
             );
             n += 1;
         }
-        if EVENT_COUNT == 0 {
+        if *EVENT_COUNT.get() == 0 {
             kprintln!("  (no events recorded yet)");
         }
     }
@@ -4284,17 +4335,17 @@ fn denial_boundary(action: &str) -> &'static str {
 fn why_denied(arg: &str) {
     let all = arg.trim() == "all";
     unsafe {
-        if EVENT_COUNT == 0 {
+        if *EVENT_COUNT.get() == 0 {
             kprintln!("[why-denied] no events recorded yet");
             return;
         }
-        let start = if EVENT_COUNT == EVENT_CAP { EVENT_NEXT } else { 0 };
+        let start = if *EVENT_COUNT.get() == EVENT_CAP { *EVENT_NEXT.get() } else { 0 };
         let mut found = 0usize;
-        let mut k = EVENT_COUNT;
+        let mut k = *EVENT_COUNT.get();
         while k > 0 {
             k -= 1;
             let idx = (start + k) % EVENT_CAP;
-            let e = EVENTS[idx];
+            let e = (*EVENTS.get())[idx];
             if !is_denial(e.result) {
                 continue;
             }
@@ -4317,7 +4368,7 @@ fn why_denied(arg: &str) {
         if found == 0 {
             kprintln!(
                 "[why-denied] no denial in the last {} events; every recent action was authorized",
-                EVENT_COUNT
+                *EVENT_COUNT.get()
             );
         } else if all {
             kprintln!(
@@ -4347,22 +4398,22 @@ fn run_ipc_typed_demo() {
     kprintln!("[typed-ipc] demo: typed OK, BAD_REQUEST, TIMEOUT, and DENIED");
     run_tasks(&[
         (
-            typed_ipc_service_task as usize,
+            typed_ipc_service_task as *const () as usize,
             TASK_PRINT | TASK_IPC,
             PERS_NATIVE,
         ),
         (
-            typed_ipc_client_task as usize,
+            typed_ipc_client_task as *const () as usize,
             TASK_PRINT | TASK_IPC,
             PERS_NATIVE,
         ),
     ]);
     run_tasks(&[(
-        typed_ipc_timeout_task as usize,
+        typed_ipc_timeout_task as *const () as usize,
         TASK_PRINT | TASK_IPC,
         PERS_NATIVE,
     )]);
-    run_tasks(&[(typed_ipc_denied_task as usize, TASK_PRINT, PERS_NATIVE)]);
+    run_tasks(&[(typed_ipc_denied_task as *const () as usize, TASK_PRINT, PERS_NATIVE)]);
     kprintln!(
         "[typed-ipc] PASS: OK={}, BAD_REQUEST={}, TIMEOUT={}, DENIED={}",
         ipc_status_name(IPC_STATUS_OK),
@@ -4628,22 +4679,25 @@ fn run_virtio_blk_daemon_demo(plan: &KernelPlan) {
 // task-capability bitmask cannot express. (The bitmask still gates the U-mode
 // client → daemon hop; migrating that hop too is the remaining work.)
 
-static mut NS_TABLE: dezh_core::ocap::CapTable<8> = dezh_core::ocap::CapTable::new();
-static mut NS_HANDLE: [Option<dezh_core::ocap::Cap>; 8] = [None; 8];
-static mut NS_INIT: bool = false;
+// Boot hart only: namespace authority is minted, checked and revoked from the
+// console and from the storage IPC path, both of which run on the boot hart.
+static NS_TABLE: Global<dezh_core::ocap::CapTable<8>> =
+    Global::new(dezh_core::ocap::CapTable::new());
+static NS_HANDLE: Global<[Option<dezh_core::ocap::Cap>; 8]> = Global::new([None; 8]);
+static NS_INIT: Global<bool> = Global::new(false);
 
 fn ns_authority_init() {
     use dezh_core::ocap::{R_DELEGATE, R_READ, R_WRITE};
     unsafe {
-        if NS_INIT {
+        if *NS_INIT.get() {
             return;
         }
         let mut i = 0usize;
         while i < CAIRN_NS_NAMES.len() {
-            NS_HANDLE[i] = NS_TABLE.mint(i, R_READ | R_WRITE | R_DELEGATE);
+            (*NS_HANDLE.get())[i] = (*NS_TABLE.get()).mint(i, R_READ | R_WRITE | R_DELEGATE);
             i += 1;
         }
-        NS_INIT = true;
+        *NS_INIT.get() = true;
     }
 }
 
@@ -4652,7 +4706,9 @@ fn ns_authority_init() {
 fn ns_authority_ok(ns: usize) -> bool {
     use dezh_core::ocap::{CapCheck, R_READ};
     ns_authority_init();
-    unsafe { NS_HANDLE[ns].map(|h| NS_TABLE.check(&h, R_READ)) == Some(CapCheck::Ok) }
+    unsafe {
+        (*NS_HANDLE.get())[ns].map(|h| (*NS_TABLE.get()).check(&h, R_READ)) == Some(CapCheck::Ok)
+    }
 }
 
 /// Console gate: like [`ns_authority_ok`] but prints an explainable denial when
@@ -4672,7 +4728,7 @@ fn ns_revoke(plan: &KernelPlan, arg: &str) {
     };
     ns_authority_init();
     // In-memory kernel gate (fast, this boot).
-    unsafe { NS_TABLE.revoke(ns) };
+    unsafe { (*NS_TABLE.get()).revoke(ns) };
     // Persist at the object owner (survives reboot): the daemon records the
     // revoked flag in the superblock and enforces it on every Cairn op.
     let st = run_registered_virtio_client_ns(
@@ -4694,7 +4750,7 @@ fn ns_grant(plan: &KernelPlan, arg: &str) {
         return;
     };
     ns_authority_init();
-    unsafe { NS_HANDLE[ns] = NS_TABLE.mint(ns, R_READ | R_WRITE | R_DELEGATE) };
+    unsafe { (*NS_HANDLE.get())[ns] = (*NS_TABLE.get()).mint(ns, R_READ | R_WRITE | R_DELEGATE) };
     let st = run_registered_virtio_client_ns(
         plan,
         cairn_req(BLK_REQ_NS_GRANT, ns, 0),
@@ -4720,12 +4776,12 @@ fn run_nsrevoke_demo(plan: &KernelPlan) {
     cairn_cmd_commit(plan, "calc nsrev-before");
     let live1 = ns_authority_ok(CALC);
     kprintln!("[nsrevoke-demo] 2/4 ns-revoke calc (bump the generation):");
-    unsafe { NS_TABLE.revoke(CALC) };
+    unsafe { (*NS_TABLE.get()).revoke(CALC) };
     kprintln!("[nsrevoke-demo] 3/4 commit after revoke -> the ocap check refuses it before it reaches the daemon:");
     cairn_cmd_commit(plan, "calc nsrev-blocked");
     let blocked = !ns_authority_ok(CALC);
     kprintln!("[nsrevoke-demo] 4/4 ns-grant calc (re-mint) then commit again:");
-    unsafe { NS_HANDLE[CALC] = NS_TABLE.mint(CALC, R_READ | R_WRITE | R_DELEGATE) };
+    unsafe { (*NS_HANDLE.get())[CALC] = (*NS_TABLE.get()).mint(CALC, R_READ | R_WRITE | R_DELEGATE) };
     cairn_cmd_commit(plan, "calc nsrev-after");
     let live2 = ns_authority_ok(CALC);
     let pass = live1 && blocked && live2;
@@ -4750,35 +4806,37 @@ const NS_SECRET_VAULT: dezh_core::difc::Label = 1 << 0;
 /// The endorsement a namespace can demand of anything written into it. A
 /// namespace requiring it will not accept data derived from unvalidated input.
 const NS_ENDORSED: dezh_core::difc::Integrity = 1 << 0;
-static mut NS_LABEL: [dezh_core::difc::Label; 8] = [0; 8];
-static mut NS_REQUIRES: [dezh_core::difc::Integrity; 8] = [0; 8];
-static mut OP_TAINT: dezh_core::difc::Taint = dezh_core::difc::Taint::new();
-static mut DIFC_INIT: bool = false;
+// Boot hart only: the label table is fixed at init, and the operator taint is
+// the *console operator's* label - it moves only as console commands run.
+static NS_LABEL: Global<[dezh_core::difc::Label; 8]> = Global::new([0; 8]);
+static NS_REQUIRES: Global<[dezh_core::difc::Integrity; 8]> = Global::new([0; 8]);
+static OP_TAINT: Global<dezh_core::difc::Taint> = Global::new(dezh_core::difc::Taint::new());
+static DIFC_INIT: Global<bool> = Global::new(false);
 
 fn difc_init() {
     unsafe {
-        if DIFC_INIT {
+        if *DIFC_INIT.get() {
             return;
         }
         // vault (ns id 3) holds secrets; other namespaces are public here.
-        NS_LABEL[3] = NS_SECRET_VAULT;
+        (*NS_LABEL.get())[3] = NS_SECRET_VAULT;
         // note (0) and vault (3) are trusted state: they demand an endorsement,
         // so raw network input cannot become their content without review. lab
         // (1) is the scratch namespace and demands nothing.
-        NS_REQUIRES[0] = NS_ENDORSED;
-        NS_REQUIRES[3] = NS_ENDORSED;
-        DIFC_INIT = true;
+        (*NS_REQUIRES.get())[0] = NS_ENDORSED;
+        (*NS_REQUIRES.get())[3] = NS_ENDORSED;
+        *DIFC_INIT.get() = true;
     }
 }
 
 fn ns_label(ns: usize) -> dezh_core::difc::Label {
     difc_init();
-    unsafe { *NS_LABEL.get(ns).unwrap_or(&0) }
+    unsafe { *(*NS_LABEL.get()).get(ns).unwrap_or(&0) }
 }
 
 fn ns_requires(ns: usize) -> dezh_core::difc::Integrity {
     difc_init();
-    unsafe { *NS_REQUIRES.get(ns).unwrap_or(&0) }
+    unsafe { *(*NS_REQUIRES.get()).get(ns).unwrap_or(&0) }
 }
 
 /// After a successful READ of `ns`, raise the operator's taint by that
@@ -4786,10 +4844,10 @@ fn ns_requires(ns: usize) -> dezh_core::difc::Integrity {
 fn difc_observe(ns: usize) {
     let l = ns_label(ns);
     if l != 0 {
-        unsafe { OP_TAINT.observe(l) };
+        unsafe { (*OP_TAINT.get()).observe(l) };
         kprintln!(
             "[difc] operator tainted by reading a labelled namespace (secrecy now {:#x})",
-            unsafe { OP_TAINT.secrecy() }
+            unsafe { (*OP_TAINT.get()).secrecy() }
         );
     }
 }
@@ -4798,11 +4856,11 @@ fn difc_observe(ns: usize) {
 /// (`taint ⊆ ns label`); otherwise the write would exfiltrate a secret to a
 /// lower sink. Prints an explainable denial and returns false when refused.
 fn difc_may_write(ns: usize) -> bool {
-    if !unsafe { OP_TAINT.may_flow_to(ns_label(ns)) } {
+    if !unsafe { (*OP_TAINT.get()).may_flow_to(ns_label(ns)) } {
         kprintln!(
             "[difc] DENIED: writing to ns='{}' would leak secret-tainted data to a lower sink (taint={:#x}, sink label={:#x}); declassify first",
             CAIRN_NS_NAMES.get(ns).copied().unwrap_or("?"),
-            unsafe { OP_TAINT.secrecy() },
+            unsafe { (*OP_TAINT.get()).secrecy() },
             ns_label(ns)
         );
         return false;
@@ -4810,11 +4868,11 @@ fn difc_may_write(ns: usize) -> bool {
     // The other direction: data derived from unvalidated input must not become
     // trusted state. Secrecy alone never catches this — the bytes are not secret,
     // they are simply attacker-chosen.
-    if !unsafe { OP_TAINT.may_endorse_to(ns_requires(ns)) } {
+    if !unsafe { (*OP_TAINT.get()).may_endorse_to(ns_requires(ns)) } {
         kprintln!(
             "[difc] DENIED: writing to ns='{}' would let UNVALIDATED input become trusted state (operator integrity={:#x}, sink requires={:#x}); endorse first",
             CAIRN_NS_NAMES.get(ns).copied().unwrap_or("?"),
-            unsafe { OP_TAINT.integrity() },
+            unsafe { (*OP_TAINT.get()).integrity() },
             ns_requires(ns)
         );
         return false;
@@ -4826,23 +4884,23 @@ fn difc_may_write(ns: usize) -> bool {
 /// Integrity can only fall this way; nothing but an explicit `endorse` raises it.
 fn difc_ingress(source: &'static str) {
     difc_init();
-    unsafe { OP_TAINT.observe_input(dezh_core::difc::UNTRUSTED) };
+    unsafe { (*OP_TAINT.get()).observe_input(dezh_core::difc::UNTRUSTED) };
     kprintln!(
         "[difc] operator integrity LOWERED by consuming input from {source} (integrity now {:#x}) -- it is not secret, it is unvalidated",
-        unsafe { OP_TAINT.integrity() }
+        unsafe { (*OP_TAINT.get()).integrity() }
     );
     record_event("kernel", "difc.ingress", source, "tainted");
 }
 
 fn declassify() {
     difc_init();
-    let integrity = unsafe { OP_TAINT.integrity() };
-    unsafe { OP_TAINT = dezh_core::difc::Taint::new() };
+    let integrity = unsafe { (*OP_TAINT.get()).integrity() };
+    unsafe { *OP_TAINT.get() = dezh_core::difc::Taint::new() };
     // Declassification is about secrecy only; it must not silently hand back
     // integrity the operator lost, or one privileged act would grant two.
     unsafe {
         if integrity != dezh_core::difc::TRUSTED {
-            OP_TAINT.observe_input(integrity);
+            (*OP_TAINT.get()).observe_input(integrity);
         }
     }
     kprintln!("[declassify] operator taint cleared (privileged declassification)");
@@ -4853,7 +4911,7 @@ fn declassify() {
 /// validated what it read from outside, restoring its integrity.
 fn endorse() {
     difc_init();
-    unsafe { OP_TAINT.endorse() };
+    unsafe { (*OP_TAINT.get()).endorse() };
     kprintln!("[endorse] operator integrity restored (privileged endorsement of reviewed input)");
     record_event("kernel", "difc.endorse", "operator", "OK");
 }
@@ -4861,11 +4919,11 @@ fn endorse() {
 fn taint_show() {
     kprintln!(
         "[taint] operator secrecy taint = {:#x} (rises by reading secrets; cleared by declassify)",
-        unsafe { OP_TAINT.secrecy() }
+        unsafe { (*OP_TAINT.get()).secrecy() }
     );
     kprintln!(
         "[taint] operator integrity     = {:#x} (falls by consuming outside input; restored by endorse)",
-        unsafe { OP_TAINT.integrity() }
+        unsafe { (*OP_TAINT.get()).integrity() }
     );
 }
 
@@ -4880,11 +4938,11 @@ fn run_taintflow_demo(plan: &KernelPlan) {
     cairn_cmd_simple(plan, BLK_REQ_CAIRN_GET, "vault");
     kprintln!("[taintflow-demo] 2/4 try to commit to ns=lab (public) -> exfiltration REFUSED:");
     cairn_cmd_commit(plan, "lab leaked-secret");
-    let blocked = !unsafe { OP_TAINT.may_flow_to(ns_label(LAB)) };
+    let blocked = !unsafe { (*OP_TAINT.get()).may_flow_to(ns_label(LAB)) };
     kprintln!("[taintflow-demo] 3/4 declassify (privileged), then commit to ns=lab:");
     declassify();
     cairn_cmd_commit(plan, "lab after-declassify");
-    let allowed = unsafe { OP_TAINT.may_flow_to(ns_label(LAB)) };
+    let allowed = unsafe { (*OP_TAINT.get()).may_flow_to(ns_label(LAB)) };
     let pass = blocked && allowed;
     record_event(
         "kernel",
@@ -4913,19 +4971,19 @@ fn run_ingress_demo(plan: &KernelPlan) {
 
     kprintln!("[ingress-demo] 1/4 talk to the network and consume what comes back:");
     run_marz_ping("ops");
-    let lowered = unsafe { OP_TAINT.integrity() } != dezh_core::difc::TRUSTED;
+    let lowered = unsafe { (*OP_TAINT.get()).integrity() } != dezh_core::difc::TRUSTED;
 
     kprintln!("[ingress-demo] 2/4 try to write it into ns=note (trusted state) -> REFUSED:");
     cairn_cmd_commit(plan, "note from-the-wire");
-    let blocked = !unsafe { OP_TAINT.may_endorse_to(ns_requires(NOTE)) };
+    let blocked = !unsafe { (*OP_TAINT.get()).may_endorse_to(ns_requires(NOTE)) };
 
     kprintln!("[ingress-demo] 3/4 the same data may still go to ns=lab, which demands no endorsement:");
-    let scratch_ok = unsafe { OP_TAINT.may_endorse_to(ns_requires(LAB)) };
+    let scratch_ok = unsafe { (*OP_TAINT.get()).may_endorse_to(ns_requires(LAB)) };
     cairn_cmd_commit(plan, "lab from-the-wire");
 
     kprintln!("[ingress-demo] 4/4 endorse (privileged, recorded); the gate to ns=note reopens:");
     endorse();
-    let allowed = unsafe { OP_TAINT.may_endorse_to(ns_requires(NOTE)) };
+    let allowed = unsafe { (*OP_TAINT.get()).may_endorse_to(ns_requires(NOTE)) };
     // Write to the scratch namespace rather than ns=note: the point is proven by
     // the gate, and clobbering trusted state would be a poor way to prove we
     // protect it.
@@ -4947,7 +5005,7 @@ fn run_ingress_demo(plan: &KernelPlan) {
 
 // --- Cairn v1 console front-end -------------------------------------------------
 
-fn cairn_parse_ns<'a>(arg: &'a str) -> Option<(usize, &'a str)> {
+fn cairn_parse_ns(arg: &str) -> Option<(usize, &str)> {
     let (ns_name, rest) = match arg.split_once(' ') {
         Some((n, r)) => (n, r.trim()),
         None => (arg, ""),
@@ -5426,14 +5484,14 @@ fn run_redteam(plan: &KernelPlan) {
 
     // Escape 2: write a device MMIO register directly (raw UART, no device grant).
     kprintln!("[redteam] escape 2/5: write a device MMIO register directly (raw UART, no device grant)");
-    run_tasks(&[(rogue_task as usize, TASK_PRINT, PERS_NATIVE)]);
+    run_tasks(&[(rogue_task as *const () as usize, TASK_PRINT, PERS_NATIVE)]);
     record_event("redteam", "mmio.write", "uart", "DENIED");
     kprintln!("[redteam] escape 2 STOPPED at boundary: hardware memory boundary (Sv39 paging, MMIO mapped U=0) -- console survived");
 
     // Escape 3: forge/amplify a capability the task was never granted (wield PRINT
     // from a zero-authority task). No ambient authority means nothing to inherit.
     kprintln!("[redteam] escape 3/5: forge a capability - a zero-authority task calls the privileged PRINT syscall directly");
-    run_tasks(&[(forge_task as usize, 0, PERS_NATIVE)]);
+    run_tasks(&[(forge_task as *const () as usize, 0, PERS_NATIVE)]);
     record_event("redteam", "cap.forge", "print", "DENIED");
     kprintln!("[redteam] escape 3 STOPPED at boundary: kernel syscall capability check (no ambient authority to forge/amplify) -- console survived");
 
@@ -5446,8 +5504,8 @@ fn run_redteam(plan: &KernelPlan) {
     // Escape 5: monopolize the CPU (two busy tasks that never yield).
     kprintln!("[redteam] escape 5/5: monopolize the CPU (two busy tasks that never yield)");
     run_tasks(&[
-        (preempt_a as usize, TASK_PRINT, PERS_NATIVE),
-        (preempt_b as usize, TASK_PRINT, PERS_NATIVE),
+        (preempt_a as *const () as usize, TASK_PRINT, PERS_NATIVE),
+        (preempt_b as *const () as usize, TASK_PRINT, PERS_NATIVE),
     ]);
     kprintln!("[redteam] escape 5 STOPPED at boundary: preemptive scheduler (timer interrupt forces a context switch) -- console survived");
 
@@ -5684,10 +5742,10 @@ fn run_agentrevoke_demo(plan: &KernelPlan) {
     use dezh_core::ocap::{R_DELEGATE, R_READ, R_WRITE};
     const LAB: usize = 1;
     ns_authority_init();
-    unsafe { NS_HANDLE[LAB] = NS_TABLE.mint(LAB, R_READ | R_WRITE | R_DELEGATE) };
+    unsafe { (*NS_HANDLE.get())[LAB] = (*NS_TABLE.get()).mint(LAB, R_READ | R_WRITE | R_DELEGATE) };
     kprintln!("[agentrevoke-demo] the ocap namespace gate now covers the UNTRUSTED AGENT path (KHost), not just the console");
     kprintln!("[agentrevoke-demo] 1/3 revoke ns=lab, then run the built-in agent bound to ns=lab:");
-    unsafe { NS_TABLE.revoke(LAB) };
+    unsafe { (*NS_TABLE.get()).revoke(LAB) };
     let ran_revoked = run_builtin_agent(plan, LAB);
     kprintln!(
         "[agentrevoke-demo] 2/3 the agent's Cairn write was {} by the ocap gate (agent trapped={})",
@@ -5695,7 +5753,7 @@ fn run_agentrevoke_demo(plan: &KernelPlan) {
         !ran_revoked
     );
     kprintln!("[agentrevoke-demo] 3/3 re-grant ns=lab, run the agent again:");
-    unsafe { NS_HANDLE[LAB] = NS_TABLE.mint(LAB, R_READ | R_WRITE | R_DELEGATE) };
+    unsafe { (*NS_HANDLE.get())[LAB] = (*NS_TABLE.get()).mint(LAB, R_READ | R_WRITE | R_DELEGATE) };
     let ran_granted = run_builtin_agent(plan, LAB);
     let pass = !ran_revoked && ran_granted;
     record_event("kernel", "agentrevoke.demo", "ns:lab", if pass { "OK" } else { "fail" });
@@ -6113,13 +6171,9 @@ fn calc_eval(op: usize, a: usize, b: usize) -> Option<usize> {
         CALC_OP_ADD => Some(a.saturating_add(b)),
         CALC_OP_SUB => Some(a.saturating_sub(b)),
         CALC_OP_MUL => Some(a.saturating_mul(b)),
-        CALC_OP_DIV => {
-            if b == 0 {
-                None
-            } else {
-                Some(a / b)
-            }
-        }
+        // checked_div is the divide-by-zero guard, not an optimisation: it
+        // returns None for b == 0, which is exactly this arm's contract.
+        CALC_OP_DIV => a.checked_div(b),
         _ => None,
     }
 }
@@ -7917,7 +7971,7 @@ fn print_command_help(name: &str, held: u32) {
     kprintln!("help: unknown command '{wanted}'");
 }
 
-fn command_usage<'a>(name: &'a str) -> &'a str {
+fn command_usage(name: &str) -> &str {
     match name {
         "install" => "install plan|check|run|verify|report|rollback|--dry-run",
         "pkg-info" => "pkg-info <name>",
@@ -8400,7 +8454,7 @@ fn dispatch(cmd: &str, arg: &str, plan: &KernelPlan, memory: &[MemoryRegion], he
         "echo" => kprintln!("{arg}"),
         "run" => {
             kprintln!("[kernel] spawning U-mode task; granted capability: PRINT (not TIME)");
-            run_tasks(&[(user_task as usize, TASK_PRINT, PERS_NATIVE)]);
+            run_tasks(&[(user_task as *const () as usize, TASK_PRINT, PERS_NATIVE)]);
             kprintln!("[kernel] task returned; back in the S-mode console");
         }
         "load" => {
@@ -8422,21 +8476,21 @@ fn dispatch(cmd: &str, arg: &str, plan: &KernelPlan, memory: &[MemoryRegion], he
             kprintln!(
                 "[kernel] spawning a rogue U-mode task (it will try to touch the UART directly)"
             );
-            run_tasks(&[(rogue_task as usize, TASK_PRINT, PERS_NATIVE)]);
+            run_tasks(&[(rogue_task as *const () as usize, TASK_PRINT, PERS_NATIVE)]);
             kprintln!("[kernel] rogue task handled; console survived");
         }
         "multi" => {
             kprintln!("[kernel] spawning 3 cooperative U-mode tasks (round-robin via yield)");
             run_tasks(&[
-                (worker_a as usize, TASK_PRINT, PERS_NATIVE),
-                (worker_b as usize, TASK_PRINT, PERS_NATIVE),
-                (worker_c as usize, TASK_PRINT, PERS_NATIVE),
+                (worker_a as *const () as usize, TASK_PRINT, PERS_NATIVE),
+                (worker_b as *const () as usize, TASK_PRINT, PERS_NATIVE),
+                (worker_c as *const () as usize, TASK_PRINT, PERS_NATIVE),
             ]);
             kprintln!("[kernel] all tasks done; back in the console");
         }
         "linux" => {
             kprintln!("[kernel] running a Linux-ABI app through the Pol personality layer");
-            run_tasks(&[(linux_app as usize, TASK_PRINT, PERS_LINUX)]);
+            run_tasks(&[(linux_app as *const () as usize, TASK_PRINT, PERS_LINUX)]);
             kprintln!("[kernel] Linux app done; back in the console");
         }
         "linux-elf" => {
@@ -8455,7 +8509,7 @@ fn dispatch(cmd: &str, arg: &str, plan: &KernelPlan, memory: &[MemoryRegion], he
         }
         "bench" => {
             kprintln!("[kernel] running ecall round-trip microbenchmark (500000 calls)...");
-            run_tasks(&[(bench_task as usize, 0, PERS_NATIVE)]);
+            run_tasks(&[(bench_task as *const () as usize, 0, PERS_NATIVE)]);
             kprintln!("[kernel] benchmark done");
         }
         "bench-pol" => {
@@ -8468,9 +8522,9 @@ fn dispatch(cmd: &str, arg: &str, plan: &KernelPlan, memory: &[MemoryRegion], he
             );
             let n = BENCH_POL_ITERS as u64;
             let t0 = rdtime();
-            run_tasks(&[(bench_native_print_task as usize, TASK_PRINT, PERS_NATIVE)]);
+            run_tasks(&[(bench_native_print_task as *const () as usize, TASK_PRINT, PERS_NATIVE)]);
             let t1 = rdtime();
-            run_tasks(&[(bench_pol_write_task as usize, TASK_PRINT, PERS_LINUX)]);
+            run_tasks(&[(bench_pol_write_task as *const () as usize, TASK_PRINT, PERS_LINUX)]);
             let t2 = rdtime();
             let native_ns = t1.wrapping_sub(t0).saturating_mul(100) / n;
             let pol_ns = t2.wrapping_sub(t1).saturating_mul(100) / n;
@@ -8491,8 +8545,8 @@ fn dispatch(cmd: &str, arg: &str, plan: &KernelPlan, memory: &[MemoryRegion], he
         "preempt" => {
             kprintln!("[kernel] two CPU-bound tasks that never yield (watch them interleave)");
             run_tasks(&[
-                (preempt_a as usize, TASK_PRINT, PERS_NATIVE),
-                (preempt_b as usize, TASK_PRINT, PERS_NATIVE),
+                (preempt_a as *const () as usize, TASK_PRINT, PERS_NATIVE),
+                (preempt_b as *const () as usize, TASK_PRINT, PERS_NATIVE),
             ]);
             kprintln!("[kernel] preemption demo done");
         }
@@ -8502,8 +8556,8 @@ fn dispatch(cmd: &str, arg: &str, plan: &KernelPlan, memory: &[MemoryRegion], he
             );
             kprintln!("[kernel] (task0 stack region base = {:#x})", stack_base());
             run_tasks(&[
-                (victim_task as usize, TASK_PRINT, PERS_NATIVE),
-                (spy_task as usize, 0, PERS_NATIVE),
+                (victim_task as *const () as usize, TASK_PRINT, PERS_NATIVE),
+                (spy_task as *const () as usize, 0, PERS_NATIVE),
             ]);
             kprintln!("[kernel] isolation demo done");
         }
@@ -8511,8 +8565,8 @@ fn dispatch(cmd: &str, arg: &str, plan: &KernelPlan, memory: &[MemoryRegion], he
             kprintln!("[kernel] IPC: a no-authority service + an agent that delegates PRINT to it");
             // task 0 = service (no caps), task 1 = agent (holds PRINT)
             run_tasks(&[
-                (service_task as usize, TASK_IPC, PERS_NATIVE),
-                (agent_task as usize, TASK_PRINT | TASK_IPC, PERS_NATIVE),
+                (service_task as *const () as usize, TASK_IPC, PERS_NATIVE),
+                (agent_task as *const () as usize, TASK_PRINT | TASK_IPC, PERS_NATIVE),
             ]);
             kprintln!("[kernel] IPC demo done; back in the console");
         }
@@ -8526,12 +8580,12 @@ fn dispatch(cmd: &str, arg: &str, plan: &KernelPlan, memory: &[MemoryRegion], he
             kprintln!("[kernel] IPC queue: two clients enqueue while the service is busy");
             run_tasks(&[
                 (
-                    queue_service_task as usize,
+                    queue_service_task as *const () as usize,
                     TASK_PRINT | TASK_IPC,
                     PERS_NATIVE,
                 ),
-                (queue_agent_a as usize, TASK_PRINT | TASK_IPC, PERS_NATIVE),
-                (queue_agent_b as usize, TASK_PRINT | TASK_IPC, PERS_NATIVE),
+                (queue_agent_a as *const () as usize, TASK_PRINT | TASK_IPC, PERS_NATIVE),
+                (queue_agent_b as *const () as usize, TASK_PRINT | TASK_IPC, PERS_NATIVE),
             ]);
             kprintln!("[kernel] IPC queue demo done; back in the console");
         }
@@ -8545,12 +8599,12 @@ fn dispatch(cmd: &str, arg: &str, plan: &KernelPlan, memory: &[MemoryRegion], he
             kprintln!("[kernel] queues: bounded FIFO IPC mailbox demo");
             run_tasks(&[
                 (
-                    queue_service_task as usize,
+                    queue_service_task as *const () as usize,
                     TASK_PRINT | TASK_IPC,
                     PERS_NATIVE,
                 ),
-                (queue_agent_a as usize, TASK_PRINT | TASK_IPC, PERS_NATIVE),
-                (queue_agent_b as usize, TASK_PRINT | TASK_IPC, PERS_NATIVE),
+                (queue_agent_a as *const () as usize, TASK_PRINT | TASK_IPC, PERS_NATIVE),
+                (queue_agent_b as *const () as usize, TASK_PRINT | TASK_IPC, PERS_NATIVE),
             ]);
             kprintln!("[kernel] queue demo done; back in the console");
         }
@@ -8560,8 +8614,8 @@ fn dispatch(cmd: &str, arg: &str, plan: &KernelPlan, memory: &[MemoryRegion], he
             );
             // task 0 = cairn store service, task 1 = agent (holds PRINT)
             run_tasks(&[
-                (cairn_service as usize, TASK_IPC, PERS_NATIVE),
-                (agent_cairn as usize, TASK_PRINT | TASK_IPC, PERS_NATIVE),
+                (cairn_service as *const () as usize, TASK_IPC, PERS_NATIVE),
+                (agent_cairn as *const () as usize, TASK_PRINT | TASK_IPC, PERS_NATIVE),
             ]);
             kprintln!("[kernel] Cairn demo done; back in the console");
         }
@@ -8575,7 +8629,7 @@ fn dispatch(cmd: &str, arg: &str, plan: &KernelPlan, memory: &[MemoryRegion], he
                     "[safety] Pol denial demo skipped here to keep running services alive; use `linux` before starting services"
                 );
             } else {
-                run_tasks(&[(linux_app as usize, TASK_PRINT, PERS_LINUX)]);
+                run_tasks(&[(linux_app as *const () as usize, TASK_PRINT, PERS_LINUX)]);
                 kprintln!("[safety] unsupported Linux syscall returned ENOSYS; console survived");
             }
         }
@@ -8667,7 +8721,7 @@ pub extern "C" fn kmain(hart_id: usize, _fdt: usize) -> ! {
 
     kprintln!("[dezh-boot] installing trap vector + supervisor timer...");
     unsafe {
-        asm!("csrw stvec, {}", in(reg) trap_entry as usize);
+        asm!("csrw stvec, {}", in(reg) trap_entry as *const () as usize);
         sbi_set_timer(rdtime() + TIMER_DELTA);
         asm!("csrs sie, {}", in(reg) STIE);
         asm!("csrs sstatus, {}", in(reg) 1usize << 1); // SIE: global supervisor interrupts

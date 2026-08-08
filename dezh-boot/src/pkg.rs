@@ -9,6 +9,7 @@ use core::fmt::Write;
 
 use crate::{kprint, kprintln};
 use dezh_core::{b64, dzp, ir, sig};
+use dezh_core::mcap::{cap_delta, ir_caps_from, parse_mcaps, task_caps_from};
 use dezh_kernel::KernelPlan;
 
 // Build-time signed demo package + its publisher public key (see build.rs). The
@@ -17,35 +18,14 @@ include!(concat!(env!("OUT_DIR"), "/signed_demo.rs"));
 
 // --- Manifest capability vocabulary -------------------------------------------
 
-pub(crate) const MCAP_PRINT: u32 = 1 << 0;
-pub(crate) const MCAP_IPC: u32 = 1 << 1;
-pub(crate) const MCAP_UPTIME: u32 = 1 << 2;
-pub(crate) const MCAP_CAIRN_READ: u32 = 1 << 3;
-pub(crate) const MCAP_CAIRN_WRITE: u32 = 1 << 4;
+// Manifest capabilities and the derivation from a requested set to live
+// authority live in dezh-core::mcap, where they are unit-tested directly and
+// shared with the x86 kernel. Re-exported so this module's call sites read the
+// same as before; there is deliberately no second copy here.
+pub(crate) use dezh_core::mcap::{
+    mcap_names, MCAP_CAIRN_READ, MCAP_CAIRN_WRITE, MCAP_IPC, MCAP_PRINT, MCAP_UPTIME,
+};
 
-const MCAP_TABLE: &[(&str, u32)] = &[
-    ("print", MCAP_PRINT),
-    ("ipc", MCAP_IPC),
-    ("uptime", MCAP_UPTIME),
-    ("cairn-read", MCAP_CAIRN_READ),
-    ("cairn-write", MCAP_CAIRN_WRITE),
-];
-
-pub(crate) fn mcap_names(set: u32, out: &mut dyn core::fmt::Write) {
-    let mut first = true;
-    for &(name, bit) in MCAP_TABLE {
-        if set & bit != 0 {
-            if !first {
-                let _ = out.write_str(" ");
-            }
-            let _ = out.write_str(name);
-            first = false;
-        }
-    }
-    if first {
-        let _ = out.write_str("(none)");
-    }
-}
 
 // --- Package store layout ------------------------------------------------------
 
@@ -496,6 +476,9 @@ fn write_journal(plan: &KernelPlan, rec: JournalRecord) -> bool {
     write_journal_raw(plan, &raw)
 }
 
+// Wide by nature: the parameters are the on-disk record's fields, one for one.
+// Grouping them behind a struct would just move the same list one level out.
+#[allow(clippy::too_many_arguments)]
 fn journal_record(
     op: u8,
     phase: u8,
@@ -629,16 +612,6 @@ fn read_previous_blob_into_stage(plan: &KernelPlan, slot: usize, raw_len: usize)
     read_blob_area_into_stage(plan, previous_blob_sector(slot), raw_len)
 }
 
-fn parse_mcaps(manifest: &str) -> Result<u32, &str> {
-    let mut set = 0u32;
-    for cap in dzp::manifest_list(manifest, "caps") {
-        match MCAP_TABLE.iter().find(|(n, _)| *n == cap) {
-            Some((_, bit)) => set |= bit,
-            None => return Err("unknown capability in manifest"),
-        }
-    }
-    Ok(set)
-}
 
 fn verify_payload(pkg: &dzp::Package<'_>) -> Result<(), &'static str> {
     match pkg.kind {
@@ -655,6 +628,8 @@ fn verify_payload(pkg: &dzp::Package<'_>) -> Result<(), &'static str> {
     }
 }
 
+// Wide by nature: these are the registry entry's fields, one for one.
+#[allow(clippy::too_many_arguments)]
 fn install_runtime_entry(
     slot: usize,
     name: &str,
@@ -691,6 +666,8 @@ fn install_runtime_entry(
     true
 }
 
+// Wide by nature: these are the registry entry's fields, one for one.
+#[allow(clippy::too_many_arguments)]
 fn encode_registry_entry(
     slot: usize,
     state: u8,
@@ -746,13 +723,6 @@ fn encode_previous_metadata(
     unsafe { REGISTRY = reg };
 }
 
-fn cap_delta(old_caps: u32, new_caps: u32) -> (u32, u32, u32) {
-    (
-        new_caps & !old_caps,
-        old_caps & !new_caps,
-        old_caps & new_caps,
-    )
-}
 
 fn set_entry_state(slot: usize, state: u8) {
     unsafe {
@@ -1335,48 +1305,14 @@ pub(crate) fn pkg_recv(plan: &KernelPlan) {
 
 // --- Run -----------------------------------------------------------------------
 
-fn ir_caps_from(mcaps: u32) -> u32 {
-    let mut c = 0u32;
-    if mcaps & MCAP_PRINT != 0 {
-        c |= ir::CAP_PRINT;
-    }
-    if mcaps & MCAP_CAIRN_READ != 0 {
-        c |= ir::CAP_READ;
-    }
-    if mcaps & MCAP_CAIRN_WRITE != 0 {
-        c |= ir::CAP_WRITE;
-    }
-    c
-}
 
-fn task_caps_from(mcaps: u32, name: &str) -> usize {
-    let mut c = 0usize;
-    if mcaps & MCAP_PRINT != 0 {
-        c |= crate::TASK_PRINT;
-    }
-    if mcaps & MCAP_IPC != 0 {
-        c |= crate::TASK_IPC;
-    }
-    if mcaps & MCAP_UPTIME != 0 {
-        c |= crate::TASK_TIME;
-    }
-    // A manifest cairn grant maps to the app's OWN namespace bit only — an app
-    // can never name another app's namespace in its manifest.
-    if mcaps & (MCAP_CAIRN_READ | MCAP_CAIRN_WRITE) != 0 {
-        if let Some(ns) = crate::cairn_ns_id(name) {
-            c |= crate::task_ns_cap(ns);
-        }
-    }
-    c
-}
 
-/// The Cairn v1 namespace an installed app may use: its own, by name.
+/// The Cairn v1 namespace an installed app may use: its own, by name. The
+/// decision is dezh-core's; this wrapper only explains the `None` on the
+/// console, which is a kernel concern and not part of the tested logic.
 fn app_cairn_ns(mcaps: u32, name: &str) -> Option<usize> {
-    if mcaps & (MCAP_CAIRN_READ | MCAP_CAIRN_WRITE) == 0 {
-        return None;
-    }
-    let ns = crate::cairn_ns_id(name);
-    if ns.is_none() {
+    let ns = dezh_core::mcap::app_cairn_ns(mcaps, name);
+    if ns.is_none() && mcaps & (MCAP_CAIRN_READ | MCAP_CAIRN_WRITE) != 0 {
         kprintln!(
             "[pkg-run] note: '{name}' requests cairn caps but has no v1 namespace (fixed table: note/lab/calc/vault/agent)"
         );
@@ -1571,7 +1507,7 @@ pub(crate) fn open_intent(kind: &str) -> Option<(u16, u32)> {
 pub(crate) fn intent_open(arg: &str) {
     // `intent-open <kind> [lease]` — an optional lease bounds how many runs the
     // intent authorizes before it auto-revokes (omit for no limit).
-    let mut parts = arg.trim().split_whitespace();
+    let mut parts = arg.split_whitespace();
     let Some(kind) = parts.next() else {
         kprintln!("usage: intent-open <kind> [lease]");
         print_ahd_kinds();
@@ -1612,6 +1548,10 @@ pub(crate) fn intent_open(arg: &str) {
 pub(crate) fn intent_list() {
     kprintln!("open Ahds (intent tokens):");
     let mut any = false;
+    // Index form is deliberate: `AHDS` is still a bare `static mut`, and the
+    // iterator rewrite would take a reference to it - the pattern this crate no
+    // longer has anywhere. It moves to `Global<T>` with the intent table (W10.3).
+    #[allow(clippy::needless_range_loop)]
     for i in 0..MAX_AHD {
         let a = unsafe { AHDS[i] };
         if !a.used {
@@ -2259,8 +2199,10 @@ pub(crate) fn pkg_info(plan: &KernelPlan, arg: &str) {
     mcap_names(get_u32(&reg, e + 8), &mut crate::Uart);
     kprintln!();
     kprint!("  DENIED   ");
-    let all = MCAP_TABLE.iter().fold(0, |a, &(_, b)| a | b);
-    mcap_names(all & !get_u32(&reg, e + 8), &mut crate::Uart);
+    mcap_names(
+        dezh_core::mcap::MCAP_ALL & !get_u32(&reg, e + 8),
+        &mut crate::Uart,
+    );
     kprintln!(" + device/DMA/MMIO (never grantable from a manifest)");
     if state != STATE_ACTIVE {
         kprintln!(

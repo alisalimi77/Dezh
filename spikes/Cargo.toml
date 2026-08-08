@@ -1,0 +1,27 @@
+# The Step 1..9 host-side spikes, as their own workspace.
+#
+# These validated Dezh's design in user space before there was a kernel, and
+# each one answered a question the bare-metal work then took as settled. None of
+# them ships: nothing on the bare-metal path depends on them, and the Cairn,
+# IPC, IR and Linux-personality code that actually runs lives in dezh-boot.
+#
+# They are a separate workspace, and out of the default CI path, for three
+# reasons: they drag wasmtime and ~150 crates into a build that does not need
+# them; a green test count that is mostly theirs overstates coverage of the code
+# that runs; and a reader who finds two Cairns has to work out which is real.
+#
+# Kept rather than deleted because the decision log is a feature of this
+# repository - see spikes/README.md for what each one proved and which
+# subsystem superseded it.
+[workspace]
+resolver = "2"
+members = [
+    "dezh-cairn",
+    "dezh-host",
+    "dezh-identity",
+    "dezh-ipc",
+    "dezh-ir",
+    "dezh-linux",
+    "dezh-runtime",
+    "dezh-scheduler",
+]
