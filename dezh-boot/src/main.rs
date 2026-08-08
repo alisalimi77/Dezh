@@ -19,6 +19,7 @@
 extern crate alloc;
 
 mod arch;
+mod demos;
 mod dev;
 mod difc;
 mod mm;
@@ -33,22 +34,25 @@ mod proc;
 pub(crate) use dev::uart::{Uart, UART_BASE};
 use mm::frames::{frame_alloc, frame_free, frames_init, FRAME_FREE, FRAME_SIZE, FRAME_TOTAL};
 use mm::global::Global;
+use demos::difc::{run_ingress_demo, run_taintflow_demo};
+use demos::egress::{run_dev_demo, run_marz_demo, run_marz_effect_demo};
+use demos::ocap::run_nsrevoke_demo;
 use net::marz::{
-    marz_dest_authority, marz_dest_cap, marz_send_to, run_marz_ping, run_marz_send, OP_EGRESS,
+    marz_dest_authority, run_marz_ping, run_marz_send,
 };
 use proc::loader::{
     build_address_space, kernel_satp, proc_satp, reclaim_resources, USER_STACK_TOP,
 };
 use ocap::device::{
-    dev_authority_init, dev_authority_live, dev_authority_ok, dev_authority_set, DEV_OBJ_NET,
+    dev_authority_live, dev_authority_set,
 };
 use ocap::ns::{
     ns_authority_init, ns_authority_live, ns_authority_ok, ns_grant, ns_revoke, NS_HANDLE,
     NS_TABLE,
 };
 use difc::{
-    declassify, difc_ingress, difc_may_write, difc_observe, endorse, ns_label, ns_requires,
-    taint_show, NS_SECRET_VAULT, OP_TAINT,
+    declassify, difc_ingress, difc_may_write, difc_observe, endorse, taint_show,
+    NS_SECRET_VAULT, OP_TAINT,
 };
 use arch::finisher::{shutdown, FINISH_FAIL, FINISH_PASS};
 use arch::timer::{rdtime, sbi_set_timer, QUANTUM, STIE, TICKS, TIMER_DELTA, TIMER_HZ, SKIP_LF_AFTER_CR};
@@ -2062,91 +2066,6 @@ fn find_virtio_mmio(want_id: u32) -> Option<usize> {
     None
 }
 
-/// M3: a REAL external effect, end to end. A send under an intent leaves the
-/// machine, is recorded as irreversible, is attributed by the provenance graph,
-/// and is REFUSED by rollback - because it genuinely cannot be undone.
-fn run_marz_effect_demo(plan: &KernelPlan) {
-    declassify();
-    unsafe { OP_EGRESS = marz_dest_cap(0) | marz_dest_cap(1) };
-    kprintln!("[marz-effect-demo] a real send becomes an irreversible, attributable effect");
-    let Some((id, _ceiling)) = pkg::open_intent("writer") else {
-        kprintln!("[marz-effect-demo] FAIL: no free intent slot");
-        return;
-    };
-    kprintln!("[marz-effect-demo] 1/4 send to 'ops' under intent Ahd#{id} (a real frame on the wire):");
-    marz_send_to(plan, "ops", id);
-
-    kprintln!("[marz-effect-demo] 2/4 the rollback forecast for the mission:");
-    let mut idbuf = [0u8; 8];
-    let idstr = u16_to_str(id, &mut idbuf);
-    sfar_cmd(plan, BLK_REQ_SFAR_PLAN, idstr);
-
-    kprintln!("[marz-effect-demo] 3/4 provenance: who authorized what left the machine:");
-    sfar_cmd(plan, BLK_REQ_TBAR, idstr);
-
-    kprintln!("[marz-effect-demo] 4/4 roll the mission back - the send CANNOT be undone:");
-    sfar_cmd(plan, BLK_REQ_SFAR_ROLLBACK, idstr);
-    record_event("kernel", "marz.effect", "egress", "OK");
-    kprintln!("[marz-effect-demo] PASS: the wire is honest - a real external effect is attributed, classified irreversible, and rollback refuses it instead of pretending");
-}
-
-/// Render a u16 into `buf` and return it as a str (no allocator in the console).
-fn u16_to_str(v: u16, buf: &mut [u8; 8]) -> &str {
-    let mut n = v;
-    let mut i = buf.len();
-    loop {
-        i -= 1;
-        buf[i] = b'0' + (n % 10) as u8;
-        n /= 10;
-        if n == 0 {
-            break;
-        }
-    }
-    core::str::from_utf8(&buf[i..]).unwrap_or("0")
-}
-
-/// The Marz gate proven end to end: per-destination authority and the DIFC
-/// export rule, both enforced before anything reaches the wire.
-fn run_marz_demo(plan: &KernelPlan) {
-    declassify();
-    unsafe { OP_EGRESS = marz_dest_cap(0) | marz_dest_cap(1) };
-    kprintln!("[marz-demo] egress authority names a DESTINATION, and export obeys information flow");
-
-    kprintln!("[marz-demo] 1/4 authorized, untainted -> send to 'ops':");
-    run_marz_send(plan, "ops");
-
-    kprintln!("[marz-demo] 2/4 revoke ONLY 'ops' (vault-sync untouched) -> send refused:");
-    marz_dest_authority("ops", false);
-    run_marz_send(plan, "ops");
-    marz_dest_authority("ops", true);
-
-    kprintln!("[marz-demo] 3/4 read ns=vault (secret) -> the operator is tainted; a send to the PUBLIC 'ops' is exfiltration:");
-    cairn_cmd_simple(plan, BLK_REQ_CAIRN_GET, "vault");
-    run_marz_send(plan, "ops");
-
-    kprintln!("[marz-demo] 4/4 the same tainted data MAY go to 'vault-sync' (cleared for it):");
-    run_marz_send(plan, "vault-sync");
-    declassify();
-    kprintln!("[marz-demo] PASS: a destination capability is not network access, and a secret cannot be exported to a destination not cleared for it");
-    record_event("kernel", "marz.demo", "egress", "OK");
-}
-
-/// Device authority is revocable at runtime, above every finer gate.
-fn run_dev_demo(plan: &KernelPlan) {
-    dev_authority_init();
-    kprintln!("[dev-demo] device authority is a revocable ocap handle, above the per-destination gate");
-    kprintln!("[dev-demo] 1/3 revoke the NIC device capability:");
-    dev_authority_set("net", false);
-    kprintln!("[dev-demo] 2/3 egress to an otherwise-authorized destination is refused at the device:");
-    run_marz_send(plan, "ops");
-    kprintln!("[dev-demo] 3/3 re-grant the device; egress works again:");
-    dev_authority_set("net", true);
-    run_marz_send(plan, "ops");
-    let pass = dev_authority_ok(DEV_OBJ_NET);
-    record_event("kernel", "dev.demo", "device", if pass { "OK" } else { "fail" });
-    kprintln!("[dev-demo] PASS: revoking the device stops every send regardless of destination authority; re-granting restores it");
-}
-
 /// Marz M1 groundwork: report whether a NIC is present and which slot it owns.
 /// This is the device the egress boundary will be built on; nothing is granted
 /// to anyone by probing.
@@ -3892,111 +3811,6 @@ fn run_virtio_blk_daemon_demo(plan: &KernelPlan) {
             .virtio_dma(),
     ]);
     refresh_virtio_service_state();
-}
-
-/// Prove the migration: a namespace capability revoked at runtime stops the live
-/// storage path (a commit is refused by the ocap check before it reaches the
-/// daemon), and re-granting restores it.
-fn run_nsrevoke_demo(plan: &KernelPlan) {
-    use dezh_core::ocap::{R_DELEGATE, R_READ, R_WRITE};
-    const CALC: usize = 2;
-    ns_authority_init();
-    kprintln!("[nsrevoke-demo] runtime revocation of a LIVE namespace capability (ocap generation), enforced on the storage path");
-    kprintln!("[nsrevoke-demo] 1/4 commit while the capability is live:");
-    cairn_cmd_commit(plan, "calc nsrev-before");
-    let live1 = ns_authority_ok(CALC);
-    kprintln!("[nsrevoke-demo] 2/4 ns-revoke calc (bump the generation):");
-    unsafe { (*NS_TABLE.get()).revoke(CALC) };
-    kprintln!("[nsrevoke-demo] 3/4 commit after revoke -> the ocap check refuses it before it reaches the daemon:");
-    cairn_cmd_commit(plan, "calc nsrev-blocked");
-    let blocked = !ns_authority_ok(CALC);
-    kprintln!("[nsrevoke-demo] 4/4 ns-grant calc (re-mint) then commit again:");
-    unsafe { (*NS_HANDLE.get())[CALC] = (*NS_TABLE.get()).mint(CALC, R_READ | R_WRITE | R_DELEGATE) };
-    cairn_cmd_commit(plan, "calc nsrev-after");
-    let live2 = ns_authority_ok(CALC);
-    let pass = live1 && blocked && live2;
-    record_event("kernel", "nsrevoke.demo", "ns:calc", if pass { "OK" } else { "fail" });
-    if pass {
-        kprintln!("[nsrevoke-demo] PASS: a live namespace capability was revoked at runtime (generation bump) and re-granted -- what the bitmask model could not do");
-    } else {
-        kprintln!("[nsrevoke-demo] FAIL: live1={live1} blocked={blocked} live2={live2}");
-    }
-}
-
-/// Prove DIFC enforcement on the real storage path: read a secret namespace,
-/// then be refused when writing it down to a public one, until an explicit
-/// declassification.
-fn run_taintflow_demo(plan: &KernelPlan) {
-    const LAB: usize = 1;
-    declassify();
-    kprintln!("[taintflow-demo] read a secret, then be refused writing it down to a public namespace (enforced on the storage path)");
-    kprintln!("[taintflow-demo] 1/4 read ns=vault (secret) -> the operator is tainted:");
-    cairn_cmd_simple(plan, BLK_REQ_CAIRN_GET, "vault");
-    kprintln!("[taintflow-demo] 2/4 try to commit to ns=lab (public) -> exfiltration REFUSED:");
-    cairn_cmd_commit(plan, "lab leaked-secret");
-    let blocked = !unsafe { (*OP_TAINT.get()).may_flow_to(ns_label(LAB)) };
-    kprintln!("[taintflow-demo] 3/4 declassify (privileged), then commit to ns=lab:");
-    declassify();
-    cairn_cmd_commit(plan, "lab after-declassify");
-    let allowed = unsafe { (*OP_TAINT.get()).may_flow_to(ns_label(LAB)) };
-    let pass = blocked && allowed;
-    record_event(
-        "kernel",
-        "taintflow.demo",
-        "confidentiality",
-        if pass { "OK" } else { "fail" },
-    );
-    if pass {
-        kprintln!("[taintflow-demo] PASS: a secret read taints the operator and blocks the write-down; declassification is the explicit, privileged escape -- confidentiality enforced on real data flow");
-    } else {
-        kprintln!("[taintflow-demo] FAIL: blocked={blocked} allowed={allowed}");
-    }
-}
-
-/// The ingress half of information-flow control: data that came off the wire is
-/// not secret, it is **unvalidated**, and it must not silently become trusted
-/// state. Read from the network, be refused writing into a namespace that demands
-/// an endorsement, then endorse explicitly and be allowed.
-fn run_ingress_demo(plan: &KernelPlan) {
-    const NOTE: usize = 0; // trusted state: demands an endorsement
-    const LAB: usize = 1; // scratch: demands nothing
-    kprintln!("[ingress-demo] the network can be READ from; what arrives is attacker-chosen, so it starts unendorsed");
-    // Start from a known state: fully endorsed, untainted.
-    endorse();
-    declassify();
-
-    kprintln!("[ingress-demo] 1/4 talk to the network and consume what comes back:");
-    run_marz_ping("ops");
-    let lowered = unsafe { (*OP_TAINT.get()).integrity() } != dezh_core::difc::TRUSTED;
-
-    kprintln!("[ingress-demo] 2/4 try to write it into ns=note (trusted state) -> REFUSED:");
-    cairn_cmd_commit(plan, "note from-the-wire");
-    let blocked = !unsafe { (*OP_TAINT.get()).may_endorse_to(ns_requires(NOTE)) };
-
-    kprintln!("[ingress-demo] 3/4 the same data may still go to ns=lab, which demands no endorsement:");
-    let scratch_ok = unsafe { (*OP_TAINT.get()).may_endorse_to(ns_requires(LAB)) };
-    cairn_cmd_commit(plan, "lab from-the-wire");
-
-    kprintln!("[ingress-demo] 4/4 endorse (privileged, recorded); the gate to ns=note reopens:");
-    endorse();
-    let allowed = unsafe { (*OP_TAINT.get()).may_endorse_to(ns_requires(NOTE)) };
-    // Write to the scratch namespace rather than ns=note: the point is proven by
-    // the gate, and clobbering trusted state would be a poor way to prove we
-    // protect it.
-    cairn_cmd_commit(plan, "lab after-endorsement");
-
-    let pass = lowered && blocked && scratch_ok && allowed;
-    record_event(
-        "kernel",
-        "ingress.demo",
-        "integrity",
-        if pass { "OK" } else { "fail" },
-    );
-    if pass {
-        kprintln!("[ingress-demo] PASS: INGRESS-OK -- reading the network lowers integrity, unvalidated input cannot become trusted state, and endorsement is the explicit, privileged escape");
-    } else {
-        kprintln!("[ingress-demo] FAIL: lowered={lowered} blocked={blocked} scratch_ok={scratch_ok} allowed={allowed}");
-    }
 }
 
 // --- Cairn v1 console front-end -------------------------------------------------

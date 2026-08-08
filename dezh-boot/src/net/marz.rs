@@ -13,10 +13,11 @@
 //!
 //! Boot hart only: destinations are checked from the console path.
 
+use crate::ocap::device::DEV_OBJ_NET;
 use crate::pkg;
 use crate::{
     cairn_req_intent, dev_authority_live, difc_ingress, find_virtio_mmio, kprintln, record_event,
-    run_foreground_processes, ProcessSpec, BLK_REQ_CAIRN_COMMIT, DEV_OBJ_NET,
+    run_foreground_processes, ProcessSpec, BLK_REQ_CAIRN_COMMIT,
     FIRST_FOREGROUND_TASK, marz_dma_pa, run_registered_virtio_client_ns, task_ns_cap,
     KernelPlan, MARZ_ELF, NS_SECRET_VAULT, OP_TAINT, SAND_REV_IRREVERSIBLE,
     TASK_DEVICE_VIRTIO_NET, TASK_PRINT, TEXIT, VIRTIO_DEVICE_ID_NET,
