@@ -53,6 +53,7 @@ use service::{
 // re-exported here too; main.rs no longer owns a single one, so modules import
 // it from `mm::global` themselves.
 pub(crate) use dev::uart::{Uart, UART_BASE};
+use mm::global::Global;
 use mm::frames::{frame_alloc, frame_free, frames_init, FRAME_FREE, FRAME_SIZE, FRAME_TOTAL};
 use demos::difc::{run_ingress_demo, run_taintflow_demo};
 use demos::egress::{run_dev_demo, run_marz_demo, run_marz_effect_demo};
@@ -897,10 +898,10 @@ fn plic_handle() -> u32 {
         // Anyone sleeping on a device becomes runnable again.
         let mut i = 0usize;
         while i < MAX_TASKS {
-            if TIRQ_WAITING[i] {
-                TIRQ_WAITING[i] = false;
-                if TSTATE[i] == TaskState::Blocked {
-                    TSTATE[i] = TaskState::Ready;
+            if (*TIRQ_WAITING.get())[i] {
+                (*TIRQ_WAITING.get())[i] = false;
+                if (*TSTATE.get())[i] == TaskState::Blocked {
+                    (*TSTATE.get())[i] = TaskState::Ready;
                 }
                 IRQ_WAKEUPS.fetch_add(1, Ordering::Relaxed);
             }
@@ -2195,7 +2196,7 @@ enum TaskState {
     Done,
 }
 
-static mut TEXIT: [usize; MAX_TASKS] = [0; MAX_TASKS];
+static TEXIT: Global<[usize; MAX_TASKS]> = Global::new([0; MAX_TASKS]);
 
 #[derive(Clone, Copy)]
 struct IpcStats {
@@ -2207,14 +2208,14 @@ struct IpcStats {
     max_depth: usize,
 }
 
-static mut IPC_STATS: IpcStats = IpcStats {
+static IPC_STATS: Global<IpcStats> = Global::new(IpcStats {
     sends: 0,
     receives: 0,
     denied_sends: 0,
     timeouts: 0,
     queue_full: 0,
     max_depth: 0,
-};
+});
 
 // Small FIFO mailbox per task for capability-passing IPC. A message carries a
 // small payload plus a *granted* capability set (attenuated to what the sender
@@ -2257,55 +2258,56 @@ const EMPTY_MAILBOX: Mailbox = Mailbox {
     slots: [EMPTY_IPC_MESSAGE; MAILBOX_DEPTH],
 };
 
-static mut MBOX: [Mailbox; MAX_TASKS] = [EMPTY_MAILBOX; MAX_TASKS];
+static MBOX: Global<[Mailbox; MAX_TASKS]> = Global::new([EMPTY_MAILBOX; MAX_TASKS]);
 
-static mut TRECV_WAITING: [bool; MAX_TASKS] = [false; MAX_TASKS];
-static mut TRECV_DEADLINE: [u64; MAX_TASKS] = [0; MAX_TASKS];
-static mut TRECV_PTR: [usize; MAX_TASKS] = [0; MAX_TASKS];
-static mut TRECV_LEN: [usize; MAX_TASKS] = [0; MAX_TASKS];
+static TRECV_WAITING: Global<[bool; MAX_TASKS]> = Global::new([false; MAX_TASKS]);
+static TRECV_DEADLINE: Global<[u64; MAX_TASKS]> = Global::new([0; MAX_TASKS]);
+static TRECV_PTR: Global<[usize; MAX_TASKS]> = Global::new([0; MAX_TASKS]);
+static TRECV_LEN: Global<[usize; MAX_TASKS]> = Global::new([0; MAX_TASKS]);
 
-static mut FRAMES: [[usize; 32]; MAX_TASKS] = [[0; 32]; MAX_TASKS];
-static mut TSTATE: [TaskState; MAX_TASKS] = [TaskState::Unused; MAX_TASKS];
+static FRAMES: Global<[[usize; 32]; MAX_TASKS]> = Global::new([[0; 32]; MAX_TASKS]);
+static TSTATE: Global<[TaskState; MAX_TASKS]> = Global::new([TaskState::Unused; MAX_TASKS]);
 /// Tasks parked until a device interrupt arrives (see `SYS_IRQ_WAIT`).
-static mut TIRQ_WAITING: [bool; MAX_TASKS] = [false; MAX_TASKS];
-static mut TCAPS: [usize; MAX_TASKS] = [0; MAX_TASKS];
-static mut TPERS: [u8; MAX_TASKS] = [0; MAX_TASKS];
-static mut TSATP: [usize; MAX_TASKS] = [0; MAX_TASKS]; // each task's address space (satp)
-static mut TRES: [TaskResources; MAX_TASKS] = [EMPTY_TASK_RESOURCES; MAX_TASKS];
-static mut CURRENT: usize = 0;
+static TIRQ_WAITING: Global<[bool; MAX_TASKS]> = Global::new([false; MAX_TASKS]);
+static TCAPS: Global<[usize; MAX_TASKS]> = Global::new([0; MAX_TASKS]);
+static TPERS: Global<[u8; MAX_TASKS]> = Global::new([0; MAX_TASKS]);
+// each task's address space (satp)
+static TSATP: Global<[usize; MAX_TASKS]> = Global::new([0; MAX_TASKS]);
+static TRES: Global<[TaskResources; MAX_TASKS]> = Global::new([EMPTY_TASK_RESOURCES; MAX_TASKS]);
+static CURRENT: Global<usize> = Global::new(0);
 
 fn clear_mailbox(i: usize) {
     unsafe {
-        MBOX[i] = EMPTY_MAILBOX;
-        TRECV_WAITING[i] = false;
-        TRECV_DEADLINE[i] = 0;
-        TRECV_PTR[i] = 0;
-        TRECV_LEN[i] = 0;
+        (*MBOX.get())[i] = EMPTY_MAILBOX;
+        (*TRECV_WAITING.get())[i] = false;
+        (*TRECV_DEADLINE.get())[i] = 0;
+        (*TRECV_PTR.get())[i] = 0;
+        (*TRECV_LEN.get())[i] = 0;
     }
 }
 
 unsafe fn recv_message_into(task: usize, frame: &mut [usize]) -> bool {
-    if MBOX[task].count == 0 {
+    if (*MBOX.get())[task].count == 0 {
         return false;
     }
-    let head = MBOX[task].head;
-    let msg = MBOX[task].slots[head];
+    let head = (*MBOX.get())[task].head;
+    let msg = (*MBOX.get())[task].slots[head];
     let n = msg.len.min(frame[F_A1]);
     if n > 0 {
         let dst = core::slice::from_raw_parts_mut(frame[F_A0] as *mut u8, n);
         dst.copy_from_slice(&msg.buf[..n]);
     }
-    TCAPS[task] |= msg.grant;
-    MBOX[task].slots[head] = EMPTY_IPC_MESSAGE;
-    MBOX[task].head = (head + 1) % MAILBOX_DEPTH;
-    MBOX[task].count -= 1;
+    (*TCAPS.get())[task] |= msg.grant;
+    (*MBOX.get())[task].slots[head] = EMPTY_IPC_MESSAGE;
+    (*MBOX.get())[task].head = (head + 1) % MAILBOX_DEPTH;
+    (*MBOX.get())[task].count -= 1;
     frame[F_A0] = n;
     frame[F_A1] = msg.from;
     frame[F_A2] = msg.word;
     // Services check the SENDER's authority (not their own) against this
     // kernel-attested value; a client cannot forge it from user space.
     frame[F_A3] = msg.sender_caps;
-    IPC_STATS.receives += 1;
+    (*IPC_STATS.get()).receives += 1;
     true
 }
 
@@ -2313,22 +2315,22 @@ unsafe fn expire_recv_timeouts() {
     let now = TICKS.load(Ordering::Relaxed);
     let mut i = 0usize;
     while i < MAX_TASKS {
-        if TRECV_WAITING[i] && TSTATE[i] == TaskState::Blocked && TRECV_DEADLINE[i] <= now {
-            if MBOX[i].count > 0 {
-                TRECV_WAITING[i] = false;
-                TSTATE[i] = TaskState::Ready;
+        if (*TRECV_WAITING.get())[i] && (*TSTATE.get())[i] == TaskState::Blocked && (*TRECV_DEADLINE.get())[i] <= now {
+            if (*MBOX.get())[i].count > 0 {
+                (*TRECV_WAITING.get())[i] = false;
+                (*TSTATE.get())[i] = TaskState::Ready;
             } else {
-                TRECV_WAITING[i] = false;
-                TRECV_DEADLINE[i] = 0;
-                TRECV_PTR[i] = 0;
-                TRECV_LEN[i] = 0;
-                FRAMES[i][F_SEPC] += 4;
-                FRAMES[i][F_A0] = IPC_STATUS_TIMEOUT;
-                FRAMES[i][F_A1] = usize::MAX;
-                FRAMES[i][F_A2] =
+                (*TRECV_WAITING.get())[i] = false;
+                (*TRECV_DEADLINE.get())[i] = 0;
+                (*TRECV_PTR.get())[i] = 0;
+                (*TRECV_LEN.get())[i] = 0;
+                (*FRAMES.get())[i][F_SEPC] += 4;
+                (*FRAMES.get())[i][F_A0] = IPC_STATUS_TIMEOUT;
+                (*FRAMES.get())[i][F_A1] = usize::MAX;
+                (*FRAMES.get())[i][F_A2] =
                     typed_word(IPC_SERVICE_SYSTEM, IPC_OP_TIMEOUT, 0, IPC_STATUS_TIMEOUT, 0);
-                TSTATE[i] = TaskState::Ready;
-                IPC_STATS.timeouts += 1;
+                (*TSTATE.get())[i] = TaskState::Ready;
+                (*IPC_STATS.get()).timeouts += 1;
             }
         }
         i += 1;
@@ -2346,14 +2348,14 @@ fn task_kind_name(kind: TaskKind) -> &'static str {
 
 fn reclaim_task_resources(slot: usize) {
     unsafe {
-        if slot >= MAX_TASKS || TRES[slot].count == 0 {
-            TSATP[slot] = 0;
+        if slot >= MAX_TASKS || (*TRES.get())[slot].count == 0 {
+            (*TSATP.get())[slot] = 0;
             return;
         }
-        reclaim_resources(&mut TRES[slot]);
-        TSATP[slot] = 0;
-        TCAPS[slot] = 0;
-        TPERS[slot] = PERS_NATIVE;
+        reclaim_resources(&mut (*TRES.get())[slot]);
+        (*TSATP.get())[slot] = 0;
+        (*TCAPS.get())[slot] = 0;
+        (*TPERS.get())[slot] = PERS_NATIVE;
         clear_mailbox(slot);
     }
 }
@@ -2361,7 +2363,7 @@ fn reclaim_task_resources(slot: usize) {
 fn task_owned_frames(slot: usize) -> usize {
     unsafe {
         if slot < MAX_TASKS {
-            TRES[slot].count
+            (*TRES.get())[slot].count
         } else {
             0
         }
@@ -2373,8 +2375,8 @@ fn owned_frames_by_kind(kind: TaskKind) -> usize {
         let mut total = 0usize;
         let mut i = 0usize;
         while i < MAX_TASKS {
-            if TRES[i].kind == kind {
-                total += TRES[i].count;
+            if (*TRES.get())[i].kind == kind {
+                total += (*TRES.get())[i].count;
             }
             i += 1;
         }
@@ -2387,7 +2389,7 @@ fn process_owned_frames() -> usize {
         let mut total = 0usize;
         let mut i = 0usize;
         while i < MAX_TASKS {
-            total += TRES[i].count;
+            total += (*TRES.get())[i].count;
             i += 1;
         }
         total
@@ -2398,7 +2400,7 @@ fn reclaim_finished_foreground_tasks() {
     unsafe {
         let mut i = FIRST_FOREGROUND_TASK;
         while i < MAX_TASKS {
-            if TSTATE[i] == TaskState::Done {
+            if (*TSTATE.get())[i] == TaskState::Done {
                 reclaim_task_resources(i);
             }
             i += 1;
@@ -2433,14 +2435,14 @@ const F_SP: usize = 1;
 const F_SEPC: usize = 31;
 
 fn frame_ptr(i: usize) -> *mut usize {
-    unsafe { core::ptr::addr_of_mut!(FRAMES[i]) as *mut usize }
+    unsafe { core::ptr::addr_of_mut!((*FRAMES.get())[i]) as *mut usize }
 }
 
 unsafe fn pick_next() -> Option<usize> {
     expire_recv_timeouts();
     for off in 0..MAX_TASKS {
-        let i = (CURRENT + 1 + off) % MAX_TASKS;
-        if TSTATE[i] == TaskState::Ready {
+        let i = (*CURRENT.get() + 1 + off) % MAX_TASKS;
+        if (*TSTATE.get())[i] == TaskState::Ready {
             return Some(i);
         }
     }
@@ -2453,7 +2455,7 @@ unsafe fn pick_next() -> Option<usize> {
 /// IPC is waiting for another task, not for hardware - idling for it would wait
 /// for an interrupt that is never coming.
 unsafe fn any_irq_waiting() -> bool {
-    (0..MAX_TASKS).any(|i| TIRQ_WAITING[i] && TSTATE[i] == TaskState::Blocked)
+    (0..MAX_TASKS).any(|i| (*TIRQ_WAITING.get())[i] && (*TSTATE.get())[i] == TaskState::Blocked)
 }
 
 /// Idle until hardware makes someone runnable. We service the PLIC by hand
@@ -2484,11 +2486,11 @@ unsafe fn schedule_or_return() -> *const usize {
     }
     match pick_next() {
         Some(i) => {
-            CURRENT = i;
+            *CURRENT.get() = i;
             set_active_task_mem(i); // give the new task its private stack, hide others
                                     // Switch to the task's address space (own satp for a loaded process,
                                     // the shared kernel satp for a baked task).
-            asm!("csrw satp, {}", in(reg) TSATP[i]);
+            asm!("csrw satp, {}", in(reg) (*TSATP.get())[i]);
             asm!("sfence.vma");
             frame_ptr(i) as *const usize
         }
@@ -2505,7 +2507,7 @@ extern "C" fn utrap_handler(frame_ptr: *mut usize) -> *const usize {
     let frame = unsafe { core::slice::from_raw_parts_mut(frame_ptr, 32) };
 
     unsafe {
-        let cur = CURRENT; // snapshot before any reschedule (avoids &static_mut)
+        let cur = *CURRENT.get(); // snapshot before any reschedule (avoids &static_mut)
         if interrupt {
             // Supervisor timer = preemption: the running task's full frame is
             // already saved, so round-robin to the next ready task. A task that
@@ -2535,20 +2537,20 @@ extern "C" fn utrap_handler(frame_ptr: *mut usize) -> *const usize {
                 "  [kernel] task {} DENIED: faulted on {stval:#x} (outside its grant) -- killing",
                 cur
             );
-            TSTATE[cur] = TaskState::Done;
-            TEXIT[cur] = SYS_DENIED;
+            (*TSTATE.get())[cur] = TaskState::Done;
+            (*TEXIT.get())[cur] = SYS_DENIED;
             return schedule_or_return();
         }
 
         if code == 8 {
             frame[F_SEPC] += 4; // resume after the ecall
-            let caps = TCAPS[cur];
+            let caps = (*TCAPS.get())[cur];
 
             // Pol: a Linux-personality task speaks the Linux syscall ABI. We
             // translate each Linux syscall into a capability-checked Dezh action;
             // anything we do not support returns ENOSYS, just like the user-space
             // Linux personality spike (D014).
-            if TPERS[cur] == PERS_LINUX {
+            if (*TPERS.get())[cur] == PERS_LINUX {
                 match frame[F_A7] {
                     LINUX_WRITE => {
                         let fd = frame[F_A0];
@@ -2575,8 +2577,8 @@ extern "C" fn utrap_handler(frame_ptr: *mut usize) -> *const usize {
                     }
                     LINUX_EXIT | LINUX_EXIT_GROUP => {
                         kprintln!("  [pol/linux] app exit (code {})", frame[F_A0]);
-                        TSTATE[cur] = TaskState::Done;
-                        TEXIT[cur] = frame[F_A0];
+                        (*TSTATE.get())[cur] = TaskState::Done;
+                        (*TEXIT.get())[cur] = frame[F_A0];
                         return schedule_or_return();
                     }
                     other => {
@@ -2589,13 +2591,13 @@ extern "C" fn utrap_handler(frame_ptr: *mut usize) -> *const usize {
 
             match frame[F_A7] {
                 SYS_YIELD => {
-                    TSTATE[cur] = TaskState::Ready;
+                    (*TSTATE.get())[cur] = TaskState::Ready;
                     return schedule_or_return();
                 }
                 SYS_EXIT => {
                     kprintln!("  [kernel] task {} exited (code {})", cur, frame[F_A0]);
-                    TSTATE[cur] = TaskState::Done;
-                    TEXIT[cur] = frame[F_A0];
+                    (*TSTATE.get())[cur] = TaskState::Done;
+                    (*TEXIT.get())[cur] = frame[F_A0];
                     return schedule_or_return();
                 }
                 SYS_PRINT => {
@@ -2643,7 +2645,7 @@ extern "C" fn utrap_handler(frame_ptr: *mut usize) -> *const usize {
                     // msg_send(to=a0, ptr=a1, len=a2, grant_caps=a3)
                     if caps & TASK_IPC == 0 {
                         kprintln!("  [kernel] DENIED send: task {cur} holds no IPC capability");
-                        IPC_STATS.denied_sends += 1;
+                        (*IPC_STATS.get()).denied_sends += 1;
                         frame[F_A0] = SYS_DENIED;
                         return frame_ptr;
                     }
@@ -2651,23 +2653,23 @@ extern "C" fn utrap_handler(frame_ptr: *mut usize) -> *const usize {
                     let len = frame[F_A2].min(64);
                     let requested = frame[F_A3];
                     if to >= MAX_TASKS
-                        || TSTATE[to] == TaskState::Unused
-                        || TSTATE[to] == TaskState::Done
+                        || (*TSTATE.get())[to] == TaskState::Unused
+                        || (*TSTATE.get())[to] == TaskState::Done
                     {
-                        IPC_STATS.denied_sends += 1;
+                        (*IPC_STATS.get()).denied_sends += 1;
                         frame[F_A0] = SYS_DENIED;
                         return frame_ptr;
                     }
                     // ATTENUATION: a sender can only delegate capabilities it
                     // itself holds — never widen. (caps = sender's TCAPS.)
                     let granted = requested & caps;
-                    if MBOX[to].count == MAILBOX_DEPTH {
-                        IPC_STATS.queue_full += 1;
+                    if (*MBOX.get())[to].count == MAILBOX_DEPTH {
+                        (*IPC_STATS.get()).queue_full += 1;
                         frame[F_A0] = SYS_DENIED;
                         return frame_ptr;
                     }
-                    let tail = MBOX[to].tail;
-                    let msg = &mut MBOX[to].slots[tail];
+                    let tail = (*MBOX.get())[to].tail;
+                    let msg = &mut (*MBOX.get())[to].slots[tail];
                     if len > 0 {
                         let src = core::slice::from_raw_parts(frame[F_A1] as *const u8, len);
                         msg.buf[..len].copy_from_slice(src);
@@ -2677,15 +2679,15 @@ extern "C" fn utrap_handler(frame_ptr: *mut usize) -> *const usize {
                     msg.grant = granted;
                     msg.sender_caps = caps;
                     msg.word = frame[F_A4]; // register-passed scalar (value-IPC)
-                    MBOX[to].tail = (tail + 1) % MAILBOX_DEPTH;
-                    MBOX[to].count += 1;
-                    IPC_STATS.sends += 1;
-                    if MBOX[to].count > IPC_STATS.max_depth {
-                        IPC_STATS.max_depth = MBOX[to].count;
+                    (*MBOX.get())[to].tail = (tail + 1) % MAILBOX_DEPTH;
+                    (*MBOX.get())[to].count += 1;
+                    (*IPC_STATS.get()).sends += 1;
+                    if (*MBOX.get())[to].count > (*IPC_STATS.get()).max_depth {
+                        (*IPC_STATS.get()).max_depth = (*MBOX.get())[to].count;
                     }
-                    if TSTATE[to] == TaskState::Blocked {
-                        TRECV_WAITING[to] = false;
-                        TSTATE[to] = TaskState::Ready;
+                    if (*TSTATE.get())[to] == TaskState::Blocked {
+                        (*TRECV_WAITING.get())[to] = false;
+                        (*TSTATE.get())[to] = TaskState::Ready;
                     }
                     frame[F_A0] = 0;
                     return frame_ptr;
@@ -2703,7 +2705,7 @@ extern "C" fn utrap_handler(frame_ptr: *mut usize) -> *const usize {
                     } else {
                         // Re-run the ecall when we are scheduled again.
                         frame[F_SEPC] -= 4;
-                        TSTATE[cur] = TaskState::Blocked;
+                        (*TSTATE.get())[cur] = TaskState::Blocked;
                         return schedule_or_return();
                     }
                 }
@@ -2729,15 +2731,15 @@ extern "C" fn utrap_handler(frame_ptr: *mut usize) -> *const usize {
                             IPC_STATUS_TIMEOUT,
                             0,
                         );
-                        IPC_STATS.timeouts += 1;
+                        (*IPC_STATS.get()).timeouts += 1;
                         return frame_ptr;
                     }
-                    TRECV_WAITING[cur] = true;
-                    TRECV_PTR[cur] = frame[F_A0];
-                    TRECV_LEN[cur] = frame[F_A1];
-                    TRECV_DEADLINE[cur] = TICKS.load(Ordering::Relaxed).saturating_add(timeout);
+                    (*TRECV_WAITING.get())[cur] = true;
+                    (*TRECV_PTR.get())[cur] = frame[F_A0];
+                    (*TRECV_LEN.get())[cur] = frame[F_A1];
+                    (*TRECV_DEADLINE.get())[cur] = TICKS.load(Ordering::Relaxed).saturating_add(timeout);
                     frame[F_SEPC] -= 4;
-                    TSTATE[cur] = TaskState::Blocked;
+                    (*TSTATE.get())[cur] = TaskState::Blocked;
                     return schedule_or_return();
                 }
                 SYS_IRQ_WAIT => {
@@ -2749,9 +2751,9 @@ extern "C" fn utrap_handler(frame_ptr: *mut usize) -> *const usize {
                         frame[F_A0] = now;
                         return frame_ptr;
                     }
-                    TIRQ_WAITING[cur] = true;
+                    (*TIRQ_WAITING.get())[cur] = true;
                     frame[F_SEPC] -= 4;
-                    TSTATE[cur] = TaskState::Blocked;
+                    (*TSTATE.get())[cur] = TaskState::Blocked;
                     return schedule_or_return();
                 }
                 _ => {
@@ -2771,29 +2773,29 @@ extern "C" fn utrap_handler(frame_ptr: *mut usize) -> *const usize {
 fn run_tasks(specs: &[(usize, usize, u8)]) {
     let n = specs.len().min(MAX_TASKS);
     unsafe {
-        // Index form is deliberate: `TSTATE` is still a bare `static mut`, and
-        // the iterator rewrite would take a reference to it - the pattern this
-        // crate no longer has anywhere. The scheduler tables move to
-        // `Global<T>` when they move into their own module (W10.3).
+        // Index form is still deliberate, for a different reason than before:
+        // the tables are `Global<T>` now, and the iterator rewrite would need a
+        // reference into `(*TSTATE.get())` - exactly the aliasing `Global` is
+        // here to prevent. Indexing through the raw pointer never makes one.
         #[allow(clippy::needless_range_loop)]
         for i in 0..MAX_TASKS {
             reclaim_task_resources(i);
-            TSTATE[i] = TaskState::Unused;
+            (*TSTATE.get())[i] = TaskState::Unused;
             clear_mailbox(i);
         }
         for (i, &(entry, caps, pers)) in specs.iter().take(n).enumerate() {
-            let f = &mut FRAMES[i];
+            let f = &mut (*FRAMES.get())[i];
             *f = [0; 32];
             f[F_SEPC] = entry;
             f[F_SP] = task_stack_top(i); // each task owns a private 2 MiB stack region
-            TCAPS[i] = caps;
-            TPERS[i] = pers;
-            TSATP[i] = kernel_satp(); // baked tasks share the kernel address space
-            TRES[i] = EMPTY_TASK_RESOURCES;
-            TRES[i].kind = TaskKind::LegacyBakedTask;
-            TSTATE[i] = TaskState::Ready;
+            (*TCAPS.get())[i] = caps;
+            (*TPERS.get())[i] = pers;
+            (*TSATP.get())[i] = kernel_satp(); // baked tasks share the kernel address space
+            (*TRES.get())[i] = EMPTY_TASK_RESOURCES;
+            (*TRES.get())[i].kind = TaskKind::LegacyBakedTask;
+            (*TSTATE.get())[i] = TaskState::Ready;
         }
-        CURRENT = 0;
+        *CURRENT.get() = 0;
         set_active_task_mem(0); // expose only task 0's stack region to start
                                 // Switch to the multitasking trap path and arm the preemption timer.
         asm!("csrw stvec, {}", in(reg) utrap as *const () as usize);
@@ -2815,14 +2817,14 @@ fn run_processes(specs: &[ProcessSpec]) {
     unsafe {
         // A loaded process must not see any baked-task stack region.
         set_active_task_mem(usize::MAX);
-        // Index form is deliberate: `TSTATE` is still a bare `static mut`, and
-        // the iterator rewrite would take a reference to it - the pattern this
-        // crate no longer has anywhere. The scheduler tables move to
-        // `Global<T>` when they move into their own module (W10.3).
+        // Index form is still deliberate, for a different reason than before:
+        // the tables are `Global<T>` now, and the iterator rewrite would need a
+        // reference into `(*TSTATE.get())` - exactly the aliasing `Global` is
+        // here to prevent. Indexing through the raw pointer never makes one.
         #[allow(clippy::needless_range_loop)]
         for i in 0..MAX_TASKS {
             reclaim_task_resources(i);
-            TSTATE[i] = TaskState::Unused;
+            (*TSTATE.get())[i] = TaskState::Unused;
             clear_mailbox(i);
         }
         let mut launched = 0usize;
@@ -2832,7 +2834,7 @@ fn run_processes(specs: &[ProcessSpec]) {
                 kprintln!("  [kernel] process launch failed: out of frames");
                 continue;
             };
-            let f = &mut FRAMES[i];
+            let f = &mut (*FRAMES.get())[i];
             *f = [0; 32];
             f[F_SEPC] = build.entry;
             f[F_SP] = USER_STACK_TOP; // each process has its own stack in its own space
@@ -2840,11 +2842,11 @@ fn run_processes(specs: &[ProcessSpec]) {
             f[F_A1] = spec.arg1;
             f[F_A2] = spec.arg2;
             f[F_A3] = spec.arg3;
-            TCAPS[i] = spec.caps;
-            TPERS[i] = spec.personality;
-            TSATP[i] = proc_satp(build.root);
-            TRES[i] = build.resources;
-            TSTATE[i] = TaskState::Ready;
+            (*TCAPS.get())[i] = spec.caps;
+            (*TPERS.get())[i] = spec.personality;
+            (*TSATP.get())[i] = proc_satp(build.root);
+            (*TRES.get())[i] = build.resources;
+            (*TSTATE.get())[i] = TaskState::Ready;
             if first_ready == usize::MAX {
                 first_ready = i;
             }
@@ -2853,10 +2855,10 @@ fn run_processes(specs: &[ProcessSpec]) {
         if launched == 0 {
             return;
         }
-        CURRENT = first_ready;
+        *CURRENT.get() = first_ready;
         asm!("csrw stvec, {}", in(reg) utrap as *const () as usize);
         sbi_set_timer(rdtime() + QUANTUM);
-        asm!("csrw satp, {}", in(reg) TSATP[first_ready]); // enter the first process's address space
+        asm!("csrw satp, {}", in(reg) (*TSATP.get())[first_ready]); // enter the first process's address space
         asm!("sfence.vma");
         run_first(frame_ptr(first_ready) as *const usize);
         // Back in the kernel address space once every process has exited.
@@ -2866,7 +2868,7 @@ fn run_processes(specs: &[ProcessSpec]) {
         sbi_set_timer(rdtime() + TIMER_DELTA);
         let mut i = 0usize;
         while i < MAX_TASKS {
-            if TSTATE[i] == TaskState::Done {
+            if (*TSTATE.get())[i] == TaskState::Done {
                 reclaim_task_resources(i);
             }
             i += 1;
@@ -2876,10 +2878,10 @@ fn run_processes(specs: &[ProcessSpec]) {
 
 fn run_scheduler_from(first: usize) {
     unsafe {
-        CURRENT = first;
+        *CURRENT.get() = first;
         asm!("csrw stvec, {}", in(reg) utrap as *const () as usize);
         sbi_set_timer(rdtime() + QUANTUM);
-        asm!("csrw satp, {}", in(reg) TSATP[first]);
+        asm!("csrw satp, {}", in(reg) (*TSATP.get())[first]);
         asm!("sfence.vma");
         run_first(frame_ptr(first) as *const usize);
         asm!("csrw satp, {}", in(reg) kernel_satp());
@@ -2894,11 +2896,11 @@ fn spawn_process_at(slot: usize, spec: &ProcessSpec, kind: TaskKind) -> bool {
         reclaim_task_resources(slot);
         let Some(build) = build_address_space(spec, kind) else {
             kprintln!("  [kernel] process launch failed: out of frames");
-            TSTATE[slot] = TaskState::Unused;
+            (*TSTATE.get())[slot] = TaskState::Unused;
             clear_mailbox(slot);
             return false;
         };
-        let f = &mut FRAMES[slot];
+        let f = &mut (*FRAMES.get())[slot];
         *f = [0; 32];
         f[F_SEPC] = build.entry;
         f[F_SP] = USER_STACK_TOP;
@@ -2906,13 +2908,13 @@ fn spawn_process_at(slot: usize, spec: &ProcessSpec, kind: TaskKind) -> bool {
         f[F_A1] = spec.arg1;
         f[F_A2] = spec.arg2;
         f[F_A3] = spec.arg3;
-        TCAPS[slot] = spec.caps;
-        TPERS[slot] = spec.personality;
-        TSATP[slot] = proc_satp(build.root);
-        TRES[slot] = build.resources;
-        TEXIT[slot] = 0;
+        (*TCAPS.get())[slot] = spec.caps;
+        (*TPERS.get())[slot] = spec.personality;
+        (*TSATP.get())[slot] = proc_satp(build.root);
+        (*TRES.get())[slot] = build.resources;
+        (*TEXIT.get())[slot] = 0;
         clear_mailbox(slot);
-        TSTATE[slot] = TaskState::Ready;
+        (*TSTATE.get())[slot] = TaskState::Ready;
         true
     }
 }
@@ -2922,10 +2924,10 @@ fn clear_foreground_tasks() {
         let mut i = FIRST_FOREGROUND_TASK;
         while i < MAX_TASKS {
             reclaim_task_resources(i);
-            TSTATE[i] = TaskState::Unused;
+            (*TSTATE.get())[i] = TaskState::Unused;
             clear_mailbox(i);
-            TCAPS[i] = 0;
-            TEXIT[i] = 0;
+            (*TCAPS.get())[i] = 0;
+            (*TEXIT.get())[i] = 0;
             i += 1;
         }
     }
@@ -2955,7 +2957,7 @@ fn run_foreground_processes(specs: &[ProcessSpec]) {
 
 fn print_ipcstat() {
     unsafe {
-        let stats = IPC_STATS;
+        let stats = *IPC_STATS.get();
         kprintln!(
             "ipcstat: sends={} receives={} denied_sends={} timeouts={} queue_full={} max_depth={}",
             stats.sends,
@@ -4207,7 +4209,7 @@ fn calc_command(plan: &KernelPlan, arg: &str) {
     run_foreground_processes(&[
         ProcessSpec::new(CALC_ELF, TASK_PRINT | TASK_IPC, CALC_ROLE_EVAL).args(op, a, b),
     ]);
-    if unsafe { TEXIT[FIRST_FOREGROUND_TASK] } == 0 {
+    if unsafe { (*TEXIT.get())[FIRST_FOREGROUND_TASK] } == 0 {
         if let Some(result) = calc_eval(op, a, b) {
             let expr = format!("{} {} {} = {}", a_s, op_s, b_s, result);
             run_registered_virtio_client(plan, BLK_REQ_CALC_SET, &expr);
@@ -6059,11 +6061,11 @@ fn print_tasks() {
             kprintln!(
                 "  task{} state={:<7} kind={:<10} frames={:<3} caps={:#x} exit={} service={}",
                 i,
-                task_state_name(TSTATE[i]),
-                task_kind_name(TRES[i].kind),
+                task_state_name((*TSTATE.get())[i]),
+                task_kind_name((*TRES.get())[i].kind),
                 task_owned_frames(i),
-                TCAPS[i],
-                TEXIT[i],
+                (*TCAPS.get())[i],
+                (*TEXIT.get())[i],
                 service_for_task(i)
             );
             i += 1;

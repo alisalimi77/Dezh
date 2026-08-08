@@ -146,7 +146,7 @@ pub(crate) fn marz_send_to(plan: &KernelPlan, arg: &str, ahd: u16) {
     )
     .args(marz_dma_pa(), marz_dest_packed(dest), 0)
     .virtio_net()]);
-    let st = unsafe { TEXIT[FIRST_FOREGROUND_TASK] };
+    let st = unsafe { (*TEXIT.get())[FIRST_FOREGROUND_TASK] };
     record_event(
         "kernel",
         "marz.send",
@@ -208,7 +208,7 @@ pub(crate) fn run_marz_ping(arg: &str) {
     )
     .args(marz_dma_pa(), marz_dest_packed(dest), 0)
     .virtio_net()]);
-    let st = unsafe { TEXIT[FIRST_FOREGROUND_TASK] };
+    let st = unsafe { (*TEXIT.get())[FIRST_FOREGROUND_TASK] };
     record_event(
         "kernel",
         "marz.ping",

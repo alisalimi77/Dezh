@@ -109,7 +109,7 @@ pub(crate) fn run_virtio_client_ns_raw(
             .virtio_dma(),
     ]);
     refresh_virtio_service_state();
-    unsafe { TEXIT[FIRST_FOREGROUND_TASK] }
+    unsafe { (*TEXIT.get())[FIRST_FOREGROUND_TASK] }
 }
 
 pub(crate) fn run_registered_virtio_client_status(plan: &KernelPlan, req: usize, input: &str) -> usize {
@@ -128,7 +128,7 @@ pub(crate) fn run_registered_virtio_client_status(plan: &KernelPlan, req: usize,
             .virtio_dma(),
     ]);
     refresh_virtio_service_state();
-    unsafe { TEXIT[FIRST_FOREGROUND_TASK] }
+    unsafe { (*TEXIT.get())[FIRST_FOREGROUND_TASK] }
 }
 
 pub(crate) fn run_registered_virtio_sector_status(
@@ -151,7 +151,7 @@ pub(crate) fn run_registered_virtio_sector_status(
             .virtio_dma(),
     ]);
     refresh_virtio_service_state();
-    unsafe { TEXIT[FIRST_FOREGROUND_TASK] }
+    unsafe { (*TEXIT.get())[FIRST_FOREGROUND_TASK] }
 }
 
 pub(crate) fn run_virtio_blk_daemon_demo(plan: &KernelPlan) {

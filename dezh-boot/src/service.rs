@@ -164,18 +164,18 @@ pub(crate) fn refresh_virtio_service_state() {
         unsafe {
             let task = (*SERVICES.get())[i].task;
             if task < MAX_TASKS {
-                if TSTATE[task] == TaskState::Blocked || TSTATE[task] == TaskState::Ready {
+                if (*TSTATE.get())[task] == TaskState::Blocked || (*TSTATE.get())[task] == TaskState::Ready {
                     (*SERVICES.get())[i].state = ServiceState::Running;
                     (*SERVICES.get())[i].fault = "";
-                } else if TSTATE[task] == TaskState::Done && TEXIT[task] == 0 {
+                } else if (*TSTATE.get())[task] == TaskState::Done && (*TEXIT.get())[task] == 0 {
                     (*SERVICES.get())[i].state = ServiceState::Stopped;
                     (*SERVICES.get())[i].fault = "manual stop";
-                    (*SERVICES.get())[i].last_exit = TEXIT[task];
+                    (*SERVICES.get())[i].last_exit = (*TEXIT.get())[task];
                     reclaim_task_resources(task);
-                } else if TSTATE[task] == TaskState::Done {
+                } else if (*TSTATE.get())[task] == TaskState::Done {
                     (*SERVICES.get())[i].state = ServiceState::Faulted;
                     (*SERVICES.get())[i].fault = "driver exited or faulted";
-                    (*SERVICES.get())[i].last_exit = TEXIT[task];
+                    (*SERVICES.get())[i].last_exit = (*TEXIT.get())[task];
                     reclaim_task_resources(task);
                 }
             }
@@ -189,7 +189,7 @@ pub(crate) fn ensure_virtio_block_service(_plan: &KernelPlan) -> Option<usize> {
         let task = (*SERVICES.get())[idx].task;
         if (*SERVICES.get())[idx].state == ServiceState::Running
             && task < MAX_TASKS
-            && (TSTATE[task] == TaskState::Blocked || TSTATE[task] == TaskState::Ready)
+            && ((*TSTATE.get())[task] == TaskState::Blocked || (*TSTATE.get())[task] == TaskState::Ready)
         {
             return Some(task);
         }
@@ -329,7 +329,7 @@ pub(crate) fn svc_stop_virtio(_plan: &KernelPlan) {
             .args(daemon, 0, BLK_REQ_STOP)
             .virtio_dma(),
     ]);
-    let st = unsafe { TEXIT[FIRST_FOREGROUND_TASK] };
+    let st = unsafe { (*TEXIT.get())[FIRST_FOREGROUND_TASK] };
     refresh_virtio_service_state();
     unsafe {
         kprintln!(
