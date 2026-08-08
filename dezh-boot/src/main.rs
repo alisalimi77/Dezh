@@ -18,6 +18,7 @@
 
 extern crate alloc;
 
+mod arch;
 mod dev;
 mod mm;
 mod pkg;
@@ -27,6 +28,8 @@ mod pkg;
 // is used by every module that owns kernel state.
 pub(crate) use dev::uart::{Uart, UART_BASE};
 use mm::global::Global;
+use arch::finisher::{shutdown, FINISH_FAIL, FINISH_PASS};
+use arch::timer::{rdtime, sbi_set_timer, QUANTUM, STIE, TICKS, TIMER_DELTA, TIMER_HZ, SKIP_LF_AFTER_CR};
 
 // The RISC-V implementation of the shared Dezh-core Host: capability check +
 // the side effect (kernel console). The Dezh-IR engine lives in dezh-core and
@@ -382,38 +385,6 @@ struct TrapFrame {
     a5: usize,
     a6: usize,
     a7: usize,
-}
-
-// --- QEMU `virt` SiFive test finisher: cleanly exit the emulator. ----------
-const TEST_FINISHER: *mut u32 = 0x10_0000 as *mut u32;
-const FINISH_PASS: u32 = 0x5555;
-const FINISH_FAIL: u32 = 0x3333;
-
-fn shutdown(code: u32) -> ! {
-    unsafe { write_volatile(TEST_FINISHER, code) }
-    loop {
-        unsafe { asm!("wfi") }
-    }
-}
-
-// --- Timer (silent background uptime tick). --------------------------------
-const TIMER_DELTA: u64 = 1_000_000;
-const TIMER_HZ: u64 = 10;
-const QUANTUM: u64 = 50_000; // ~5 ms scheduler time slice for preemption
-const STIE: usize = 1 << 5; // supervisor timer interrupt enable (in `sie`)
-static TICKS: AtomicU64 = AtomicU64::new(0);
-static SKIP_LF_AFTER_CR: AtomicBool = AtomicBool::new(false);
-
-fn rdtime() -> u64 {
-    let t: u64;
-    unsafe { asm!("rdtime {}", out(reg) t) };
-    t
-}
-
-fn sbi_set_timer(stime: u64) {
-    unsafe {
-        asm!("ecall", in("a0") stime, in("a7") 0usize, lateout("a0") _, lateout("a1") _);
-    }
 }
 
 // --- Syscall ABI (a7 = number; a0.. = args; a0 = result). ------------------
