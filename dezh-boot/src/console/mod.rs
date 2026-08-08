@@ -38,7 +38,7 @@ use crate::demos::smp::*;
 use crate::difc::{declassify, endorse, taint_show};
 use crate::mm::frames::{frame_alloc, frame_free, frames_init, FRAME_FREE, FRAME_TOTAL};
 use crate::mm::paging::{build_page_tables, enable_paging};
-use crate::net::marz::{marz_dest_authority, run_marz_ping, run_marz_send};
+use crate::net::marz::{marz_dest_authority, marz_effect, run_marz_ping, run_marz_send};
 use crate::ocap::device::dev_authority_set;
 use crate::ocap::ns::{ns_grant, ns_revoke};
 use crate::proc::loader::{ProcessSpec, TaskKind};
@@ -485,6 +485,7 @@ pub(crate) fn dispatch(cmd: &str, arg: &str, plan: &KernelPlan, memory: &[Memory
         "irq-stat" => irq_stat(),
         "net-probe" => net_probe(),
         "marz-send" => run_marz_send(plan, arg),
+        "marz-effect" => marz_effect(plan, arg, 0),
         "marz-ping" => run_marz_ping(arg),
         "dev-revoke" => dev_authority_set(arg, false),
         "dev-grant" => dev_authority_set(arg, true),

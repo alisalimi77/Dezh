@@ -379,6 +379,13 @@ pub(crate) const COMMANDS: &[CommandSpec] = &[
         help: "Marz: transmit one real frame to an authorized destination. marz-send <dest>",
     },
     CommandSpec {
+        name: "marz-effect",
+        cap: cap::SPAWN,
+        cap_name: "SPAWN",
+        group: "Effects",
+        help: "Marz: a REAL external effect via the host gateway, recorded compensatable. marz-effect <dest> <verb> <arg>",
+    },
+    CommandSpec {
         name: "marz-ping",
         cap: cap::SPAWN,
         cap_name: "SPAWN",
