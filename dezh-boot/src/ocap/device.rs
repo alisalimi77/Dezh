@@ -13,8 +13,9 @@
 //! Boot hart only: device authority is minted, checked and revoked from the
 //! console, which does not run on a secondary hart. No other hart reads it.
 
+use crate::audit::record_event;
 use crate::mm::global::Global;
-use crate::{kprintln, record_event};
+use crate::{kprintln};
 
 // Only the net object has a revocation path today, but the block object owns
 // index 0 of DEV_NAMES; naming it keeps the enumeration and the name table

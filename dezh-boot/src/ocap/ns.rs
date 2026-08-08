@@ -22,11 +22,9 @@
 //! Boot hart only: namespace authority is minted, checked and revoked from the
 //! console and from the storage IPC path, both of which run on the boot hart.
 
+use crate::audit::record_event;
 use crate::mm::global::Global;
-use crate::{
-    cairn_parse_ns, cairn_req, kprintln, record_event, run_registered_virtio_client_ns,
-    task_ns_cap, KernelPlan, BLK_REQ_NS_GRANT, BLK_REQ_NS_REVOKE, CAIRN_NS_NAMES,
-};
+use crate::{cairn_parse_ns, cairn_req, kprintln, run_registered_virtio_client_ns, task_ns_cap, KernelPlan, BLK_REQ_NS_GRANT, BLK_REQ_NS_REVOKE, CAIRN_NS_NAMES};
 
 // Boot hart only: namespace authority is minted, checked and revoked from the
 // console and from the storage IPC path, both of which run on the boot hart.

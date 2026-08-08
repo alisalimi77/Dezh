@@ -862,7 +862,7 @@ fn recover_from_journal(plan: &KernelPlan, manual: bool) -> bool {
                     "[pkg-recover] journal corrupt ({reason}); store degraded, package run blocked"
                 );
                 set_degraded(true);
-                crate::record_event("installer", "pkg.recover", "journal", "CORRUPT");
+                crate::audit::record_event("installer", "pkg.recover", "journal", "CORRUPT");
                 return false;
             }
             kprintln!("[pkg-recover] journal corrupt ({reason}); quarantining pending slots and clearing journal");
@@ -873,7 +873,7 @@ fn recover_from_journal(plan: &KernelPlan, manual: bool) -> bool {
             }
             set_degraded(false);
             invalidate_loaded();
-            crate::record_event("installer", "pkg.recover", "journal", "QUARANTINED");
+            crate::audit::record_event("installer", "pkg.recover", "journal", "QUARANTINED");
             true
         }
         JournalState::Valid(rec) => {
@@ -887,7 +887,7 @@ fn recover_from_journal(plan: &KernelPlan, manual: bool) -> bool {
                             "[pkg-recover] rolled back incomplete install for '{}'",
                             rec.name()
                         );
-                        crate::record_event("installer", "pkg.recover", "package", "ROLLED_BACK");
+                        crate::audit::record_event("installer", "pkg.recover", "package", "ROLLED_BACK");
                     }
                     JOURNAL_PHASE_REGISTRY_PENDING => {
                         let reg = unsafe { REGISTRY };
@@ -907,7 +907,7 @@ fn recover_from_journal(plan: &KernelPlan, manual: bool) -> bool {
                                 "[pkg-recover] committed verified pending update '{}'",
                                 rec.name()
                             );
-                            crate::record_event("installer", "pkg.recover", "package", "COMMITTED");
+                            crate::audit::record_event("installer", "pkg.recover", "package", "COMMITTED");
                         } else if rec.op == JOURNAL_OP_INSTALL
                             && state == STATE_PENDING_INSTALL
                             && verify_slot_blob(plan, rec)
@@ -917,14 +917,14 @@ fn recover_from_journal(plan: &KernelPlan, manual: bool) -> bool {
                                 "[pkg-recover] committed verified pending install '{}'",
                                 rec.name()
                             );
-                            crate::record_event("installer", "pkg.recover", "package", "COMMITTED");
+                            crate::audit::record_event("installer", "pkg.recover", "package", "COMMITTED");
                         } else {
                             set_entry_state(rec.slot, STATE_QUARANTINED);
                             kprintln!(
                                 "[pkg-recover] quarantined suspicious pending install '{}'",
                                 rec.name()
                             );
-                            crate::record_event(
+                            crate::audit::record_event(
                                 "installer",
                                 "pkg.recover",
                                 "package",
@@ -950,7 +950,7 @@ fn recover_from_journal(plan: &KernelPlan, manual: bool) -> bool {
                             "[pkg-recover] completed interrupted rollback for '{}'",
                             rec.name()
                         );
-                        crate::record_event("installer", "pkg.recover", "package", "ROLLED_BACK");
+                        crate::audit::record_event("installer", "pkg.recover", "package", "ROLLED_BACK");
                     } else {
                         set_degraded(true);
                         ok = false;
@@ -962,7 +962,7 @@ fn recover_from_journal(plan: &KernelPlan, manual: bool) -> bool {
                         "[pkg-recover] completed interrupted remove for '{}'",
                         rec.name()
                     );
-                    crate::record_event("installer", "pkg.recover", "package", "REMOVED");
+                    crate::audit::record_event("installer", "pkg.recover", "package", "REMOVED");
                 }
                 _ => {
                     set_degraded(true);
@@ -1226,7 +1226,7 @@ pub(crate) fn pkg_recv(plan: &KernelPlan) {
         kprintln!("[pkg-recv] rejected: journal write failed before install");
         return;
     }
-    crate::record_event("installer", "pkg.tx.start", "package", "OK");
+    crate::audit::record_event("installer", "pkg.tx.start", "package", "OK");
 
     if !write_blob(plan, slot, bytes) {
         kprintln!("[pkg-recv] rejected: package blob write failed");
@@ -1241,7 +1241,7 @@ pub(crate) fn pkg_recv(plan: &KernelPlan) {
         kprintln!("[pkg-recv] rejected: package blob read-back verify failed");
         return;
     }
-    crate::record_event("installer", "pkg.blob.verify", "package", "OK");
+    crate::audit::record_event("installer", "pkg.blob.verify", "package", "OK");
 
     encode_registry_entry(
         slot,
@@ -1263,14 +1263,14 @@ pub(crate) fn pkg_recv(plan: &KernelPlan) {
         kprintln!("[pkg-recv] rejected: pending registry commit failed");
         return;
     }
-    crate::record_event("installer", "pkg.registry.pending", "package", "OK");
+    crate::audit::record_event("installer", "pkg.registry.pending", "package", "OK");
 
     set_entry_state(slot, STATE_ACTIVE);
     if !write_registry(plan) || !init_store_marker(plan) || !clear_journal(plan) {
         kprintln!("[pkg-recv] rejected: package registry commit failed");
         return;
     }
-    crate::record_event("installer", "pkg.tx.commit", "package", "OK");
+    crate::audit::record_event("installer", "pkg.tx.commit", "package", "OK");
 
     unsafe {
         PKGS[slot] = EMPTY_PKG;
@@ -1322,7 +1322,7 @@ pub(crate) fn pkg_run(plan: &KernelPlan, arg: &str) {
     let name = arg.trim();
     if !ensure_loaded(plan) {
         kprintln!("[pkg-run] package store unavailable or degraded");
-        crate::record_event("kernel", "pkg.run", "package", "DENIED");
+        crate::audit::record_event("kernel", "pkg.run", "package", "DENIED");
         return;
     }
     let Some(i) = find_runtime_pkg(name) else {
@@ -1336,7 +1336,7 @@ pub(crate) fn pkg_run(plan: &KernelPlan, arg: &str) {
         } else {
             kprintln!("[pkg-run] no installed package '{name}' (see pkg-list)");
         }
-        crate::record_event("kernel", "pkg.run", "package", "DENIED");
+        crate::audit::record_event("kernel", "pkg.run", "package", "DENIED");
         return;
     };
     run_loaded_entry(plan, i, unsafe { PKGS[i].mcaps }, 0, "pkg-run");
@@ -1358,7 +1358,7 @@ fn run_loaded_entry(plan: &KernelPlan, i: usize, eff_mcaps: u32, ahd_id: u16, la
     );
     mcap_names(eff_mcaps, &mut crate::Uart);
     kprintln!();
-    crate::record_event("installer", "pkg.run", "package", "start");
+    crate::audit::record_event("installer", "pkg.run", "package", "start");
     match entry.kind {
         dzp::KIND_DEZH_IR => {
             // Effects this package makes carry its intent (Ahd) and derived cap
@@ -1378,10 +1378,10 @@ fn run_loaded_entry(plan: &KernelPlan, i: usize, eff_mcaps: u32, ahd_id: u16, la
                             "[{label}] DENIED by kernel: {} (grant it in app.toml caps=[...])",
                             t.msg()
                         );
-                        crate::record_event("kernel", "pkg.run", "package", "DENIED");
+                        crate::audit::record_event("kernel", "pkg.run", "package", "DENIED");
                     } else {
                         kprintln!("[{label}] TRAP: {}", t.msg());
-                        crate::record_event("kernel", "pkg.run", "package", "TRAP");
+                        crate::audit::record_event("kernel", "pkg.run", "package", "TRAP");
                     }
                     return;
                 }
@@ -1398,7 +1398,7 @@ fn run_loaded_entry(plan: &KernelPlan, i: usize, eff_mcaps: u32, ahd_id: u16, la
         }
         _ => kprintln!("[{label}] unknown payload kind"),
     }
-    crate::record_event("installer", "pkg.run", "package", "OK");
+    crate::audit::record_event("installer", "pkg.run", "package", "OK");
 }
 
 // --- Ahd: intent as the authority-derivation mechanism (W8, D020/D021) --------
@@ -1540,7 +1540,7 @@ pub(crate) fn intent_open(arg: &str) {
         kprintln!("  lease={lease} run(s) then auto-revoked (or revoke now: intent-revoke {id})");
     }
     kprintln!("  run a package under it with: intent-run {id} <app>");
-    crate::record_event("intent", "intent.open", "ahd", "OK");
+    crate::audit::record_event("intent", "intent.open", "ahd", "OK");
 }
 
 pub(crate) fn intent_list() {
@@ -1591,7 +1591,7 @@ pub(crate) fn intent_revoke(arg: &str) {
     };
     let Some(slot) = ahd_slot_index(id) else {
         kprintln!("[intent-revoke] no open Ahd #{id}");
-        crate::record_event("intent", "intent.revoke", "ahd", "DENIED");
+        crate::audit::record_event("intent", "intent.revoke", "ahd", "DENIED");
         return;
     };
     if unsafe { AHDS[slot].revoked } {
@@ -1604,7 +1604,7 @@ pub(crate) fn intent_revoke(arg: &str) {
     }
     kprintln!("[intent-revoke] Ahd #{id} REVOKED; it authorizes nothing further");
     kprintln!("  past effects keep their provenance: tbar {id} / sfar-plan {id} still resolve");
-    crate::record_event("intent", "intent.revoke", "ahd", "OK");
+    crate::audit::record_event("intent", "intent.revoke", "ahd", "OK");
 }
 
 /// Outcome of trying to use an intent once, applying the revoke/lease gate.
@@ -1647,7 +1647,7 @@ pub(crate) fn lease_demo() {
     kprintln!("[lease-demo] an intent can be LEASED (bounded runs) or REVOKED; authority is withdrawn, provenance is not");
     let Some((a, _k, _c)) = open_ahd("compute", 1) else {
         kprintln!("[lease-demo] FAIL: no free Ahd slot");
-        crate::record_event("intent", "lease.demo", "ahd", "fail");
+        crate::audit::record_event("intent", "lease.demo", "ahd", "fail");
         return;
     };
     kprintln!("[lease-demo] 1/3 opened Ahd#{a} with lease=1 (authorizes exactly one run)");
@@ -1687,7 +1687,7 @@ pub(crate) fn lease_demo() {
         && matches!(use2, LeaseUse::DeniedExhausted | LeaseUse::DeniedRevoked)
         && use3_denied;
     kprintln!("[lease-demo] 3/3 note: effects made under a now-revoked intent still resolve on the ledger (tbar/sfar) - provenance outlives authority");
-    crate::record_event("intent", "lease.demo", "ahd", if pass { "pass" } else { "fail" });
+    crate::audit::record_event("intent", "lease.demo", "ahd", if pass { "pass" } else { "fail" });
     if pass {
         kprintln!("[lease-demo] PASS: a lease bounds authority to N runs; revoke withdraws it immediately; neither erases provenance");
     } else {
@@ -1709,19 +1709,19 @@ pub(crate) fn intent_run(plan: &KernelPlan, arg: &str) {
     };
     let Some(slot) = ahd_slot_index(id) else {
         kprintln!("[intent-run] no open Ahd #{id} (see intent-list; open with intent-open)");
-        crate::record_event("intent", "intent.run", "ahd", "DENIED");
+        crate::audit::record_event("intent", "intent.run", "ahd", "DENIED");
         return;
     };
     let (ceiling, revoked, lease) =
         unsafe { (AHDS[slot].ceiling, AHDS[slot].revoked, AHDS[slot].lease) };
     if revoked {
         kprintln!("[intent-run] DENIED: Ahd #{id} is REVOKED; it authorizes nothing (re-open a fresh intent)");
-        crate::record_event("intent", "intent.run", "ahd", "DENIED");
+        crate::audit::record_event("intent", "intent.run", "ahd", "DENIED");
         return;
     }
     if lease == 0 {
         kprintln!("[intent-run] DENIED: Ahd #{id} lease is exhausted (auto-revoked)");
-        crate::record_event("intent", "intent.run", "ahd", "DENIED");
+        crate::audit::record_event("intent", "intent.run", "ahd", "DENIED");
         return;
     }
     if !ensure_loaded(plan) {
@@ -1730,7 +1730,7 @@ pub(crate) fn intent_run(plan: &KernelPlan, arg: &str) {
     }
     let Some(i) = find_runtime_pkg(name) else {
         kprintln!("[intent-run] no installed package '{name}' (see pkg-list)");
-        crate::record_event("intent", "intent.run", "package", "DENIED");
+        crate::audit::record_event("intent", "intent.run", "package", "DENIED");
         return;
     };
     let requested = unsafe { PKGS[i].mcaps };
@@ -1746,7 +1746,7 @@ pub(crate) fn intent_run(plan: &KernelPlan, arg: &str) {
         kprint!("[intent-run] beyond-intent DENIED (dropped): ");
         mcap_names(beyond, &mut crate::Uart);
         kprintln!(" -- authority cannot exceed the Ahd");
-        crate::record_event("intent", "intent.derive", "cap", "DENIED");
+        crate::audit::record_event("intent", "intent.derive", "cap", "DENIED");
     }
     kprint!("[intent-run] derived (proven subset of Ahd) = ");
     mcap_names(derived, &mut crate::Uart);
@@ -1760,7 +1760,7 @@ pub(crate) fn intent_run(plan: &KernelPlan, arg: &str) {
         if left == 0 {
             unsafe { AHDS[slot].revoked = true };
             kprintln!("[intent-run] Ahd #{id} lease exhausted -> auto-REVOKED; further runs are denied");
-            crate::record_event("intent", "intent.lease", "ahd", "EXPIRED");
+            crate::audit::record_event("intent", "intent.lease", "ahd", "EXPIRED");
         } else {
             kprintln!("[intent-run] Ahd #{id} lease remaining={left}");
         }
@@ -1852,12 +1852,12 @@ pub(crate) fn sand_demo_effect(plan: &KernelPlan) -> u16 {
     };
     match ir::run(prog, &mut host) {
         Ok(()) => {
-            crate::record_event("intent", "sand.effect", "ns:agent", "OK");
+            crate::audit::record_event("intent", "sand.effect", "ns:agent", "OK");
             id
         }
         Err(t) => {
             kprintln!("[sand-demo] the agent trapped before recording an effect: {}", t.msg());
-            crate::record_event("intent", "sand.effect", "ns:agent", "TRAP");
+            crate::audit::record_event("intent", "sand.effect", "ns:agent", "TRAP");
             0
         }
     }
@@ -1954,14 +1954,14 @@ pub(crate) fn sig_demo(plan: &KernelPlan) {
 
     if !sig::is_signed(env) {
         kprintln!("[sig-demo] FAIL: demo package is not a signed envelope");
-        crate::record_event("installer", "sig.demo", "package", "fail");
+        crate::audit::record_event("installer", "sig.demo", "package", "fail");
         return;
     }
     let e = match sig::parse_envelope(env) {
         Ok(e) => e,
         Err(er) => {
             kprintln!("[sig-demo] FAIL: {}", er.msg());
-            crate::record_event("installer", "sig.demo", "package", "fail");
+            crate::audit::record_event("installer", "sig.demo", "package", "fail");
             return;
         }
     };
@@ -1972,13 +1972,13 @@ pub(crate) fn sig_demo(plan: &KernelPlan) {
     // Trust decision (root-anchored trust store) is separate from crypto.
     let Some(ki) = trust_lookup(&e.signer_pk) else {
         kprintln!("[sig-demo]   UNTRUSTED signer -> install REFUSED");
-        crate::record_event("installer", "sig.demo", "package", "fail");
+        crate::audit::record_event("installer", "sig.demo", "package", "fail");
         return;
     };
     let (ceiling, label) = unsafe { (TRUST_STORE[ki].ceiling, TRUST_STORE[ki].label) };
     if unsafe { TRUST_STORE[ki].revoked } {
         kprintln!("[sig-demo]   signer key REVOKED -> install REFUSED");
-        crate::record_event("installer", "sig.demo", "package", "fail");
+        crate::audit::record_event("installer", "sig.demo", "package", "fail");
         return;
     }
     kprintln!("[sig-demo] 2/5 trusted publisher '{label}' found in the trust store");
@@ -1987,7 +1987,7 @@ pub(crate) fn sig_demo(plan: &KernelPlan) {
     let valid = verify_envelope_sig(env, &e);
     if !valid {
         kprintln!("[sig-demo]   signature INVALID -> install REFUSED");
-        crate::record_event("installer", "sig.demo", "package", "fail");
+        crate::audit::record_event("installer", "sig.demo", "package", "fail");
         return;
     }
     kprintln!("[sig-demo] 3/5 signature VALID (Ed25519 over inner .dzp + counter)");
@@ -1996,7 +1996,7 @@ pub(crate) fn sig_demo(plan: &KernelPlan) {
     let inner = &env[e.inner_offset..e.inner_offset + e.inner_len];
     let Ok(pkg) = dzp::parse(inner) else {
         kprintln!("[sig-demo] FAIL: inner .dzp did not parse");
-        crate::record_event("installer", "sig.demo", "package", "fail");
+        crate::audit::record_event("installer", "sig.demo", "package", "fail");
         return;
     };
     let requested = parse_mcaps(pkg.manifest).unwrap_or(0);
@@ -2057,7 +2057,7 @@ pub(crate) fn sig_demo(plan: &KernelPlan) {
         && ledger == 0
         && refuse_tamper
         && refuse_revoked;
-    crate::record_event("installer", "sig.demo", "package", if pass { "OK" } else { "fail" });
+    crate::audit::record_event("installer", "sig.demo", "package", if pass { "OK" } else { "fail" });
     if pass {
         kprintln!("[sig-demo] PASS: only a trusted signer's valid signature installs, attenuated to the publisher ceiling; tampered + revoked are refused");
         kprintln!("[sig-demo] and even a signed package is still capability-confined + effect-reversible (the xz lesson): signing is provenance, not safety");
@@ -2266,7 +2266,7 @@ pub(crate) fn pkg_remove(plan: &KernelPlan, arg: &str) {
     }
     invalidate_loaded();
     kprintln!("[pkg-remove] removed '{name}' (logical remove; grants revoked)");
-    crate::record_event("installer", "pkg.remove", "package", "OK");
+    crate::audit::record_event("installer", "pkg.remove", "package", "OK");
 }
 
 pub(crate) fn pkg_store(plan: &KernelPlan) {
@@ -2512,7 +2512,7 @@ pub(crate) fn pkg_update(plan: &KernelPlan, arg: &str) {
         kprint!("[pkg-update] review required: new caps requested: ");
         mcap_names(added, &mut crate::Uart);
         kprintln!("; rerun with --allow-new-caps after review");
-        crate::record_event("installer", "pkg.update", "package", "REVIEW_REQUIRED");
+        crate::audit::record_event("installer", "pkg.update", "package", "REVIEW_REQUIRED");
         return;
     }
 
@@ -2603,7 +2603,7 @@ pub(crate) fn pkg_update(plan: &KernelPlan, arg: &str) {
     kprint!(" unchanged=");
     mcap_names(unchanged, &mut crate::Uart);
     kprintln!();
-    crate::record_event("installer", "pkg.update", "package", "OK");
+    crate::audit::record_event("installer", "pkg.update", "package", "OK");
 }
 
 pub(crate) fn pkg_rollback(plan: &KernelPlan, arg: &str) {
@@ -2691,7 +2691,7 @@ pub(crate) fn pkg_rollback(plan: &KernelPlan, arg: &str) {
     }
     invalidate_loaded();
     kprintln!("[pkg-rollback] restored '{name}' to {prev_version}; previous checkpoint consumed");
-    crate::record_event("installer", "pkg.rollback", "package", "OK");
+    crate::audit::record_event("installer", "pkg.rollback", "package", "OK");
 }
 
 pub(crate) fn pkg_versions(plan: &KernelPlan, arg: &str) {
@@ -2791,7 +2791,7 @@ pub(crate) fn pkg_pin(plan: &KernelPlan, arg: &str, pinned: bool) {
         "[pkg-pin] '{name}' pinned={}",
         if pinned { "yes" } else { "no" }
     );
-    crate::record_event(
+    crate::audit::record_event(
         "installer",
         if pinned { "pkg.pin" } else { "pkg.unpin" },
         "package",
@@ -2951,7 +2951,7 @@ pub(crate) fn pkg_gc(plan: &KernelPlan, arg: &str) {
         }
     );
     kprintln!("  policy=explicit physical cleanup; no automatic erase on remove");
-    crate::record_event("installer", "pkg.gc", "package-store", "OK");
+    crate::audit::record_event("installer", "pkg.gc", "package-store", "OK");
 }
 
 pub(crate) fn pkg_fault(plan: &KernelPlan, arg: &str) {

@@ -17,13 +17,7 @@ use crate::mm::frames::FRAME_SIZE;
 // task/process types the scheduler owns. Both shrink this block when their own
 // modules land; until then the import list names the debt instead of hiding it
 // behind a glob.
-use crate::{
-    find_virtio_mmio, frame_free, pte, AddressSpaceBuild, ProcessSpec, TaskKind, TaskResources,
-    DEV_UART_VA, DEV_VIRTIO_BLK_VA, DEV_VIRTIO_NET_VA, EMPTY_TASK_RESOURCES, L1, MARZ_DMA,
-    MARZ_DMA_SIZE, MARZ_DMA_VA, PTE_R, PTE_U, PTE_V, PTE_W, PTE_X, ROOT, TASK_BLOCK_READ,
-    TASK_BLOCK_WRITE, TASK_DEVICE_VIRTIO_BLK, TASK_DEVICE_VIRTIO_NET, UART_BASE,
-    VIRTIO_DEVICE_ID_BLOCK, VIRTIO_DEVICE_ID_NET, VIRTIO_DMA, VIRTIO_DMA_SIZE, VIRTIO_DMA_VA,
-};
+use crate::{find_virtio_mmio, frame_free, pte, AddressSpaceBuild, ProcessSpec, TaskKind, TaskResources, DEV_UART_VA, DEV_VIRTIO_BLK_VA, DEV_VIRTIO_NET_VA, EMPTY_TASK_RESOURCES, L1, MARZ_DMA, MARZ_DMA_SIZE, MARZ_DMA_VA, PTE_R, PTE_U, PTE_V, PTE_W, PTE_X, ROOT, TASK_BLOCK_READ, TASK_BLOCK_WRITE, TASK_DEVICE_VIRTIO_BLK, TASK_DEVICE_VIRTIO_NET, UART_BASE, VIRTIO_DEVICE_ID_BLOCK, VIRTIO_DEVICE_ID_NET, VIRTIO_DMA, VIRTIO_DMA_SIZE, VIRTIO_DMA_VA};
 
 fn u16_at(b: &[u8], o: usize) -> u16 {
     u16::from_le_bytes([b[o], b[o + 1]])
