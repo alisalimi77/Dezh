@@ -41,11 +41,22 @@ impl Write for Uart {
     }
 }
 
+// `core::write!` resolves `write_str` by method lookup, so the trait has to be
+// in scope wherever the macro is *used* — which made `use core::fmt::Write` a
+// silent precondition of calling kprintln! from a new module. Naming the trait
+// in the expansion moves that requirement into the macro, where it belongs: a
+// module that prints now needs nothing but the macro itself.
 #[macro_export]
 macro_rules! kprint {
-    ($($arg:tt)*) => {{ let _ = core::write!($crate::Uart, $($arg)*); }};
+    ($($arg:tt)*) => {{
+        use core::fmt::Write as _;
+        let _ = core::write!($crate::Uart, $($arg)*);
+    }};
 }
 #[macro_export]
 macro_rules! kprintln {
-    ($($arg:tt)*) => {{ let _ = core::writeln!($crate::Uart, $($arg)*); }};
+    ($($arg:tt)*) => {{
+        use core::fmt::Write as _;
+        let _ = core::writeln!($crate::Uart, $($arg)*);
+    }};
 }

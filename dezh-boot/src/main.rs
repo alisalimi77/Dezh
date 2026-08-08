@@ -109,7 +109,6 @@ impl dezh_core::ir::Host for KHost<'_> {
 }
 
 use core::arch::{asm, global_asm};
-use core::fmt::Write;
 use core::panic::PanicInfo;
 use core::ptr::{read_volatile, write_volatile};
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
