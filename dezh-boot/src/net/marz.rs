@@ -13,11 +13,12 @@
 //!
 //! Boot hart only: destinations are checked from the console path.
 
+use crate::sched::{TEXIT, run_foreground_processes};
 use crate::audit::record_event;
 use crate::mm::global::Global;
 use crate::ocap::device::DEV_OBJ_NET;
 use crate::pkg;
-use crate::{cairn_req_intent, dev_authority_live, difc_ingress, find_virtio_mmio, kprintln, run_foreground_processes, ProcessSpec, BLK_REQ_CAIRN_COMMIT, FIRST_FOREGROUND_TASK, marz_dma_pa, run_registered_virtio_client_ns, task_ns_cap, KernelPlan, MARZ_ELF, NS_SECRET_VAULT, OP_TAINT, SAND_REV_IRREVERSIBLE, TASK_DEVICE_VIRTIO_NET, TASK_PRINT, TEXIT, VIRTIO_DEVICE_ID_NET};
+use crate::{cairn_req_intent, dev_authority_live, difc_ingress, find_virtio_mmio, kprintln, ProcessSpec, BLK_REQ_CAIRN_COMMIT, FIRST_FOREGROUND_TASK, marz_dma_pa, run_registered_virtio_client_ns, task_ns_cap, KernelPlan, MARZ_ELF, NS_SECRET_VAULT, OP_TAINT, SAND_REV_IRREVERSIBLE, TASK_DEVICE_VIRTIO_NET, TASK_PRINT, VIRTIO_DEVICE_ID_NET};
 
 struct MarzDest {
     name: &'static str,

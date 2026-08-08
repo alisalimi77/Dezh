@@ -10,13 +10,10 @@
 //! banner. It sat there because every one of these spawns a process and waits
 //! for it - which makes it a *caller* of the scheduler, not a part of it.
 
+use crate::sched::{TEXIT, run_foreground_processes};
 use crate::abi::{BLK_OP_CLIENT_DEMO, BLK_OP_CLIENT_REQ, BLK_OP_NO_GRANT_PROBE};
 use crate::service::{ensure_virtio_block_service, refresh_virtio_service_state};
-use crate::{
-    kprintln, run_foreground_processes, SYS_DENIED, ProcessSpec, KernelPlan, TEXIT, VIRTIO_BLK_ELF,
-    VIRTIO_DATA_OFF, VIRTIO_DMA, VIRTIO_INPUT_OFF, FIRST_FOREGROUND_TASK,
-    TASK_BLOCK_READ, TASK_BLOCK_WRITE, TASK_IPC, TASK_PRINT,
-};
+use crate::{kprintln, SYS_DENIED, ProcessSpec, KernelPlan, VIRTIO_BLK_ELF, VIRTIO_DATA_OFF, VIRTIO_DMA, VIRTIO_INPUT_OFF, FIRST_FOREGROUND_TASK, TASK_BLOCK_READ, TASK_BLOCK_WRITE, TASK_IPC, TASK_PRINT};
 
 pub(crate) fn virtio_dma_pa() -> usize {
     core::ptr::addr_of!(VIRTIO_DMA) as usize

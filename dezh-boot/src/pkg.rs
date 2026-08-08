@@ -1389,7 +1389,7 @@ fn run_loaded_entry(plan: &KernelPlan, i: usize, eff_mcaps: u32, ahd_id: u16, la
         }
         dzp::KIND_ELF_RISCV64 => {
             kprintln!("[{label}] launching as U-mode process (own address space)");
-            crate::run_foreground_processes(&[crate::ProcessSpec::new(
+            crate::sched::run_foreground_processes(&[crate::ProcessSpec::new(
                 entry.payload(),
                 task_caps_from(eff_mcaps, entry.name()),
                 0,
