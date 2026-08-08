@@ -47,8 +47,8 @@ use ocap::device::{
     dev_authority_live, dev_authority_set,
 };
 use ocap::ns::{
-    ns_authority_init, ns_authority_live, ns_authority_ok, ns_grant, ns_revoke, NS_HANDLE,
-    NS_TABLE,
+    ns_authority_init, ns_authority_live, ns_authority_ok, ns_grant, ns_remint_local,
+    ns_revoke, ns_revoke_local,
 };
 use difc::{
     declassify, difc_ingress, difc_may_write, difc_observe, endorse, taint_show,
@@ -4549,13 +4549,12 @@ fn run_builtin_agent(plan: &KernelPlan, ns: usize) -> bool {
 /// succeed. (Uses ns=lab so ns=agent's provenance — asserted after reboot — is
 /// untouched.)
 fn run_agentrevoke_demo(plan: &KernelPlan) {
-    use dezh_core::ocap::{R_DELEGATE, R_READ, R_WRITE};
     const LAB: usize = 1;
     ns_authority_init();
-    unsafe { (*NS_HANDLE.get())[LAB] = (*NS_TABLE.get()).mint(LAB, R_READ | R_WRITE | R_DELEGATE) };
+    ns_remint_local(LAB);
     kprintln!("[agentrevoke-demo] the ocap namespace gate now covers the UNTRUSTED AGENT path (KHost), not just the console");
     kprintln!("[agentrevoke-demo] 1/3 revoke ns=lab, then run the built-in agent bound to ns=lab:");
-    unsafe { (*NS_TABLE.get()).revoke(LAB) };
+    ns_revoke_local(LAB);
     let ran_revoked = run_builtin_agent(plan, LAB);
     kprintln!(
         "[agentrevoke-demo] 2/3 the agent's Cairn write was {} by the ocap gate (agent trapped={})",
@@ -4563,7 +4562,7 @@ fn run_agentrevoke_demo(plan: &KernelPlan) {
         !ran_revoked
     );
     kprintln!("[agentrevoke-demo] 3/3 re-grant ns=lab, run the agent again:");
-    unsafe { (*NS_HANDLE.get())[LAB] = (*NS_TABLE.get()).mint(LAB, R_READ | R_WRITE | R_DELEGATE) };
+    ns_remint_local(LAB);
     let ran_granted = run_builtin_agent(plan, LAB);
     let pass = !ran_revoked && ran_granted;
     record_event("kernel", "agentrevoke.demo", "ns:lab", if pass { "OK" } else { "fail" });

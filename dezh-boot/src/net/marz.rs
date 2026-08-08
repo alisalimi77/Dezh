@@ -13,6 +13,7 @@
 //!
 //! Boot hart only: destinations are checked from the console path.
 
+use crate::mm::global::Global;
 use crate::ocap::device::DEV_OBJ_NET;
 use crate::pkg;
 use crate::{
@@ -60,7 +61,14 @@ pub(crate) const fn marz_dest_cap(d: usize) -> usize {
 
 /// The operator's per-destination egress authority. Revoking one destination
 /// leaves the others intact — the point of naming destinations in the capability.
-pub(crate) static mut OP_EGRESS: usize = marz_dest_cap(0) | marz_dest_cap(1);
+/// Which destinations the operator may send to. Private: the only ways to move
+/// it are `marz_dest_authority` (the console verb) and `marz_egress_reset_all`
+/// (what a demo needs to start from a known state). It was a bare `static mut`
+/// until the demos stopped writing it directly and the last external writer
+/// went away - the same trade `mm::frames` made, for the same reason.
+///
+/// Boot hart only: egress authority is set and checked from the console path.
+static OP_EGRESS: Global<usize> = Global::new(marz_dest_cap(0) | marz_dest_cap(1));
 
 fn marz_dest_id(name: &str) -> Option<usize> {
     MARZ_DESTS.iter().position(|d| d.name == name)
@@ -79,7 +87,7 @@ fn marz_dest_packed(d: &MarzDest) -> usize {
 /// the send may proceed; prints a named reason otherwise.
 fn marz_gate(d: usize) -> bool {
     let dest = &MARZ_DESTS[d];
-    if unsafe { OP_EGRESS } & marz_dest_cap(d) == 0 {
+    if unsafe { *OP_EGRESS.get() } & marz_dest_cap(d) == 0 {
         kprintln!(
             "[marz] DENIED: no capability for destination '{}' -- egress authority names a destination, it is not 'network access'",
             dest.name
@@ -223,6 +231,14 @@ pub(crate) fn run_marz_ping(arg: &str) {
     }
 }
 
+/// Restore egress authority for every known destination. A demo that is about
+/// to prove a *different* gate (the device kill-switch, or the DIFC export
+/// rule) needs the destination gate out of the way first, and saying so by
+/// name beats each demo assembling the mask itself.
+pub(crate) fn marz_egress_reset_all() {
+    unsafe { *OP_EGRESS.get() = marz_dest_cap(0) | marz_dest_cap(1) };
+}
+
 pub(crate) fn marz_dest_authority(arg: &str, grant: bool) {
     let Some(d) = marz_dest_id(arg.trim()) else {
         kprintln!("[marz] unknown destination (known: ops vault-sync)");
@@ -230,9 +246,9 @@ pub(crate) fn marz_dest_authority(arg: &str, grant: bool) {
     };
     unsafe {
         if grant {
-            OP_EGRESS |= marz_dest_cap(d);
+            *OP_EGRESS.get() |= marz_dest_cap(d);
         } else {
-            OP_EGRESS &= !marz_dest_cap(d);
+            *OP_EGRESS.get() &= !marz_dest_cap(d);
         }
     }
     kprintln!(
