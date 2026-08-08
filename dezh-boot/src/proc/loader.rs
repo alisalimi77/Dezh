@@ -10,6 +10,7 @@
 //! console's scheduler. The frame allocator underneath has the same constraint
 //! and says so in `mm::frames`; W13 is where both have to answer for it.
 
+use crate::sched::{PERS_LINUX, PERS_NATIVE};
 use crate::dev::virtio::{DEV_UART_VA, DEV_VIRTIO_BLK_VA, DEV_VIRTIO_NET_VA, MARZ_DMA, MARZ_DMA_SIZE, MARZ_DMA_VA, VIRTIO_DEVICE_ID_BLOCK, VIRTIO_DEVICE_ID_NET, VIRTIO_DMA, VIRTIO_DMA_SIZE, VIRTIO_DMA_VA, find_virtio_mmio};
 use crate::mm::paging::{L1, PTE_R, PTE_U, PTE_V, PTE_W, PTE_X, ROOT, pte};
 use crate::mm::frames::{frame_alloc, FRAME_SIZE};
@@ -19,7 +20,76 @@ use crate::mm::frames::{frame_alloc, FRAME_SIZE};
 // task/process types the scheduler owns. Both shrink this block when their own
 // modules land; until then the import list names the debt instead of hiding it
 // behind a glob.
-use crate::{frame_free, ProcessSpec, TASK_BLOCK_READ, TASK_BLOCK_WRITE, TASK_DEVICE_VIRTIO_BLK, TASK_DEVICE_VIRTIO_NET, UART_BASE};
+use crate::{frame_free, TASK_BLOCK_READ, TASK_BLOCK_WRITE, TASK_DEVICE_VIRTIO_BLK, TASK_DEVICE_VIRTIO_NET, UART_BASE};
+
+// ProcessSpec joins the loader for the same reason TaskResources did: this is
+// the only module that consumes one.
+#[derive(Clone, Copy)]
+pub(crate) struct ProcessSpec {
+    pub(crate) elf: &'static [u8],
+    pub(crate) caps: usize,
+    pub(crate) arg0: usize,
+    pub(crate) arg1: usize,
+    pub(crate) arg2: usize,
+    pub(crate) arg3: usize,
+    pub(crate) personality: u8,
+    pub(crate) map_uart: bool,
+    pub(crate) map_virtio_blk: bool,
+    pub(crate) map_virtio_net: bool,
+    pub(crate) map_virtio_dma: bool,
+}
+
+impl ProcessSpec {
+    pub(crate) const fn new(elf: &'static [u8], caps: usize, arg0: usize) -> Self {
+        ProcessSpec {
+            elf,
+            caps,
+            arg0,
+            arg1: 0,
+            arg2: 0,
+            arg3: 0,
+            personality: PERS_NATIVE,
+            map_uart: false,
+            map_virtio_blk: false,
+            map_virtio_net: false,
+            map_virtio_dma: false,
+        }
+    }
+
+    pub(crate) const fn uart(mut self) -> Self {
+        self.map_uart = true;
+        self
+    }
+
+    pub(crate) const fn virtio_blk(mut self) -> Self {
+        self.map_virtio_blk = true;
+        self
+    }
+
+    /// Grant ONLY the discovered virtio-net page (per-device, not the window).
+    pub(crate) const fn virtio_net(mut self) -> Self {
+        self.map_virtio_net = true;
+        self
+    }
+
+    pub(crate) const fn virtio_dma(mut self) -> Self {
+        self.map_virtio_dma = true;
+        self
+    }
+
+    pub(crate) const fn args(mut self, arg1: usize, arg2: usize, arg3: usize) -> Self {
+        self.arg1 = arg1;
+        self.arg2 = arg2;
+        self.arg3 = arg3;
+        self
+    }
+
+    /// Run this ELF under the Linux syscall personality (serviced by Pol).
+    pub(crate) const fn linux(mut self) -> Self {
+        self.personality = PERS_LINUX;
+        self
+    }
+}
 
 // TaskResources and AddressSpaceBuild live here rather than in main.rs because
 // this is the only module that builds or tears one down. Step 7 said so and

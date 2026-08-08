@@ -9,6 +9,7 @@
 //! dispatcher names every subsystem, so it could only be moved once each of
 //! them had a real interface to name.
 
+pub(crate) mod cmds;
 pub(crate) mod commands;
 
 // The dispatcher's job is to name every subsystem, so it imports every
@@ -20,6 +21,8 @@ use core::arch::asm;
 use core::sync::atomic::Ordering;
 
 use crate::abi::*;
+use crate::console::cmds::*;
+use crate::dev::plic::{irq_stat, plic_init};
 use crate::apps::*;
 use crate::arch::finisher::{shutdown, FINISH_FAIL, FINISH_PASS};
 use crate::arch::timer::{rdtime, sbi_set_timer, SKIP_LF_AFTER_CR, TICKS, TIMER_DELTA};
@@ -38,7 +41,7 @@ use crate::mm::paging::{build_page_tables, enable_paging};
 use crate::net::marz::{marz_dest_authority, run_marz_ping, run_marz_send};
 use crate::ocap::device::dev_authority_set;
 use crate::ocap::ns::{ns_grant, ns_revoke};
-use crate::proc::loader::TaskKind;
+use crate::proc::loader::{ProcessSpec, TaskKind};
 use crate::sched::*;
 use crate::service::*;
 use crate::smp::{smp_bringup, smp_report_boot};

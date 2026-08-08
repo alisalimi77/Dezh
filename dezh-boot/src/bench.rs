@@ -5,11 +5,12 @@
 //! were filed under the Cairn banner for no reason except that they were
 //! written around the same time.
 
+use crate::proc::loader::ProcessSpec;
 use crate::abi::*;
 use crate::sched::run_foreground_processes;
 use crate::service::refresh_virtio_service_state;
 use crate::vblk::{run_registered_virtio_client, run_virtio_no_grant_probe};
-use crate::{kprintln, KernelPlan, ProcessSpec, BENCH_ELF, TASK_IPC, TASK_PRINT};
+use crate::{kprintln, KernelPlan, BENCH_ELF, TASK_IPC, TASK_PRINT};
 pub(crate) fn run_bench_os() {
     kprintln!(
         "[bench-os] launching separate U-mode benchmark ELF ({} null syscalls)",

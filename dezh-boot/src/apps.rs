@@ -9,17 +9,13 @@
 //! Also under the Cairn banner, and the largest thing there that was not a
 //! demo.
 
+use crate::proc::loader::ProcessSpec;
 use crate::abi::*;
 use crate::audit::{print_events, record_event};
 use crate::sched::run_foreground_processes;
 use crate::service::ensure_virtio_block_service;
 use crate::vblk::{run_registered_virtio_client, run_registered_virtio_client_status};
-use crate::{
-    kprintln, KernelPlan, ProcessSpec, CALC_ELF, CALC_ROLE_RUN, LAB_ELF, LAB_ROLE_DENY_BLOCK,
-    LAB_ROLE_DENY_MMIO, LAB_ROLE_UI, LAB_ROLE_WORKER, NOTE_ELF, NOTE_ROLE_DENY_BLOCK,
-    NOTE_ROLE_DENY_MMIO, NOTE_ROLE_RUN, TASK_IPC, TASK_PRINT, VAULT_ELF, VAULT_ROLE_DENY_BLOCK,
-    VAULT_ROLE_DENY_MMIO, VAULT_ROLE_RUN,
-};
+use crate::{kprintln, KernelPlan, CALC_ELF, CALC_ROLE_RUN, LAB_ELF, LAB_ROLE_DENY_BLOCK, LAB_ROLE_DENY_MMIO, LAB_ROLE_UI, LAB_ROLE_WORKER, NOTE_ELF, NOTE_ROLE_DENY_BLOCK, NOTE_ROLE_DENY_MMIO, NOTE_ROLE_RUN, TASK_IPC, TASK_PRINT, VAULT_ELF, VAULT_ROLE_DENY_BLOCK, VAULT_ROLE_DENY_MMIO, VAULT_ROLE_RUN};
 pub(crate) fn app_note_is_active(plan: &KernelPlan) -> bool {
     run_registered_virtio_client_status(plan, BLK_REQ_APP_REQUIRE_NOTE, "") == 0
 }

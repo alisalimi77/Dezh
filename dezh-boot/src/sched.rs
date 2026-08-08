@@ -19,7 +19,8 @@
 use core::arch::asm;
 use core::sync::atomic::Ordering;
 
-use crate::proc::loader::{EMPTY_TASK_RESOURCES, TaskKind, TaskResources};
+use crate::dev::plic::{EXT_IRQS, SCAUSE_EXTERNAL};
+use crate::proc::loader::{ProcessSpec, EMPTY_TASK_RESOURCES, TaskKind, TaskResources};
 use crate::mm::paging::set_active_task_mem;
 use crate::mm::paging::{task_stack_top};
 use crate::abi::{
@@ -29,7 +30,7 @@ use crate::arch::finisher::{shutdown, FINISH_FAIL};
 use crate::arch::timer::{rdtime, sbi_set_timer, QUANTUM, TICKS, TIMER_DELTA};
 use crate::mm::global::Global;
 use crate::proc::loader::{build_address_space, kernel_satp, proc_satp, USER_STACK_TOP};
-use crate::{kprintln, plic_handle, reclaim_resources, restore_kernel_ctx, run_first, trap_entry, utrap, ProcessSpec, Uart, EXT_IRQS, SCAUSE_EXTERNAL, TASK_IPC, TASK_PRINT, TASK_TIME};
+use crate::{kprintln, plic_handle, reclaim_resources, restore_kernel_ctx, run_first, trap_entry, utrap, Uart, TASK_IPC, TASK_PRINT, TASK_TIME};
 // Every one of these is used as a MATCH PATTERN below. A const that is not in
 // scope does not fail to compile there - it silently becomes an irrefutable
 // binding that matches everything, collapsing the whole syscall dispatch into
