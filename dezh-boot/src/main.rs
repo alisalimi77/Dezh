@@ -34,6 +34,9 @@ mod pkg;
 mod proc;
 mod sched;
 
+use crate::dev::virtio::{VIRTIO_BLK_MMIO_PA, VIRTIO_DEVICE_ID_NET, VIRTIO_MMIO_COUNT, VIRTIO_MMIO_STRIDE, find_virtio_mmio};
+
+
 use mm::paging::{
     build_page_tables, enable_paging, stack_base, stack_region_l1_index, task_stack_top, L1,
     PTE_U, PTE_V, ROOT,
@@ -661,11 +664,6 @@ const VAULT_ELF: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/dezh-vault.el
 // Loaded like any program but run with the Linux personality (Pol, D014/F4).
 const LINUX_GUEST_ELF: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/linux-guest.elf"));
 
-const DEV_UART_VA: usize = 0x5000_0000;
-const DEV_VIRTIO_BLK_VA: usize = 0x5000_0000;
-const VIRTIO_BLK_MMIO_PA: usize = 0x1000_1000;
-const VIRTIO_MMIO_STRIDE: usize = 0x1000;
-const VIRTIO_MMIO_COUNT: usize = 8;
 // --- PLIC: real device interrupts ---------------------------------------------
 // Until now every device path was a busy-wait: the machine spun until a sector
 // or a frame completed, so I/O and compute could never overlap and a task could
@@ -1898,40 +1896,6 @@ fn run_smp_isolate_demo() {
     );
 }
 
-const VIRTIO_MMIO_MAGIC: u32 = 0x7472_6976;
-const VIRTIO_DEVICE_ID_NET: u32 = 1;
-const VIRTIO_DEVICE_ID_BLOCK: u32 = 2;
-const VIRTIO_MMIO_OFF_DEVICE_ID: usize = 0x008;
-/// Where a Marz daemon sees its granted NIC page (one device, not the window).
-const DEV_VIRTIO_NET_VA: usize = 0x5002_0000;
-/// Marz gets its OWN DMA window. Sharing one with the block daemon would let
-/// either corrupt the other's virtqueue - two devices, two grants.
-const MARZ_DMA_VA: usize = 0x5200_0000;
-const MARZ_DMA_SIZE: usize = 16 * 1024;
-static mut MARZ_DMA: DmaWindow = DmaWindow([0; MARZ_DMA_SIZE]);
-
-fn marz_dma_pa() -> usize {
-    core::ptr::addr_of!(MARZ_DMA) as usize
-}
-
-/// Scan the virtio-mmio window for a device of `want_id` and return its physical
-/// base. The kernel may read the window directly (it lives in the kernel-only
-/// device mapping); a daemon never scans — it receives only the single page the
-/// kernel grants it.
-fn find_virtio_mmio(want_id: u32) -> Option<usize> {
-    let mut i = 0usize;
-    while i < VIRTIO_MMIO_COUNT {
-        let base = VIRTIO_BLK_MMIO_PA + i * VIRTIO_MMIO_STRIDE;
-        let magic = unsafe { read_volatile(base as *const u32) };
-        let dev = unsafe { read_volatile((base + VIRTIO_MMIO_OFF_DEVICE_ID) as *const u32) };
-        if magic == VIRTIO_MMIO_MAGIC && dev == want_id {
-            return Some(base);
-        }
-        i += 1;
-    }
-    None
-}
-
 /// Marz M1 groundwork: report whether a NIC is present and which slot it owns.
 /// This is the device the egress boundary will be built on; nothing is granted
 /// to anyone by probing.
@@ -1949,16 +1913,6 @@ fn net_probe() {
         }
     }
 }
-const VIRTIO_DMA_VA: usize = 0x5100_0000;
-const VIRTIO_DMA_SIZE: usize = 16 * 1024;
-const VIRTIO_DATA_OFF: usize = 8_192 + 16;
-const VIRTIO_INPUT_OFF: usize = 12_288;
-
-#[repr(align(4096))]
-#[allow(dead_code)]
-struct DmaWindow([u8; VIRTIO_DMA_SIZE]);
-static mut VIRTIO_DMA: DmaWindow = DmaWindow([0; VIRTIO_DMA_SIZE]);
-
 #[derive(Clone, Copy)]
 struct ProcessSpec {
     elf: &'static [u8],

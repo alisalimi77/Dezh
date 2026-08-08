@@ -10,20 +10,21 @@
 //! banner. It sat there because every one of these spawns a process and waits
 //! for it - which makes it a *caller* of the scheduler, not a part of it.
 
+use crate::dev::virtio::{VIRTIO_DATA_OFF, VIRTIO_DMA, VIRTIO_INPUT_OFF};
 use crate::sched::{TEXIT, run_foreground_processes};
 use crate::abi::{BLK_OP_CLIENT_DEMO, BLK_OP_CLIENT_REQ, BLK_OP_NO_GRANT_PROBE};
 use crate::service::{ensure_virtio_block_service, refresh_virtio_service_state};
-use crate::{kprintln, SYS_DENIED, ProcessSpec, KernelPlan, VIRTIO_BLK_ELF, VIRTIO_DATA_OFF, VIRTIO_DMA, VIRTIO_INPUT_OFF, FIRST_FOREGROUND_TASK, TASK_BLOCK_READ, TASK_BLOCK_WRITE, TASK_IPC, TASK_PRINT};
+use crate::{kprintln, SYS_DENIED, ProcessSpec, KernelPlan, VIRTIO_BLK_ELF, FIRST_FOREGROUND_TASK, TASK_BLOCK_READ, TASK_BLOCK_WRITE, TASK_IPC, TASK_PRINT};
 
 pub(crate) fn virtio_dma_pa() -> usize {
-    core::ptr::addr_of!(VIRTIO_DMA) as usize
+    VIRTIO_DMA.get() as usize
 }
 
 pub(crate) fn prepare_virtio_input(text: &str) -> usize {
     let bytes = text.as_bytes();
     let n = bytes.len().min(511);
     unsafe {
-        let base = core::ptr::addr_of_mut!(VIRTIO_DMA) as *mut u8;
+        let base = VIRTIO_DMA.get() as *mut u8;
         core::ptr::write_bytes(base.add(VIRTIO_INPUT_OFF), 0, 512);
         core::ptr::copy_nonoverlapping(bytes.as_ptr(), base.add(VIRTIO_INPUT_OFF), n);
     }
@@ -33,7 +34,7 @@ pub(crate) fn prepare_virtio_input(text: &str) -> usize {
 pub(crate) fn prepare_virtio_input_bytes(bytes: &[u8]) {
     let n = bytes.len().min(512);
     unsafe {
-        let base = core::ptr::addr_of_mut!(VIRTIO_DMA) as *mut u8;
+        let base = VIRTIO_DMA.get() as *mut u8;
         core::ptr::write_bytes(base.add(VIRTIO_INPUT_OFF), 0, 512);
         core::ptr::copy_nonoverlapping(bytes.as_ptr(), base.add(VIRTIO_INPUT_OFF), n);
     }
@@ -42,7 +43,7 @@ pub(crate) fn prepare_virtio_input_bytes(bytes: &[u8]) {
 pub(crate) fn read_virtio_output_sector(out: &mut [u8]) {
     let n = out.len().min(512);
     unsafe {
-        let base = core::ptr::addr_of!(VIRTIO_DMA) as *const u8;
+        let base = VIRTIO_DMA.get() as *const u8;
         core::ptr::copy_nonoverlapping(base.add(VIRTIO_DATA_OFF), out.as_mut_ptr(), n);
     }
 }
