@@ -32,6 +32,14 @@ mod net;
 mod ocap;
 mod pkg;
 mod proc;
+mod service;
+
+use service::{
+    build_service_registry, ensure_virtio_block_service, print_services,
+    refresh_virtio_service_state,
+    running_service_count, service_for_task, svc_fault_demo_virtio, svc_restart_virtio, svc_stop_virtio,
+    virtio_service_is_running,
+};
 
 // `Uart` is re-exported at the crate root because the kprint!/kprintln! macros
 // expand to `$crate::Uart` at every call site in the tree. `Global` used to be
@@ -2180,48 +2188,6 @@ enum TaskState {
     Done,
 }
 
-#[derive(Clone, Copy, PartialEq)]
-enum ServiceState {
-    Unused,
-    Declared,
-    Starting,
-    Stopping,
-    Running,
-    Restarting,
-    Faulted,
-    Stopped,
-}
-
-#[derive(Clone, Copy)]
-struct ServiceEntry {
-    name: &'static str,
-    kind: ServiceKind,
-    state: ServiceState,
-    task: usize,
-    caps: usize,
-    grants: usize,
-    fault: &'static str,
-    restart_count: usize,
-    last_exit: usize,
-    last_started_tick: u64,
-}
-
-const EMPTY_SERVICE: ServiceEntry = ServiceEntry {
-    name: "",
-    kind: ServiceKind::Init,
-    state: ServiceState::Unused,
-    task: usize::MAX,
-    caps: 0,
-    grants: 0,
-    fault: "",
-    restart_count: 0,
-    last_exit: 0,
-    last_started_tick: 0,
-};
-
-const MAX_SERVICES: usize = 8;
-static mut SERVICES: [ServiceEntry; MAX_SERVICES] = [EMPTY_SERVICE; MAX_SERVICES];
-static mut SERVICE_COUNT: usize = 0;
 static mut TEXIT: [usize; MAX_TASKS] = [0; MAX_TASKS];
 
 #[derive(Clone, Copy)]
@@ -2980,199 +2946,6 @@ fn run_foreground_processes(specs: &[ProcessSpec]) {
     reclaim_finished_foreground_tasks();
 }
 
-fn service_state_name(state: ServiceState) -> &'static str {
-    match state {
-        ServiceState::Unused => "Unused",
-        ServiceState::Declared => "Declared",
-        ServiceState::Starting => "Starting",
-        ServiceState::Stopping => "Stopping",
-        ServiceState::Running => "Running",
-        ServiceState::Restarting => "Restarting",
-        ServiceState::Faulted => "Faulted",
-        ServiceState::Stopped => "Stopped",
-    }
-}
-
-fn task_caps_for(service: &str, plan: &KernelPlan) -> usize {
-    let mut caps = TASK_PRINT;
-    for seed in &plan.capability_seeds {
-        if seed.service != service {
-            continue;
-        }
-        match seed.capability {
-            KernelCapability::SendIpc => caps |= TASK_IPC,
-            KernelCapability::OpenVirtioDevice => {
-                caps |= TASK_DEVICE_VIRTIO_BLK | TASK_BLOCK_READ | TASK_BLOCK_WRITE
-            }
-            KernelCapability::OpenCairnRoot => caps |= TASK_BLOCK_READ | TASK_BLOCK_WRITE,
-            KernelCapability::StartService
-            | KernelCapability::AllocateFrames
-            | KernelCapability::MapAddressSpace
-            | KernelCapability::OpenWasmRuntime => {}
-        }
-    }
-    caps
-}
-
-fn service_index(name: &str) -> Option<usize> {
-    unsafe {
-        let mut i = 0usize;
-        while i < SERVICE_COUNT {
-            if SERVICES[i].name == name {
-                return Some(i);
-            }
-            i += 1;
-        }
-    }
-    None
-}
-
-fn build_service_registry(plan: &KernelPlan) {
-    unsafe {
-        SERVICE_COUNT = 0;
-        for service in &plan.services {
-            if SERVICE_COUNT >= MAX_SERVICES {
-                break;
-            }
-            let caps = task_caps_for(service.name, plan);
-            let grants = match service.kind {
-                ServiceKind::VirtioBlock => 0b11,
-                ServiceKind::Cairn => 0b01,
-                _ => 0,
-            };
-            SERVICES[SERVICE_COUNT] = ServiceEntry {
-                name: service.name,
-                kind: service.kind,
-                state: ServiceState::Declared,
-                task: usize::MAX,
-                caps,
-                grants,
-                fault: "",
-                restart_count: 0,
-                last_exit: 0,
-                last_started_tick: 0,
-            };
-            SERVICE_COUNT += 1;
-        }
-    }
-    kprintln!(
-        "[dezh-boot] service registry built from boot plan ({} services)",
-        unsafe { SERVICE_COUNT }
-    );
-}
-
-fn refresh_virtio_service_state() {
-    if let Some(i) = service_index("virtio-block") {
-        unsafe {
-            let task = SERVICES[i].task;
-            if task < MAX_TASKS {
-                if TSTATE[task] == TaskState::Blocked || TSTATE[task] == TaskState::Ready {
-                    SERVICES[i].state = ServiceState::Running;
-                    SERVICES[i].fault = "";
-                } else if TSTATE[task] == TaskState::Done && TEXIT[task] == 0 {
-                    SERVICES[i].state = ServiceState::Stopped;
-                    SERVICES[i].fault = "manual stop";
-                    SERVICES[i].last_exit = TEXIT[task];
-                    reclaim_task_resources(task);
-                } else if TSTATE[task] == TaskState::Done {
-                    SERVICES[i].state = ServiceState::Faulted;
-                    SERVICES[i].fault = "driver exited or faulted";
-                    SERVICES[i].last_exit = TEXIT[task];
-                    reclaim_task_resources(task);
-                }
-            }
-        }
-    }
-}
-
-fn ensure_virtio_block_service(_plan: &KernelPlan) -> Option<usize> {
-    let idx = service_index("virtio-block")?;
-    unsafe {
-        let task = SERVICES[idx].task;
-        if SERVICES[idx].state == ServiceState::Running
-            && task < MAX_TASKS
-            && (TSTATE[task] == TaskState::Blocked || TSTATE[task] == TaskState::Ready)
-        {
-            return Some(task);
-        }
-        if SERVICES[idx].state == ServiceState::Stopped {
-            kprintln!("[services] virtio-block unavailable: service is Stopped; use `svc-restart virtio-block`");
-            return None;
-        }
-        if SERVICES[idx].state == ServiceState::Faulted {
-            kprintln!("[services] virtio-block unavailable: service is Faulted; use `svc-restart virtio-block`");
-            return None;
-        }
-        SERVICES[idx].state = ServiceState::Starting;
-        SERVICES[idx].task = VIRTIO_SERVICE_TASK;
-        SERVICES[idx].fault = "";
-        SERVICES[idx].last_started_tick = TICKS.load(Ordering::Relaxed);
-        let caps = SERVICES[idx].caps;
-        kprintln!(
-            "[services] starting virtio-block from boot registry as task {VIRTIO_SERVICE_TASK}"
-        );
-        let spec = ProcessSpec::new(VIRTIO_BLK_ELF, caps, BLK_OP_DAEMON)
-            .args(virtio_dma_pa(), 0, 0)
-            .virtio_blk()
-            .virtio_dma();
-        if !spawn_process_at(VIRTIO_SERVICE_TASK, &spec, TaskKind::Daemon) {
-            SERVICES[idx].state = ServiceState::Faulted;
-            SERVICES[idx].fault = "driver launch failed: out of frames";
-            return None;
-        }
-    }
-    run_scheduler_from(VIRTIO_SERVICE_TASK);
-    refresh_virtio_service_state();
-    unsafe {
-        if SERVICES[idx].state == ServiceState::Running {
-            kprintln!(
-                "[services] virtio-block Running (task {})",
-                SERVICES[idx].task
-            );
-            Some(SERVICES[idx].task)
-        } else {
-            kprintln!("[services] virtio-block Faulted: {}", SERVICES[idx].fault);
-            None
-        }
-    }
-}
-
-fn virtio_service_is_running() -> bool {
-    refresh_virtio_service_state();
-    if let Some(i) = service_index("virtio-block") {
-        unsafe {
-            return SERVICES[i].state == ServiceState::Running;
-        }
-    }
-    false
-}
-
-fn print_services() {
-    refresh_virtio_service_state();
-    unsafe {
-        let count = SERVICE_COUNT;
-        kprintln!("runtime services ({} total):", count);
-        let mut i = 0usize;
-        while i < count {
-            let s = SERVICES[i];
-            kprintln!(
-                "  - {:<13} {:?} state={} task={} caps={:#x} grants={:#x} restarts={} last_exit={} started_tick={} {}",
-                s.name,
-                s.kind,
-                service_state_name(s.state),
-                s.task,
-                s.caps,
-                s.grants,
-                s.restart_count,
-                s.last_exit,
-                s.last_started_tick,
-                s.fault
-            );
-            i += 1;
-        }
-    }
-}
-
 fn print_ipcstat() {
     unsafe {
         let stats = IPC_STATS;
@@ -3222,101 +2995,6 @@ fn run_ipc_typed_demo() {
         ipc_status_name(IPC_STATUS_TIMEOUT),
         ipc_status_name(IPC_STATUS_DENIED)
     );
-}
-
-fn svc_stop_virtio(_plan: &KernelPlan) {
-    refresh_virtio_service_state();
-    let Some(idx) = service_index("virtio-block") else {
-        kprintln!("[services] virtio-block not declared");
-        return;
-    };
-    let daemon;
-    unsafe {
-        if SERVICES[idx].state != ServiceState::Running {
-            kprintln!(
-                "[services] virtio-block stop skipped: state={}",
-                service_state_name(SERVICES[idx].state)
-            );
-            return;
-        }
-        daemon = SERVICES[idx].task;
-        SERVICES[idx].state = ServiceState::Stopping;
-        SERVICES[idx].fault = "manual stop requested";
-    }
-    let client_caps = TASK_PRINT | TASK_IPC | TASK_BLOCK_READ | TASK_BLOCK_WRITE;
-    kprintln!("[services] stopping virtio-block task={daemon} with typed STOP");
-    run_foreground_processes(&[
-        ProcessSpec::new(VIRTIO_BLK_ELF, client_caps, BLK_OP_CLIENT_REQ)
-            .args(daemon, 0, BLK_REQ_STOP)
-            .virtio_dma(),
-    ]);
-    let st = unsafe { TEXIT[FIRST_FOREGROUND_TASK] };
-    refresh_virtio_service_state();
-    unsafe {
-        kprintln!(
-            "[services] svc-stop virtio-block status={} state={}",
-            st,
-            service_state_name(SERVICES[idx].state)
-        );
-    }
-    record_event("console", "svc.stop", "virtio-block", "done");
-}
-
-fn svc_restart_virtio(_plan: &KernelPlan) {
-    let Some(idx) = service_index("virtio-block") else {
-        kprintln!("[services] virtio-block not declared");
-        return;
-    };
-    refresh_virtio_service_state();
-    unsafe {
-        let task = SERVICES[idx].task;
-        if SERVICES[idx].state == ServiceState::Running && task < MAX_TASKS {
-            kprintln!("[services] restart requires stopped/faulted service; use svc-stop first");
-            return;
-        }
-        SERVICES[idx].state = ServiceState::Restarting;
-        SERVICES[idx].fault = "";
-        SERVICES[idx].task = usize::MAX;
-        SERVICES[idx].restart_count += 1;
-    }
-    let _ = ensure_virtio_block_service(_plan);
-    refresh_virtio_service_state();
-    unsafe {
-        kprintln!(
-            "[services] svc-restart virtio-block state={} restart_count={}",
-            service_state_name(SERVICES[idx].state),
-            SERVICES[idx].restart_count
-        );
-    }
-    record_event("console", "svc.restart", "virtio-block", "done");
-}
-
-fn svc_fault_demo_virtio(plan: &KernelPlan) {
-    refresh_virtio_service_state();
-    let Some(idx) = service_index("virtio-block") else {
-        kprintln!("[services] virtio-block not declared");
-        return;
-    };
-    unsafe {
-        if SERVICES[idx].state != ServiceState::Running {
-            kprintln!(
-                "[services] fault-demo skipped: state={}",
-                service_state_name(SERVICES[idx].state)
-            );
-            return;
-        }
-    }
-    let st = run_registered_virtio_client_status(plan, BLK_REQ_FAULT_DEMO, "");
-    refresh_virtio_service_state();
-    unsafe {
-        kprintln!(
-            "[services] svc-fault-demo virtio-block request_status={} state={} last_exit={}",
-            st,
-            service_state_name(SERVICES[idx].state),
-            SERVICES[idx].last_exit
-        );
-    }
-    record_event("console", "svc.fault-demo", "virtio-block", "done");
 }
 
 fn virtio_dma_pa() -> usize {
@@ -6478,17 +6156,7 @@ fn print_status(plan: &KernelPlan, memory: &[MemoryRegion], held: u32) {
         .iter()
         .filter(|r| r.kind == MemoryKind::Usable)
         .count();
-    let running_services = unsafe {
-        let mut n = 0usize;
-        let mut i = 0usize;
-        while i < SERVICE_COUNT {
-            if SERVICES[i].state == ServiceState::Running {
-                n += 1;
-            }
-            i += 1;
-        }
-        n
-    };
+    let running_services = running_service_count();
     kprintln!("status:");
     kprintln!("  target: {:?}", plan.target);
     kprintln!(
@@ -6524,19 +6192,6 @@ fn task_state_name(state: TaskState) -> &'static str {
         TaskState::Blocked => "Blocked",
         TaskState::Done => "Done",
     }
-}
-
-fn service_for_task(task: usize) -> &'static str {
-    unsafe {
-        let mut i = 0usize;
-        while i < SERVICE_COUNT {
-            if SERVICES[i].task == task {
-                return SERVICES[i].name;
-            }
-            i += 1;
-        }
-    }
-    "-"
 }
 
 fn print_tasks() {
