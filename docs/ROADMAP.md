@@ -426,6 +426,24 @@ Order: leaves first (`uart`, `plic`, `time`, `frames`), then single-inbound-edge
 `console` last — it depends on everything, so it falls out once the rest have
 real interfaces.
 
+**Progress.** The leaves are out (`uart`, `time`, `finisher`, `bump`, `global`,
+`frames`) and so is the single-inbound-edge group (`difc`, `ocap/ns`,
+`ocap/device`, `proc/loader`, `net/marz`). `main.rs` is at 7,772 lines. Two
+findings from doing it:
+
+- **`plic` is not a leaf.** It reaches into `TSTATE` and `MAX_TASKS` to wake
+  drivers blocked on `sys_irq_wait`, so it comes out *after* `sched`, not
+  before it with the other devices.
+- **Demos are the thing holding statics public.** Every split so far left its
+  demo behind in `main.rs`, and where the demo pokes state instead of calling
+  the interface (`ocap/ns`, `net/marz`) it forces that state to stay exported.
+  Where it does not (`ocap/device`), the module closes completely. Moving
+  `demos/` is therefore worth more than its line count suggests: it is what
+  lets `NS_TABLE`, `NS_HANDLE` and `OP_EGRESS` go private.
+
+Remaining: `console` (1,920), `sched` (1,645), `cairn` (1,340), `smp` (1,155),
+plus `demos/` and `mm/paging`.
+
 Two rules keep it honest. **No logic edits in a split commit**; if something
 must change to compile, that is a separate commit. And the console dispatcher
 becomes a **table** of `(name, help, handler)`, so `help` is generated from the
