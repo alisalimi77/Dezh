@@ -434,12 +434,15 @@ findings from doing it:
 - **`plic` is not a leaf.** It reaches into `TSTATE` and `MAX_TASKS` to wake
   drivers blocked on `sys_irq_wait`, so it comes out *after* `sched`, not
   before it with the other devices.
-- **Demos are the thing holding statics public.** Every split so far left its
-  demo behind in `main.rs`, and where the demo pokes state instead of calling
-  the interface (`ocap/ns`, `net/marz`) it forces that state to stay exported.
-  Where it does not (`ocap/device`), the module closes completely. Moving
-  `demos/` is therefore worth more than its line count suggests: it is what
-  lets `NS_TABLE`, `NS_HANDLE` and `OP_EGRESS` go private.
+- **Demos are the thing holding statics public — but moving them does not fix
+  it.** Where a demo pokes state instead of calling the interface (`ocap/ns`,
+  `net/marz`) it forces that state to stay exported; where it does not
+  (`ocap/device`), the module closes completely. An earlier version of this
+  note claimed that moving `demos/` out of `main.rs` would let `NS_TABLE`,
+  `NS_HANDLE` and `OP_EGRESS` go private. It does not: `pub(crate)` is
+  crate-wide, so relocating the caller changes nothing about visibility. What
+  actually closes those modules is giving them narrow accessors so the demos
+  stop reaching into state at all — a logic change, and its own commit.
 
 Remaining: `console` (1,920), `sched` (1,645), `cairn` (1,340), `smp` (1,155),
 plus `demos/` and `mm/paging`.
