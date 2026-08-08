@@ -696,14 +696,7 @@ map for reviewers.
 | --- | --- |
 | `dezh-core/` | Shared `.dzp`, base64, and Dezh-IR support used by the boot target and SDK-adjacent code. |
 | `dezh-kernel/` | Boot contract, kernel plan, install manifest, and plan validation logic. |
-| `dezh-ir/` | Dezh IR contract crate. |
-| `dezh-cairn/` | Host-side persistent object/ref prototype. |
-| `dezh-host/` | Host capability model experiments and tests. |
-| `dezh-ipc/` | Host-side IPC/capability experiments. |
-| `dezh-identity/` | Delegation and invocation-chain experiments. |
-| `dezh-runtime/` | Host-side runtime boundary experiments. |
-| `dezh-linux/` | Compatibility and authority experiments for Linux-like paths. |
-| `dezh-scheduler/` | Scheduling-policy experiments. |
+| `spikes/` | The Step 1..9 host-side prototypes, superseded and **not shipping** — nothing on the bare-metal path depends on them. Kept as the record of which design question each one settled; see [spikes/README.md](../spikes/README.md). |
 
 ### Tools
 

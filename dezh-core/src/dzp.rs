@@ -220,6 +220,55 @@ mod tests {
 
     const MANIFEST: &str = "name = \"hello\"\nversion = \"0.1.0\"\ncaps = [\"print\", \"ipc\"]\n";
 
+    // --- crc32 -------------------------------------------------------------
+    //
+    // This is what stands between a corrupted package and an installed one, so
+    // it is checked against the published IEEE 802.3 vectors rather than
+    // against itself: a hand-rolled CRC that is self-consistent but wrong would
+    // pass every round-trip test in this file.
+
+    #[test]
+    fn crc32_matches_the_published_vectors() {
+        assert_eq!(crc32(&[b""]), 0x0000_0000);
+        assert_eq!(crc32(&[b"a"]), 0xE8B7_BE43);
+        assert_eq!(crc32(&[b"123456789"]), 0xCBF4_3926);
+        assert_eq!(crc32(&[b"The quick brown fox jumps over the lazy dog"]), 0x414F_A339);
+    }
+
+    /// The manifest and payload are hashed as one stream, so where the caller
+    /// splits them must not change the answer - the package header relies on
+    /// this when it CRCs two slices that were stored separately.
+    #[test]
+    fn crc32_is_indifferent_to_how_the_input_is_split() {
+        let whole = crc32(&[b"123456789"]);
+        assert_eq!(crc32(&[b"1234", b"56789"]), whole);
+        assert_eq!(crc32(&[b"1", b"2", b"3", b"4", b"5", b"6", b"7", b"8", b"9"]), whole);
+        assert_eq!(crc32(&[b"", b"123456789", b""]), whole);
+    }
+
+    /// Detecting a flipped bit is the entire job. Checked over every bit
+    /// position of a representative buffer, not one sample.
+    #[test]
+    fn crc32_detects_every_single_bit_flip() {
+        let base = b"dezh package payload";
+        let expect = crc32(&[base]);
+        for byte in 0..base.len() {
+            for bit in 0..8u8 {
+                let mut m = *base;
+                m[byte] ^= 1 << bit;
+                assert_ne!(crc32(&[&m[..]]), expect, "missed flip at {byte}:{bit}");
+            }
+        }
+    }
+
+    /// Length is part of the message: appending zero bytes must change the CRC,
+    /// or a truncated payload could pass as intact.
+    #[test]
+    fn crc32_is_sensitive_to_trailing_zeros() {
+        assert_ne!(crc32(&[b"dezh"]), crc32(&[b"dezh\0"]));
+        assert_ne!(crc32(&[b"dezh\0"]), crc32(&[b"dezh\0\0"]));
+    }
+
     #[test]
     fn roundtrip() {
         let mut buf = [0u8; 256];

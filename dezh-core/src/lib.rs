@@ -12,5 +12,6 @@ pub mod b64;
 pub mod difc;
 pub mod dzp;
 pub mod ir;
+pub mod mcap;
 pub mod ocap;
 pub mod sig;

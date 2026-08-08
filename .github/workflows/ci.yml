@@ -32,11 +32,18 @@ jobs:
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: wasm32-unknown-unknown
 
       - name: Cache Cargo
         uses: Swatinem/rust-cache@v2
+
+      # The ratchet: warnings are errors, so a new one cannot land quietly. Any
+      # lint we deliberately keep carries an `#[allow]` and a reason at the site.
+      - name: Lint host workspace
+        run: cargo clippy --locked --workspace --all-targets -- -D warnings
+
+      - name: Lint dezh-core
+        working-directory: dezh-core
+        run: cargo clippy --locked --all-targets -- -D warnings
 
       - name: Run host workspace tests
         run: cargo test --locked --workspace
@@ -72,6 +79,33 @@ jobs:
           tools/sdk/install_pkg.py
           tools/sdk/dzas.py
 
+  # Superseded Step 1..9 prototypes (see spikes/README.md). Nothing shipping
+  # depends on them, and they pull wasmtime and ~190 crates, so they get their
+  # own job rather than sitting in the critical path - but they do stay built,
+  # because history that no longer compiles is not evidence of anything.
+  spikes:
+    name: Superseded host spikes
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Lint spikes
+        working-directory: spikes
+        run: cargo clippy --locked --workspace --all-targets -- -D warnings
+
+      - name: Test spikes
+        working-directory: spikes
+        run: cargo test --locked
+
   bare-metal:
     name: Bare-metal builds and QEMU smoke tests
     runs-on: ubuntu-latest
@@ -91,6 +125,10 @@ jobs:
 
       - name: Cache Cargo
         uses: Swatinem/rust-cache@v2
+
+      - name: Lint RISC-V kernel
+        working-directory: dezh-boot
+        run: cargo clippy --locked -- -D warnings
 
       - name: Build RISC-V kernel
         working-directory: dezh-boot
@@ -114,6 +152,10 @@ jobs:
           --kernel dezh-boot/target/riscv64gc-unknown-none-elf/debug/dezh-boot
           --qemu qemu-system-riscv64
           --transcript /tmp/demo-transcript-agent-f1.md
+
+      - name: Lint x86_64 kernel
+        working-directory: dezh-boot-x86
+        run: cargo clippy --locked -- -D warnings
 
       - name: Build x86_64 kernel
         working-directory: dezh-boot-x86

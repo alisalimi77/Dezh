@@ -225,6 +225,10 @@ unsafe fn inb(port: u16) -> u8 {
     val
 }
 
+// `COM1 + 0` is written out so the block reads as the UART register map it is:
+// offsets 0..5 in order. Folding the identity away would hide the one register
+// whose offset is zero.
+#[allow(clippy::identity_op)]
 fn serial_init() {
     unsafe {
         outb(COM1 + 1, 0x00); // disable interrupts

@@ -1,21 +1,19 @@
 # Dezh workspace root.
 #
-# Members are the host-target crates for each architecture spike (capability
-# core, Cairn, identity, IR, IPC, kernel, Linux personality, runtime,
-# scheduler). The example WASM guests in `guests/` are a SEPARATE workspace
-# compiled to `wasm32-unknown-unknown` by dezh-host's build.rs, so they are
-# deliberately EXCLUDED here.
+# One member. `dezh-kernel` is the boot contract the RISC-V and x86_64 kernels
+# validate themselves against, and the home of the machine-checked authority
+# rule (a derived capability is provably a subset of its intent), so it is host
+# code that genuinely ships.
+#
+# Everything else that runs lives outside this workspace, each targeting its own
+# architecture with its own lockfile:
+#
+#   dezh-boot/       RISC-V kernel        riscv64gc-unknown-none-elf
+#   dezh-boot-x86/   x86_64 kernel        x86_64-unknown-none
+#   dezh-core/       shared, no_std       both of the above, by path
+#   guests/          example WASM guests  wasm32-unknown-unknown
+#   spikes/          Step 1..9 host spikes, superseded - see spikes/README.md
 [workspace]
 resolver = "2"
-members = [
-    "dezh-cairn",
-    "dezh-host",
-    "dezh-identity",
-    "dezh-ir",
-    "dezh-ipc",
-    "dezh-kernel",
-    "dezh-linux",
-    "dezh-runtime",
-    "dezh-scheduler",
-]
-exclude = ["guests", "dezh-boot"]
+members = ["dezh-kernel"]
+exclude = ["guests", "dezh-boot", "spikes"]

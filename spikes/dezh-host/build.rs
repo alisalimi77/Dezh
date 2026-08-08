@@ -13,8 +13,10 @@ const GUESTS: [&str; 3] = ["g_granted", "g_denied", "g_attenuate"];
 
 fn main() {
     let manifest = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
-    let workspace_root = manifest.parent().unwrap().to_path_buf();
-    let guests_dir = workspace_root.join("guests");
+    // spikes/dezh-host -> spikes -> repository root. The guests are shared with
+    // the repository, not owned by the spikes workspace, so they stay at the top.
+    let repo_root = manifest.parent().unwrap().parent().unwrap().to_path_buf();
+    let guests_dir = repo_root.join("guests");
     let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
 
     // Rebuild whenever any guest source or manifest changes.

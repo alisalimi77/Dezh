@@ -4,7 +4,11 @@
 //!  2. compile separate user programs to their own riscv ELFs and stage them in
 //!     OUT_DIR so the kernel can embed and load them.
 
-use std::{env, fs, path::PathBuf, process::Command};
+use std::{
+    env, fs,
+    path::{Path, PathBuf},
+    process::Command,
+};
 
 fn main() {
     println!("cargo:rustc-link-arg=-Tlinker.ld");
@@ -90,11 +94,11 @@ fn build_signed_demo() {
     fs::write(&out, src).unwrap_or_else(|e| panic!("write signed_demo.rs: {e}"));
 }
 
-fn build_user_elf(manifest: &PathBuf, dir: &str, bin: &str) {
+fn build_user_elf(manifest: &Path, dir: &str, bin: &str) {
     build_user_elf_for(manifest, dir, bin, "riscv64gc-unknown-none-elf");
 }
 
-fn build_user_elf_for(manifest: &PathBuf, dir: &str, bin: &str, target: &str) {
+fn build_user_elf_for(manifest: &Path, dir: &str, bin: &str, target: &str) {
     let prog = manifest.join(dir);
     println!("cargo:rerun-if-changed={}", prog.join("src/main.rs").display());
     println!("cargo:rerun-if-changed={}", prog.join("linker.ld").display());
