@@ -1048,6 +1048,23 @@ fn sfar_plan(dma_base: usize, ahd: u32, sender_caps: usize, from: usize) -> usiz
                 sys_print(b" ns=");
                 print_ns_name(ns);
                 sys_print(b"\n");
+                // A forecast that says "compensatable" without saying HOW is a
+                // promise, not a plan. If the connector registered a
+                // compensating action at commit time, name it here so the
+                // operator sees the undo before choosing to run it.
+                if d_read_u8(CAIRN1_OFF_REVCLASS) == SAND_REV_COMPENSATABLE {
+                    let mut comp = [0u8; 128];
+                    match extract_compensation(&mut comp) {
+                        Some(n) => {
+                            sys_print(b"      compensation registered: ");
+                            sys_print(&comp[..n]);
+                            sys_print(b"\n");
+                        }
+                        None => sys_print(
+                            b"      NO compensation registered -- undo is a claim, not a plan\n",
+                        ),
+                    }
+                }
             }
             cur = parent;
         }

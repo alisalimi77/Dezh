@@ -183,6 +183,30 @@ fn fx_parse(reply: &str) -> Option<(bool, &str)> {
     }
 }
 
+/// Compose `"<forward>\x1f<compensating action>"`, the encoding the storage
+/// daemon reads to persist a registered compensation alongside the effect.
+fn fx_compose_record(out: &mut [u8; MARZ_REQ_MAX], forward: &str, dest: &str, token: &str) -> usize {
+    fn put(out: &mut [u8; MARZ_REQ_MAX], n: &mut usize, s: &str) {
+        for &b in s.as_bytes() {
+            if *n < MARZ_REQ_MAX {
+                out[*n] = b;
+                *n += 1;
+            }
+        }
+    }
+    let mut n = 0usize;
+    put(out, &mut n, forward);
+    if n < MARZ_REQ_MAX {
+        out[n] = 0x1f; // SAND_COMP_SEP
+        n += 1;
+    }
+    put(out, &mut n, "marz-effect ");
+    put(out, &mut n, dest);
+    put(out, &mut n, " git.revert ");
+    put(out, &mut n, token);
+    n
+}
+
 /// `marz-effect <dest> <verb> <arg>`: an effect on a real external system.
 ///
 /// The whole W12 argument in one path. Everything before the send is Dezh's to
@@ -200,6 +224,15 @@ fn fx_parse(reply: &str) -> Option<(bool, &str)> {
 /// did what it said. It is outside the TCB.
 pub(crate) fn marz_effect(plan: &KernelPlan, arg: &str, ahd: u16) {
     const LAB: usize = 1;
+    // An effect with no mission is attributable but not forecastable: `sfar-plan`
+    // works over the effects under one intent, and Ahd#0 means "direct". Opening
+    // one here rather than requiring the operator to remember is what makes the
+    // console verb produce a record `sfar-plan` can actually reason about.
+    let ahd = if ahd != 0 {
+        ahd
+    } else {
+        pkg::open_intent("writer").map(|(id, _)| id).unwrap_or(0)
+    };
     let (dname, rest) = arg.trim().split_once(' ').unwrap_or((arg.trim(), ""));
     let (verb, slug) = rest.trim().split_once(' ').unwrap_or((rest.trim(), ""));
     let dname = if dname.is_empty() { "ops" } else { dname };
@@ -274,11 +307,18 @@ pub(crate) fn marz_effect(plan: &KernelPlan, arg: &str, ahd: u16) {
         return;
     }
 
+    // Register the compensation WITH the effect, in the ledger value the daemon
+    // already understands: "forward\x1fcompensation". A compensatable effect
+    // with no registered compensation is only a claim; this is what makes
+    // `sfar-plan` able to forecast an undo rather than guess at one.
+    let mut val = [0u8; MARZ_REQ_MAX];
+    let vlen = fx_compose_record(&mut val, dest.record_effect, dest.name, token);
+    let value = core::str::from_utf8(&val[..vlen]).unwrap_or(dest.record_effect);
     let derived = pkg::MCAP_PRINT;
     let led = run_registered_virtio_client_ns(
         plan,
         cairn_req_intent(BLK_REQ_CAIRN_COMMIT, LAB, ahd, derived, SAND_REV_COMPENSATABLE),
-        dest.record_effect,
+        value,
         task_ns_cap(LAB),
     );
     record_event("kernel", "marz.effect", dest.name, "OK");

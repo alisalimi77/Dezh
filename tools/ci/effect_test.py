@@ -117,6 +117,24 @@ def main() -> int:
                 "the reply lowered operator integrity: bytes off the wire are unvalidated",
             )
 
+            # The console verb opens a mission for the effect; find its id in
+            # the record rather than assuming one.
+            import re as _re
+            m = _re.search(r"intent=(\d+)", session.text())
+            ahd = m.group(1) if m else "0"
+            print(f"forecast (mission Ahd#{ahd}):", flush=True)
+            at = session.send_line(f"sfar-plan {ahd}")
+            end = session.wait_for("[sfar] plan:", since=at)
+            plan_text = session.text()[at:end + 200]
+            check(
+                "compensatable=1" in plan_text,
+                f"sfar-plan forecasts one compensatable effect: {plan_text.strip().splitlines()[-1][:90]!r}",
+            )
+            check(
+                "git.revert" in session.text()[at:end],
+                "the forecast names the REGISTERED compensating action, not a guess",
+            )
+
             token = git(repo, "rev-parse", "--short=10", "HEAD")
             print("compensation:", flush=True)
             at = session.send_line(f"marz-effect ops git.revert {token}")
