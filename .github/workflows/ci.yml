@@ -54,6 +54,9 @@ jobs:
         working-directory: dezh-core
         run: cargo test --locked
 
+      - name: Run effect-gateway acceptance (W12; no Dezh involved)
+        run: python3 tools/ci/gateway_test.py
+
       - name: Run public review hygiene scan
         run: python3 tools/review/scan_public.py
 
@@ -75,6 +78,8 @@ jobs:
           tools/demo/run_review_demo.py
           tools/demo/run_agent_demo.py
           tools/ci/qemu_smoke.py
+          tools/ci/gateway_test.py
+          tools/gateway/dezh_gateway.py
           tools/ci/check_docs.py
           tools/ci/sdk_test.py
           tools/sdk/build_pkg.py
