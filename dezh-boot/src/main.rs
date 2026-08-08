@@ -31,6 +31,9 @@ mod pkg;
 pub(crate) use dev::uart::{Uart, UART_BASE};
 use mm::frames::{frame_alloc, frame_free, frames_init, FRAME_FREE, FRAME_SIZE, FRAME_TOTAL};
 use mm::global::Global;
+use ocap::device::{
+    dev_authority_init, dev_authority_live, dev_authority_ok, dev_authority_set, DEV_OBJ_NET,
+};
 use ocap::ns::{
     ns_authority_init, ns_authority_live, ns_authority_ok, ns_grant, ns_revoke, NS_HANDLE,
     NS_TABLE,
@@ -2349,94 +2352,6 @@ fn run_marz_demo(plan: &KernelPlan) {
     declassify();
     kprintln!("[marz-demo] PASS: a destination capability is not network access, and a secret cannot be exported to a destination not cleared for it");
     record_event("kernel", "marz.demo", "egress", "OK");
-}
-
-// --- Device authority as revocable ocap handles (ocap breadth) ---------------
-//
-// Namespaces already carry generation-stamped handles. Devices now do too: the
-// operator holds one handle per device, and revoking it makes every later grant
-// of that device refuse - a hardware kill-switch that sits ABOVE the finer gates
-// (a revoked NIC stops all egress regardless of destination authority).
-
-// Only the net object has a revocation path today, but the block object owns
-// index 0 of DEV_NAMES; naming it keeps the enumeration and the name table
-// legible as one thing.
-#[allow(dead_code)]
-const DEV_OBJ_BLOCK: usize = 0;
-const DEV_OBJ_NET: usize = 1;
-const DEV_NAMES: [&str; 2] = ["block", "net"];
-
-// Boot hart only: device authority is minted, checked and revoked from the
-// console, which does not run on a secondary hart. No other hart reads it.
-static DEV_TABLE: Global<dezh_core::ocap::CapTable<4>> =
-    Global::new(dezh_core::ocap::CapTable::new());
-static DEV_HANDLE: Global<[Option<dezh_core::ocap::Cap>; 4]> = Global::new([None; 4]);
-static DEV_INIT: Global<bool> = Global::new(false);
-
-fn dev_authority_init() {
-    use dezh_core::ocap::{R_READ, R_WRITE};
-    unsafe {
-        if *DEV_INIT.get() {
-            return;
-        }
-        let mut i = 0usize;
-        while i < DEV_NAMES.len() {
-            (*DEV_HANDLE.get())[i] = (*DEV_TABLE.get()).mint(i, R_READ | R_WRITE);
-            i += 1;
-        }
-        *DEV_INIT.get() = true;
-    }
-}
-
-/// Does the operator still hold a live capability for this device?
-fn dev_authority_ok(obj: usize) -> bool {
-    use dezh_core::ocap::{CapCheck, R_READ};
-    dev_authority_init();
-    unsafe {
-        (*DEV_HANDLE.get())[obj].map(|h| (*DEV_TABLE.get()).check(&h, R_READ)) == Some(CapCheck::Ok)
-    }
-}
-
-fn dev_authority_live(obj: usize) -> bool {
-    if dev_authority_ok(obj) {
-        return true;
-    }
-    kprintln!(
-        "[cap] DENIED: device '{}' capability was REVOKED (dev-grant {} to re-mint) -- ocap generation stale",
-        DEV_NAMES[obj], DEV_NAMES[obj]
-    );
-    false
-}
-
-fn dev_name_id(name: &str) -> Option<usize> {
-    DEV_NAMES.iter().position(|n| *n == name)
-}
-
-fn dev_authority_set(arg: &str, grant: bool) {
-    use dezh_core::ocap::{R_READ, R_WRITE};
-    let Some(obj) = dev_name_id(arg.trim()) else {
-        kprintln!("[cap] unknown device (known: block net)");
-        return;
-    };
-    dev_authority_init();
-    unsafe {
-        if grant {
-            (*DEV_HANDLE.get())[obj] = (*DEV_TABLE.get()).mint(obj, R_READ | R_WRITE);
-        } else {
-            (*DEV_TABLE.get()).revoke(obj);
-        }
-    }
-    kprintln!(
-        "[cap] device '{}' capability {}",
-        DEV_NAMES[obj],
-        if grant { "re-minted at the current generation" } else { "REVOKED (generation bumped)" }
-    );
-    record_event(
-        "kernel",
-        if grant { "dev.grant" } else { "dev.revoke" },
-        DEV_NAMES[obj],
-        "OK",
-    );
 }
 
 /// Device authority is revocable at runtime, above every finer gate.
