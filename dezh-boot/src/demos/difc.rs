@@ -5,10 +5,11 @@
 //! integrity half - bytes off the wire are not secret, they are unvalidated,
 //! and they cannot become trusted state without an explicit endorsement.
 
+use crate::cairn::console::{cairn_cmd_commit, cairn_cmd_simple};
 use crate::audit::record_event;
 use crate::difc::{declassify, endorse, ns_label, ns_requires, OP_TAINT};
 use crate::net::marz::run_marz_ping;
-use crate::{cairn_cmd_commit, cairn_cmd_simple, kprintln, KernelPlan, BLK_REQ_CAIRN_GET};
+use crate::{kprintln, KernelPlan, BLK_REQ_CAIRN_GET};
 
 /// Prove DIFC enforcement on the real storage path: read a secret namespace,
 /// then be refused when writing it down to a public one, until an explicit

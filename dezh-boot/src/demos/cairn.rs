@@ -420,6 +420,12 @@ pub(crate) fn run_redteam(plan: &KernelPlan) {
 /// honestly (retract, compensate, refuse-with-reason), and asks why the escape
 /// was denied. This collapses P1 (intent) + P2 (Sand) + P3 (mission/compensation/
 /// multi-ns) + P4 (adversary) + P5 (why-denied/Tbar) into a single narrative.
+/// W8 P3 flagship: a whole agent MISSION under one intent, then an honest
+/// rollback. The mission makes three effects — one MODELED irreversible external
+/// send plus two reversible storage writes — so the forecast is "partial" and
+/// the rollback retracts the reversible writes but REFUSES the irreversible send
+/// with an explanation. This is the "leave an agent loose, then undo the night"
+/// story, scoped to be reproducible in CI.
 pub(crate) fn run_overnight(plan: &KernelPlan) {
     const LAB: usize = 1;
     const CALC: usize = 2;
