@@ -5,6 +5,7 @@
 //! into two subsystems is not part of the mechanism it demonstrates; this is
 //! where they were always going.
 
+use crate::cairn::console::{cairn_cmd_simple, sfar_cmd};
 use crate::audit::record_event;
 use crate::difc::declassify;
 use crate::net::marz::{
@@ -12,7 +13,7 @@ use crate::net::marz::{
 };
 use crate::ocap::device::{dev_authority_init, dev_authority_ok, dev_authority_set, DEV_OBJ_NET};
 use crate::pkg;
-use crate::{cairn_cmd_simple, kprintln, sfar_cmd, KernelPlan, BLK_REQ_CAIRN_GET, BLK_REQ_SFAR_PLAN, BLK_REQ_SFAR_ROLLBACK, BLK_REQ_TBAR};
+use crate::{kprintln, KernelPlan, BLK_REQ_CAIRN_GET, BLK_REQ_SFAR_PLAN, BLK_REQ_SFAR_ROLLBACK, BLK_REQ_TBAR};
 
 /// M3: a REAL external effect, end to end. A send under an intent leaves the
 /// machine, is recorded as irreversible, is attributed by the provenance graph,
