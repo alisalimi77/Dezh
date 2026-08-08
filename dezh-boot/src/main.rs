@@ -18,7 +18,15 @@
 
 extern crate alloc;
 
+mod dev;
+mod mm;
 mod pkg;
+
+// `Uart` and `Global` are re-exported at the crate root: the kprint!/kprintln!
+// macros expand to `$crate::Uart` at every call site in the tree, and `Global`
+// is used by every module that owns kernel state.
+pub(crate) use dev::uart::{Uart, UART_BASE};
+use mm::global::Global;
 
 // The RISC-V implementation of the shared Dezh-core Host: capability check +
 // the side effect (kernel console). The Dezh-IR engine lives in dezh-core and
@@ -96,10 +104,8 @@ impl dezh_core::ir::Host for KHost<'_> {
     }
 }
 
-use core::alloc::{GlobalAlloc, Layout};
 use core::arch::{asm, global_asm};
-use core::cell::UnsafeCell;
-use core::fmt::{self, Write};
+use core::fmt::Write;
 use core::panic::PanicInfo;
 use core::ptr::{read_volatile, write_volatile};
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
@@ -377,111 +383,6 @@ struct TrapFrame {
     a6: usize,
     a7: usize,
 }
-
-// --- NS16550 UART on the QEMU `virt` board. --------------------------------
-const UART_BASE: *mut u8 = 0x1000_0000 as *mut u8;
-const UART_RBR: usize = 0;
-const UART_THR: usize = 0;
-const UART_FCR: usize = 2;
-const UART_LSR: usize = 5;
-
-pub(crate) struct Uart;
-
-impl Uart {
-    fn init(&self) {
-        unsafe { write_volatile(UART_BASE.add(UART_FCR), 0x07) } // enable + clear FIFOs
-    }
-    fn putc(&self, byte: u8) {
-        unsafe { write_volatile(UART_BASE.add(UART_THR), byte) }
-    }
-    fn getc(&self) -> u8 {
-        loop {
-            let lsr = unsafe { read_volatile(UART_BASE.add(UART_LSR)) };
-            if lsr & 0x01 != 0 {
-                return unsafe { read_volatile(UART_BASE.add(UART_RBR)) };
-            }
-        }
-    }
-}
-
-impl Write for Uart {
-    fn write_str(&mut self, s: &str) -> fmt::Result {
-        for b in s.bytes() {
-            self.putc(b);
-        }
-        Ok(())
-    }
-}
-
-#[macro_export]
-macro_rules! kprint {
-    ($($arg:tt)*) => {{ let _ = core::write!($crate::Uart, $($arg)*); }};
-}
-#[macro_export]
-macro_rules! kprintln {
-    ($($arg:tt)*) => {{ let _ = core::writeln!($crate::Uart, $($arg)*); }};
-}
-
-// --- Mutable globals reached only through a raw pointer. -------------------
-//
-// `static mut` is the wrong tool now that secondary harts run: taking `&` or
-// `&mut` to one is undefined behaviour the moment two harts can reach it, and
-// edition 2024 rejects it outright. `Global<T>` keeps the same storage and the
-// same zero cost, but its only accessor hands back a `*mut T`, so a reference
-// to the global is never created and two overlapping `&mut` cannot exist.
-//
-// The pointer does not by itself make concurrent access safe - it removes the
-// aliasing UB and leaves the ordering argument to the caller. Each `Global`
-// below therefore states, at its declaration, which hart may touch it.
-#[repr(transparent)]
-struct Global<T>(UnsafeCell<T>);
-// Safety: no reference to the inner value is ever handed out; every read and
-// write goes through `get()` inside an `unsafe` block whose concurrency
-// argument is recorded at the declaration site.
-unsafe impl<T> Sync for Global<T> {}
-impl<T> Global<T> {
-    const fn new(value: T) -> Self {
-        Self(UnsafeCell::new(value))
-    }
-    fn get(&self) -> *mut T {
-        self.0.get()
-    }
-}
-
-// --- Minimal bump allocator (alloc is needed by dezh-kernel's Vec/String). --
-const HEAP_SIZE: usize = 1 << 20;
-
-struct BumpHeap {
-    arena: UnsafeCell<[u8; HEAP_SIZE]>,
-    next: AtomicUsize,
-}
-unsafe impl Sync for BumpHeap {}
-unsafe impl GlobalAlloc for BumpHeap {
-    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        let base = self.arena.get() as usize;
-        loop {
-            let cur = self.next.load(Ordering::Relaxed);
-            let aligned = (base + cur + layout.align() - 1) & !(layout.align() - 1);
-            let new_next = aligned - base + layout.size();
-            if new_next > HEAP_SIZE {
-                return core::ptr::null_mut();
-            }
-            if self
-                .next
-                .compare_exchange(cur, new_next, Ordering::SeqCst, Ordering::Relaxed)
-                .is_ok()
-            {
-                return aligned as *mut u8;
-            }
-        }
-    }
-    unsafe fn dealloc(&self, _ptr: *mut u8, _layout: Layout) {}
-}
-#[global_allocator]
-static HEAP: BumpHeap = BumpHeap {
-    arena: UnsafeCell::new([0; HEAP_SIZE]),
-    next: AtomicUsize::new(0),
-};
 
 // --- QEMU `virt` SiFive test finisher: cleanly exit the emulator. ----------
 const TEST_FINISHER: *mut u32 = 0x10_0000 as *mut u32;
