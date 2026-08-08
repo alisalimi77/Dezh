@@ -426,38 +426,56 @@ Order: leaves first (`uart`, `plic`, `time`, `frames`), then single-inbound-edge
 `console` last — it depends on everything, so it falls out once the rest have
 real interfaces.
 
-**Progress.** The leaves are out (`uart`, `time`, `finisher`, `bump`, `global`,
-`frames`) and so is the single-inbound-edge group (`difc`, `ocap/ns`,
-`ocap/device`, `proc/loader`, `net/marz`). `main.rs` is at 7,772 lines. Two
-findings from doing it:
+**Status: done**, with three gaps named below. `main.rs` went from 8,776
+lines to 724 across 23 commits; the kernel is now 26 modules. Every step kept
+the clippy gate and all three QEMU legs green, with the smoke transcript's 26
+PASS lines byte-identical throughout.
+
+Against the acceptance criteria:
+
+| Criterion | Outcome |
+| --- | --- |
+| `main.rs` is the boot sequence and nothing else | met — assembly, trap path, syscall ABI, capability bits, `kmain` |
+| No file over 1,200 lines | met except `pkg.rs` (3,059) |
+| All QEMU legs byte-identical | met |
+| Zero bare `static mut` in the moved modules | met except `smp` (4) |
+| Console dispatcher becomes a table | partial — the table carries name, capability, group and help; the handler is still a match arm |
+
+The three gaps are real and none of them is bookkeeping. `pkg.rs` is the
+virtio-block daemon; it was already its own module before W11 and was never on
+the split list, so the cap catches it by accident. `smp`'s four `static mut`
+carry a comment arguing they are single-threaded — that argument is precisely
+what W13 has to revisit, so converting them now would settle by fiat a question
+W13 needs to ask. And putting handlers in the command table needs one uniform
+handler signature where the arms currently take four shapes; that is a rewrite,
+not a move.
+
+**What the work turned up**, beyond the line count:
 
 - **`plic` is not a leaf.** It reaches into `TSTATE` and `MAX_TASKS` to wake
-  drivers blocked on `sys_irq_wait`, so it comes out *after* `sched`, not
-  before it with the other devices.
-- **Demos are the thing holding statics public — but moving them does not fix
-  it.** Where a demo pokes state instead of calling the interface (`ocap/ns`,
-  `net/marz`) it forces that state to stay exported; where it does not
-  (`ocap/device`), the module closes completely. An earlier version of this
-  note claimed that moving `demos/` out of `main.rs` would let `NS_TABLE`,
-  `NS_HANDLE` and `OP_EGRESS` go private. It does not: `pub(crate)` is
-  crate-wide, so relocating the caller changes nothing about visibility. What
-  actually closes those modules is giving them narrow accessors so the demos
-  stop reaching into state at all — a logic change, and its own commit.
+  drivers blocked on `sys_irq_wait`, so it had to come out *after* `sched`.
+  Recorded at step 3 and acted on at step 23.
+- **Moving a demo does not make state private.** `pub(crate)` is crate-wide, so
+  relocating a caller changes nothing. What closes a module is giving it narrow
+  accessors so demos stop reaching into state — a logic change, and its own
+  commit. An earlier version of this note claimed otherwise and was wrong.
+- **A const used as a match pattern is a silent trap.** If it is not in scope it
+  becomes an irrefutable binding that swallows every arm below it, and the build
+  succeeds. This bit the syscall dispatch twice — `sched` (step 16) and the AP
+  trap path (step 21) — and only `-D warnings` caught it either time. `cargo
+  fix` proposed renaming the constant to `_sys_exit`, which would have made it
+  permanent. This is the single strongest argument for the W10 clippy gate.
+- **Banners are not subjects.** The "cooperative multitasking scheduler" heading
+  held an event ledger, an IPC/block ABI, a service registry and a block-daemon
+  client. The "Cairn v1 console front-end" heading was 1,335 lines of which 130
+  were Cairn. Sections had been growing by chronology.
+- **An explicit import list is a measurement when it names coupling, and noise
+  when it names vocabulary.** `proc::loader` opened at 31 crate-root imports with
+  a falsifiable prediction that it should shrink twice; it went 31 → 19 → 7, and
+  what remains is the loader's own job. `abi` and the console dispatcher got
+  globs, because enumerating a shared vocabulary measures nothing.
 
-Remaining: `console` (1,920), `sched` (1,645), `cairn` (1,340), `smp` (1,155),
-plus `demos/` and `mm/paging`.
-
-Two rules keep it honest. **No logic edits in a split commit**; if something
-must change to compile, that is a separate commit. And the console dispatcher
-becomes a **table** of `(name, help, handler)`, so `help` is generated from the
-same source of truth and a new command is one entry rather than an arm at line
-8,400.
-
-It also carries W10's remaining debt for free: the 47 surviving `static mut` are
-mostly the scheduler tables (`TSTATE`, `MBOX`, `TCAPS`, `CURRENT`, ~150 sites)
-and they become `Global<T>` as they move, rather than being touched twice.
-
-*Cost:* large but mechanical; one module per commit.
+*Cost:* large but mechanical; one module per commit. Actual: 23 commits.
 *Blocked on:* nothing.
 *Acceptance:* no file in `dezh-boot/src/` over 1,200 lines; `main.rs` is the
 boot sequence and nothing else; all QEMU legs byte-identical; zero remaining
