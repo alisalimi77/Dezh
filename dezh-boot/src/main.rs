@@ -3534,11 +3534,7 @@ extern "C" fn utrap_handler(frame_ptr: *mut usize) -> *const usize {
                     let ticks = frame[F_A0];
                     let iters = frame[F_A1];
                     // QEMU `virt` time CSR is 10 MHz => 1 tick = 100 ns.
-                    let ns = if iters > 0 {
-                        ticks.saturating_mul(100) / iters
-                    } else {
-                        0
-                    };
+                    let ns = ticks.saturating_mul(100).checked_div(iters).unwrap_or(0);
                     kprintln!(
                         "  [bench] ecall round-trip: ~{ns} ns/call  ({ticks} ticks / {iters} calls, QEMU-emulated)"
                     );
@@ -6175,13 +6171,9 @@ fn calc_eval(op: usize, a: usize, b: usize) -> Option<usize> {
         CALC_OP_ADD => Some(a.saturating_add(b)),
         CALC_OP_SUB => Some(a.saturating_sub(b)),
         CALC_OP_MUL => Some(a.saturating_mul(b)),
-        CALC_OP_DIV => {
-            if b == 0 {
-                None
-            } else {
-                Some(a / b)
-            }
-        }
+        // checked_div is the divide-by-zero guard, not an optimisation: it
+        // returns None for b == 0, which is exactly this arm's contract.
+        CALC_OP_DIV => a.checked_div(b),
         _ => None,
     }
 }

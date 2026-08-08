@@ -1,0 +1,26 @@
+# One toolchain for the whole repository, pinned on purpose.
+#
+# CI lints with `-D warnings`. On a floating `stable` that turns Rust's release
+# calendar into a source of red builds: 1.97 added `manual_checked_ops` and
+# `unnecessary_sort_by` fires more widely, and the first CI run after the lint
+# gate landed failed on code nobody had touched. A gate that breaks for reasons
+# unrelated to the change under review is a gate people learn to ignore.
+#
+# Pinning also closes the gap that produced that surprise: every check was green
+# on the contributor's machine, which happened to be running 1.94. Local and CI
+# now agree by construction.
+#
+# Bumping this is a normal, deliberate commit: raise the version, run the lints,
+# fix or `#[allow]`-with-a-reason whatever the new release found, in one place.
+#
+# rustup reads this from any subdirectory, so the separate workspaces
+# (dezh-boot, dezh-boot-x86, dezh-core, spikes, guests) all follow it.
+[toolchain]
+channel = "1.97.0"
+components = ["clippy", "rustfmt"]
+targets = [
+    "riscv64gc-unknown-none-elf",     # the RISC-V kernel
+    "x86_64-unknown-none",            # the x86_64 kernel
+    "riscv64gc-unknown-linux-musl",   # the Pol test binary (a real Linux ELF)
+    "wasm32-unknown-unknown",         # the example guests, built by the spikes
+]

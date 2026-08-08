@@ -146,8 +146,9 @@ impl LinuxPersonality {
 
     pub fn mount(&mut self, mount: Mount) {
         self.mounts.push(mount);
+        // Longest prefix first, so `open` matches the most specific mount.
         self.mounts
-            .sort_by(|a, b| b.guest_prefix.len().cmp(&a.guest_prefix.len()));
+            .sort_by_key(|m| std::cmp::Reverse(m.guest_prefix.len()));
     }
 
     pub fn open(&mut self, path: &str, flags: u32) -> Result<Fd> {
