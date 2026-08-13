@@ -340,43 +340,64 @@ GitHub Packages/GHCR image, not a Docker Hub image. See
 
 Inside the RISC-V console:
 
-```text
+```markdown
+# System / Status
 version
 about
 status
 services
 tasks
+
+# IPC
 ipc-typed-demo
 ipcstat
+
+# Apps
 install run
 apps installed
 app-run lab
 calc 7 + 5
 vault-put demo-secret
 vault-get
+
+# Package Management
 pkg-list
 pkg-store
 pkg-review hello
 pkg-versions hello
 pkg-gc
+
+# Cairn Storage
 cairn-demo
 cairn-commit note hello
 cairn-log note
 cairn-rollback note 1
 cairn-verify note
+
+# Agents / Intent / Provenance
 agent
 overnight
-irq-stat
-smp-sched
-smp-isolate
-marz-demo
-marz-ping ops
+why-denied
+tbar
+
+# Information Flow
 taintflow-demo
 ingress-demo
 taint
-why-denied
-tbar
+
+# Hardware / Interrupts / SMP
+irq-stat
+smp-sched
+smp-isolate
+
+# Networking
+marz-demo
+marz-ping ops
+
+# Benchmarks
 bench-all
+
+# Power
 halt
 ```
 
