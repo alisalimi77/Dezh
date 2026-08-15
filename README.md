@@ -5,7 +5,7 @@
 <p align="center">
   <a href="https://github.com/alisalimi77/Dezh/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/alisalimi77/Dezh/actions/workflows/ci.yml/badge.svg"></a>
   <a href="LICENSE"><img alt="Apache-2.0" src="https://img.shields.io/badge/license-Apache--2.0-blue.svg"></a>
-  <a href="https://github.com/alisalimi77/Dezh/releases/tag/v0.3-review"><img alt="Review release" src="https://img.shields.io/badge/release-v0.3--review-0f766e.svg"></a>
+  <a href="https://github.com/alisalimi77/Dezh/releases/tag/v0.4-review"><img alt="Review release" src="https://img.shields.io/badge/release-v0.4--review-0f766e.svg"></a>
   <a href="dezh-boot/"><img alt="RISC-V" src="https://img.shields.io/badge/arch-RISC--V-283272.svg"></a>
   <a href="dezh-boot-x86/"><img alt="x86_64" src="https://img.shields.io/badge/arch-x86__64-546e7a.svg"></a>
   <a href="Cargo.toml"><img alt="Rust" src="https://img.shields.io/badge/made%20with-Rust-b7410e.svg"></a>
@@ -50,12 +50,13 @@ architectural and security-model review.
 | Device I/O | Interrupt-driven: PLIC-routed virtio IRQs, drivers sleep on the device, scheduler idles with `wfi` |
 | SMP | SBI HSM bring-up, ticket spinlock, one shared run queue — U-mode tasks scheduled symmetrically, each in its own address space |
 | Network | Bidirectional edge: per-destination egress capability, plus ARP resolution and a real ICMP echo exchange |
+| External effects | `marz-effect` drives a real external system and ledgers the outcome that comes back, with the undo recorded on the effect. The host gateway performing it is **outside the TCB** — Dezh proves authorization, egress, ledgering and compensation, not the gateway's honesty |
 | Information flow | Both axes: secrecy blocks write-down/exfiltration, integrity blocks unvalidated ingress becoming trusted state |
 | IPC | Typed request/reply path with status codes, timeouts, and counters |
 | Persistence | Cairn v1 commit log with rollbackable refs and per-app namespaces |
 | Apps | `.dzp` packages with manifest-scoped caps and transactional lifecycle |
 | Package signing | Ed25519 `DZSP` envelope binding the *authority* a package requests; the grant is attenuated to the publisher's ceiling (`granted = requested ∩ ceiling`) |
-| Review release | [`v0.3-review`](https://github.com/alisalimi77/Dezh/releases/tag/v0.3-review) with a bootable x86_64 ISO, kernels, `.dzp` package, transcript, docs, checksums |
+| Review release | [`v0.4-review`](https://github.com/alisalimi77/Dezh/releases/tag/v0.4-review) with a bootable x86_64 ISO, kernels, `.dzp` package, transcript, docs, checksums |
 
 ## Review Snapshot
 
