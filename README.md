@@ -338,63 +338,66 @@ GitHub Packages/GHCR image, not a Docker Hub image. See
 
 ## Console Commands Worth Reviewing
 
-Inside the RISC-V console:
+Inside the RISC-V console. The headings are the console's own groups, so this
+list and what `help` prints are the same taxonomy — a curated subset of it,
+since `help` lists all 151 commands.
 
-```markdown
-# System / Status
+```text
+# Inspect
 version
 about
 status
-services
 tasks
-
-# IPC
-ipc-typed-demo
 ipcstat
+irq-stat
+smp-sched
+smp-isolate
 
-# Apps
+# Storage
+cairn-commit note hello
+cairn-log note
+cairn-rollback note 1
+cairn-verify note
+
+# Install
 install run
-apps installed
-app-run lab
-calc 7 + 5
-vault-put demo-secret
-vault-get
 
-# Package Management
+# Packages
 pkg-list
 pkg-store
 pkg-review hello
 pkg-versions hello
 pkg-gc
 
-# Cairn Storage
-cairn-demo
-cairn-commit note hello
-cairn-log note
-cairn-rollback note 1
-cairn-verify note
+# Apps
+apps installed
+app-run lab
+calc 7 + 5
+vault-put demo-secret
+vault-get
 
-# Agents / Intent / Provenance
-agent
+# Services
+services
+
+# Intent
+intent-open write
+intent-list
+intent-run 1 lab
+
+# Effects
 overnight
 why-denied
 tbar
-
-# Information Flow
-taintflow-demo
-ingress-demo
 taint
-
-# Hardware / Interrupts / SMP
-irq-stat
-smp-sched
-smp-isolate
-
-# Networking
+taintflow-demo
 marz-demo
 marz-ping ops
 
-# Benchmarks
+# Demos
+agent
+cairn-demo
+ipc-typed-demo
+ingress-demo
 bench-all
 
 # Power
