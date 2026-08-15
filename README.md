@@ -331,9 +331,11 @@ python tools/ci/sdk_test.py \
   --qemu qemu-system-riscv64
 ```
 
-Release tags build public review artifacts and a GitHub Container Registry
-review environment at `ghcr.io/alisalimi77/dezh-review-env:<tag>`. This is a
-GitHub Packages/GHCR image, not a Docker Hub image. See
+Release tags build the public review artifacts attached to each release. The
+release workflow also *tries* to publish a review-environment container to
+`ghcr.io/alisalimi77/dezh-review-env:<tag>`, and that step has failed on every
+release so far — **the image does not exist, do not try to pull it.** Build the
+environment locally from `Dockerfile.review` instead. See
 [release process](docs/RELEASING.md#release-process) and
 [packages and releases](docs/RELEASING.md#packages-and-releases).
 

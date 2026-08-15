@@ -151,9 +151,33 @@ docker pull ghcr.io/alisalimi77/dezh-review-env:v0.1-review
 The image is not the OS. It is the build-and-review environment: Rust targets,
 Python, and QEMU.
 
-If the package does not appear publicly on the repository sidebar, the GHCR
-package visibility may need to be changed to public in GitHub's package
-settings. The release workflow still publishes to GHCR, not Docker Hub.
+**This image does not exist yet.** The paragraph above describes what the
+workflow attempts, not what has happened. Every release run so far — v0.2, v0.3
+and v0.4 — has failed at `docker push` with:
+
+```text
+denied: permission_denied: write_package
+```
+
+so no tag of `dezh-review-env` has ever been published, and `docker pull` will
+fail. This was previously written up as a *visibility* problem ("the package may
+need to be changed to public"), which was a guess and the wrong one: the push is
+refused before a package exists to have visibility.
+
+The workflow file is not the cause — it requests `packages: write`, and the
+repository's default workflow token permission is already `write`. The remaining
+suspect is the GHCR package's own access settings for this repository, which is
+changed in GitHub's web UI and not in this repo.
+
+Until that is sorted, build the review environment locally:
+
+```sh
+docker build -f Dockerfile.review -t dezh-review-env .
+```
+
+The release job is idempotent by design, so once the registry accepts the push
+the failed run can simply be re-run and the image appears for that tag with no
+re-tagging.
 
 ### Dezh `.dzp` Packages
 
