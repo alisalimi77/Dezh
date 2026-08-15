@@ -13,3 +13,6 @@ dezh-boot/dezh-disk.img
 *.iso
 __pycache__/
 *.pyc
+
+# editor-local settings (not part of the project)
+.vscode/
