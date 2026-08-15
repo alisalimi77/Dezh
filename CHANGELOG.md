@@ -3,6 +3,57 @@
 All notable public-review changes are tracked here. Dezh follows milestone
 review tags rather than production semantic-version releases at this stage.
 
+## v0.4-review Candidate
+
+Two milestones since v0.3-review, and one correction.
+
+W11 split the kernel: `main.rs` went from 8,776 lines to 724 plus 26 modules,
+across 23 commits that each stayed green. W12 took the effect ledger outside
+the machine for the first time, which is the milestone that matters — until
+now every effect Dezh could attribute lived in Dezh's own storage, so the
+ledger was the only witness to its own claims.
+
+### W12 — An Effect That Really Leaves
+
+- **Host effect gateway:** `tools/gateway/dezh_gateway.py` performs real
+  external effects (git commits) over the UDP egress Dezh already had.
+  `git.revert` is the registered compensating action.
+- **`marz-effect`:** the request is authorized against a live NIC capability,
+  egress authority for that named destination and the DIFC export rule, is
+  ARP-resolved and sent on the wire — and the **outcome comes back** and is
+  ledgered as `compensatable`, carrying the undo itself rather than only its
+  class, so `sfar-plan` names the compensating action instead of promising one.
+- **The reply lowers operator integrity**, because bytes off the wire are
+  attacker-chosen and must not become trusted state without an explicit
+  `endorse`.
+- **`tools/ci/effect_test.py`:** twelve checks, none of which read Dezh's
+  transcript — every assertion about external state is made against the
+  external system, including that a revoked NIC capability leaves it untouched.
+- **Boundary, stated up front:** the gateway is **not in Dezh's TCB**. A
+  compromised gateway can lie about what it did.
+
+### W11 — A Kernel That Can Be Read
+
+- 8,776 lines of `main.rs` to 724 plus 26 modules.
+- Three gaps named rather than rounded away: `pkg.rs` over the size cap, `smp`'s
+  four remaining `static mut`, and the command table sitting apart from its
+  handlers.
+
+### Fixed
+
+- **`help` listed 111 of 151 commands.** The `Intent` and `Effects` groups were
+  missing from a hand-written list in `print_help`, so `intent-open`,
+  `sand-log`, `tbar`, `why-denied`, `overnight` and `redteam` never appeared on
+  the first screen a reviewer reads. The list is now checked against the command
+  table at build time.
+- **STATUS.md contradicted itself** on intent leases and revocation, granting
+  them in one bullet and denying them in another. `check_docs.py` exists to
+  catch exactly that and missed on a phrasing; the pattern is widened, which
+  immediately found the same stale claim in WHITEPAPER along with two more in
+  the same paragraph — the modeled-effects line, which W12 retired, and the
+  package-signing denial, which `sig-demo` retired. All three understated the
+  system, in the Limitations section, where understating costs the most.
+
 ## v0.2-review Candidate
 
 All four flagship demos are green in CI and a stranger can boot a release in a
