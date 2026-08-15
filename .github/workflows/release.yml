@@ -5,13 +5,14 @@ on:
     tags:
       - "v*"
 
+# `packages: write` was dropped along with the GHCR publish below. Nothing this
+# job does now touches a registry, and the repository's stance is least
+# privilege for CI.
 permissions:
   contents: write
-  packages: write
 
 env:
   CARGO_TERM_COLOR: always
-  REGISTRY_IMAGE: ghcr.io/${{ github.repository_owner }}/dezh-review-env
 
 jobs:
   release:
@@ -108,18 +109,30 @@ jobs:
               --notes-file docs/RELEASE_NOTES.md
           fi
 
-      - name: Log in to GitHub Container Registry
-        run: echo "${{ github.token }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
-
-      - name: Build review environment image
-        run: >
-          docker build
-          -f Dockerfile.review
-          -t "$REGISTRY_IMAGE:${{ github.ref_name }}"
-          -t "$REGISTRY_IMAGE:latest"
-          .
-
-      - name: Publish review environment image
-        run: |
-          docker push "$REGISTRY_IMAGE:${{ github.ref_name }}"
-          docker push "$REGISTRY_IMAGE:latest"
+      # The GHCR publish that used to live here is gone. It ran on v0.3 and
+      # v0.4 and was refused both times with `denied: permission_denied:
+      # write_package`, so no tag of the review image was ever published while
+      # the release run went red for it. Nothing depends on the image, and the
+      # reasoning is the one already written down in rust-toolchain.toml: a gate
+      # that breaks for reasons unrelated to the change under review is a gate
+      # people learn to ignore. A red release on a public repo teaches exactly
+      # that, and it teaches it to the reviewers we are inviting.
+      #
+      # The cause is not in this file - it requests `packages: write` and the
+      # repository's default workflow-token permission is already `write`. It is
+      # the package's own Actions access, changed in GitHub's web UI. When that
+      # is sorted, restore these three steps rather than reinventing them:
+      #
+      # Restoring it also means putting `packages: write` back in the
+      # permissions block above, and REGISTRY_IMAGE back in env as
+      # `ghcr.io/${{ github.repository_owner }}/dezh-review-env`:
+      #
+      #   - name: Log in to GitHub Container Registry
+      #     run: echo "${{ github.token }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+      #   - name: Build review environment image
+      #     run: docker build -f Dockerfile.review -t "$REGISTRY_IMAGE:${{ github.ref_name }}" -t "$REGISTRY_IMAGE:latest" .
+      #   - name: Publish review environment image
+      #     run: docker push "$REGISTRY_IMAGE:${{ github.ref_name }}" && docker push "$REGISTRY_IMAGE:latest"
+      #
+      # `Dockerfile.review` stays in the tree and still builds the environment
+      # locally, which is what the docs now point at.
