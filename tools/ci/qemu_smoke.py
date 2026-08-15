@@ -934,6 +934,18 @@ def run_x86_64(qemu: str, kernel: Path, iso: Path | None = None) -> None:
         session.wait_for(
             "[user] containment: the faulting task died, its neighbour ran on and finished"
         )
+        # W16.4: authority on x86 is derived from an intent, not ambient. Two
+        # CPL3 tasks, byte-identical code and manifest, different ceilings —
+        # `granted = requested & ceiling`, computed by the same `dezh_core::mcap`
+        # the RISC-V kernel uses.
+        session.wait_for("[cap] manifest requests print uptime")
+        session.wait_for("[cap] task 6 intent ceiling print uptime -> granted print uptime")
+        session.wait_for("[cap] task 7 intent ceiling uptime -> granted uptime")
+        session.wait_for("[cap] task 6 printed 42")
+        session.wait_for("[cap] DENIED: task 7 holds no PRINT capability")
+        session.wait_for(
+            "[cap] authority is derived, not ambient: identical code, one refusal"
+        )
         # M2: the IDT catches a deliberately-raised breakpoint instead of
         # triple-faulting the machine. The exception path still halts for a
         # kernel-mode fault; only a CPL3 fault costs just the task.

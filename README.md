@@ -202,7 +202,7 @@ for scope and honest wording rules):
 | --- | --- | --- | --- |
 | F1 | Agent containment: narrow grants, kernel denial, attenuated delegation, rollback of an agent's damage | **Reproducible today** (in CI) | [`tools/demo/run_agent_demo.py`](tools/demo/run_agent_demo.py) → [transcript](docs/transcripts/agent-f1.md) |
 | F2 | Cairn storage: versioned commits, capability-gated namespaces, rollback across reboot | **Reproducible today** (in CI) | `cairn-demo` console flow, exercised by [`tools/ci/qemu_smoke.py`](tools/ci/qemu_smoke.py) incl. a second-boot persistence phase |
-| F3 | Program-format portability: the byte-identical Dezh-IR `.dzp` runs on the RISC-V and x86_64 kernels | **Reproducible today** (in CI) | x86_64 kernel installs and runs the byte-identical `.dzp` agent package; bytes pinned by a `dezh-core` test — [x86 smoke](tools/ci/qemu_smoke.py). Honest scope: this proves the *program format + IR semantics* are portable, **not** kernel parity — the x86 kernel is deliberately thin (it has a timer, preemption, per-task address spaces and ring-3 containment, but no device IRQs and no capability-checked syscall surface; the rich runtime is RISC-V only). |
+| F3 | Program-format portability: the byte-identical Dezh-IR `.dzp` runs on the RISC-V and x86_64 kernels | **Reproducible today** (in CI) | x86_64 kernel installs and runs the byte-identical `.dzp` agent package; bytes pinned by a `dezh-core` test — [x86 smoke](tools/ci/qemu_smoke.py). Honest scope: this proves the *program format + IR semantics* are portable, **not** kernel parity — the x86 kernel is deliberately thin (it has a timer, preemption, per-task address spaces, ring-3 containment and intent-derived capability checks, but no device IRQs and no effect ledger; the rich runtime is RISC-V only). |
 | F4 | Pol compatibility: unmodified static Linux binary, capability-gated | **Reproducible today** (in CI) | `linux-elf` runs a real static Linux/RISC-V ELF ([`linux-guest`](dezh-boot/linux-guest/)); the same bytes also run on real riscv64 Linux |
 | W8 | Intent → effect runtime: run an agent under one intent, account for every effect, and undo a whole mission honestly (retract / compensate / refuse-with-reason), with a contained escape | **Reproducible today** (in CI) | `overnight` collapses it into one story → [transcript](docs/transcripts/overnight.md); parts: `sfar-demo` `comp-demo` `sfar-cross-demo` `redteam` `why-denied` `tbar` in [`tools/ci/qemu_smoke.py`](tools/ci/qemu_smoke.py) |
 
@@ -489,11 +489,12 @@ High-level layout:
 - RISC-V QEMU is the primary bare-metal target today.
 - The x86_64 kernel boots from an ISO and runs Dezh-IR packages, and now has a
   256-vector IDT, a Local APIC timer, a round-robin scheduler, per-task address
-  spaces and ring 3 — a CPL3 task that touches memory it was not given is killed
-  while its neighbour runs on. But that is where it stops: no device IRQs, no
-  storage, and no capability checks on its two-call syscall surface. The rich
-  interactive surface — console, IPC, Cairn, Pol — and the intent-to-effect
-  ledger are RISC-V only.
+  spaces, ring 3 and capability-checked syscalls derived from an intent ceiling —
+  a CPL3 task that touches memory it was not given is killed while its neighbour
+  runs on, and a task whose intent is narrower than its manifest is refused by
+  name. But that is where it stops: no device IRQs, no storage, and no effect
+  ledger on x86. The rich interactive surface — console, IPC, Cairn, Pol — and
+  the intent-to-effect accounting are RISC-V only.
 - The block driver uses QEMU legacy virtio-mmio.
 - DMA isolation is modeled through page-table discipline and fixed grants; real
   IOMMU integration is future work.

@@ -20,7 +20,7 @@ use crate::arch::timer;
 use crate::global::Global;
 use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
-pub(crate) const MAX_TASKS: usize = 6;
+pub(crate) const MAX_TASKS: usize = 8;
 const STACK_SIZE: usize = 16 * 1024;
 
 /// The 22 qwords `isr_ext_common` saves and restores: 15 general-purpose
@@ -51,6 +51,10 @@ struct Task {
     /// This task's address space. Zero means it has none of its own and runs on
     /// whatever the kernel booted with.
     cr3: u64,
+    /// The authority this task holds, in `dezh_core::mcap`'s live task-capability
+    /// bits. Zero is the honest default: a task that was never granted anything
+    /// can do nothing but exit.
+    caps: usize,
     state: State,
 }
 
@@ -64,6 +68,7 @@ static TASKS: Global<[Task; MAX_TASKS]> = Global::new(
         frame: 0,
         kstack_top: 0,
         cr3: 0,
+        caps: 0,
         state: State::Idle,
     }; MAX_TASKS],
 );
@@ -80,6 +85,8 @@ static SWITCHES: AtomicUsize = AtomicUsize::new(0);
 /// preemption happened: a task cannot give itself a turn, and how many rounds it
 /// fits into a turn depends only on how fast the machine is.
 static TURNS: [AtomicUsize; MAX_TASKS] = [
+    AtomicUsize::new(0),
+    AtomicUsize::new(0),
     AtomicUsize::new(0),
     AtomicUsize::new(0),
     AtomicUsize::new(0),
@@ -172,6 +179,18 @@ unsafe fn build_user_frame(kstack_top: *mut u8, entry_va: u64, ustack_top: u64) 
     )
 }
 
+/// Grants task `id` exactly `caps`. Must be called after `spawn_user` and before
+/// `start`; there is no way for a task to widen this from the inside.
+pub(crate) fn set_caps(id: usize, caps: usize) {
+    unsafe { (*(TASKS.get() as *mut Task).add(id)).caps = caps };
+}
+
+/// The authority of the task that is running — which, inside a syscall, is the
+/// caller's. Read from the table rather than from anything the caller passed.
+pub(crate) fn current_caps() -> usize {
+    unsafe { (*(TASKS.get() as *mut Task).add(CURRENT.load(Ordering::Relaxed))).caps }
+}
+
 /// Gives task `id` an address space of its own. Must be called after `spawn`
 /// and before `start`.
 pub(crate) fn set_address_space(id: usize, cr3: u64) {
@@ -193,6 +212,7 @@ pub(crate) fn spawn(id: usize, entry: extern "C" fn() -> !) {
                 frame,
                 kstack_top: stack_top as u64,
                 cr3: 0,
+                caps: 0,
                 state: State::Runnable,
             },
         );
@@ -215,6 +235,7 @@ pub(crate) fn spawn_user(id: usize, entry_va: u64, ustack_top: u64, cr3: u64) {
                 frame,
                 kstack_top: kstack_top as u64,
                 cr3,
+                caps: 0,
                 state: State::Runnable,
             },
         );
@@ -277,6 +298,9 @@ pub(crate) fn start() {
                 frame: 0,
                 kstack_top: 0,
                 cr3: paging::current_cr3(),
+                // The boot task is the kernel; its authority is not modelled by
+                // the same bits and it never goes through the syscall gate.
+                caps: 0,
                 state: State::Runnable,
             },
         );

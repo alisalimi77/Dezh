@@ -344,10 +344,11 @@ triple-fault reset) before halting. The rest are interrupts, which must not
 halt: a Local APIC timer is armed at 100 Hz from a rate measured against the
 PIT, and the kernel keeps a work loop running through the ticks to show the
 interrupted work resumes intact. The boot then preempts three kernel tasks that
-never yield, and finally runs two ring-3 tasks in separate address spaces, one of
-which touches memory it was not given and is killed while the other finishes.
-Device IRQs, storage and capability-checked syscalls on x86 are still future
-work — see [ROADMAP.md](ROADMAP.md).
+never yield; runs two ring-3 tasks in separate address spaces, one of which
+touches memory it was not given and is killed while the other finishes; and
+finally runs two more whose code and manifest are identical but whose intents are
+not, so one of them is refused a capability by name. Device IRQs, storage and an
+effect ledger on x86 are still future work — see [ROADMAP.md](ROADMAP.md).
 
 ### x86_64 in QEMU (same ISO)
 
