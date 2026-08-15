@@ -86,9 +86,8 @@ The release workflow attaches:
 
 The release workflow publishes no container image. It used to try; see
 [the review environment](#the-review-environment) for what happened and how to
-build it locally.
-
-This image contains Rust, Python, QEMU, and the Rust targets needed for review.
+build it locally from `Dockerfile.review`, which carries Rust, Python, QEMU and
+the Rust targets review needs.
 
 ### Release Discipline
 
