@@ -10,6 +10,7 @@
 //! that; this does not yet.
 
 use crate::arch::gdt;
+use crate::arch::paging;
 use crate::arch::timer;
 use crate::global::Global;
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -42,6 +43,9 @@ struct Task {
     /// this task is running at CPL3. Zero for the boot task, which never leaves
     /// ring 0 and therefore keeps whatever stack it is already on.
     kstack_top: u64,
+    /// This task's address space. Zero means it has none of its own and runs on
+    /// whatever the kernel booted with.
+    cr3: u64,
     state: State,
 }
 
@@ -54,6 +58,7 @@ static TASKS: Global<[Task; MAX_TASKS]> = Global::new(
     [Task {
         frame: 0,
         kstack_top: 0,
+        cr3: 0,
         state: State::Idle,
     }; MAX_TASKS],
 );
@@ -112,6 +117,12 @@ unsafe fn build_frame(stack_top: *mut u8, entry: extern "C" fn() -> !) -> u64 {
     sp
 }
 
+/// Gives task `id` an address space of its own. Must be called after `spawn`
+/// and before `start`.
+pub(crate) fn set_address_space(id: usize, cr3: u64) {
+    unsafe { (*(TASKS.get() as *mut Task).add(id)).cr3 = cr3 };
+}
+
 /// Makes task `id` runnable, starting at `entry`. Must be called before
 /// `start`, with the scheduler off.
 pub(crate) fn spawn(id: usize, entry: extern "C" fn() -> !) {
@@ -126,6 +137,7 @@ pub(crate) fn spawn(id: usize, entry: extern "C" fn() -> !) {
             Task {
                 frame,
                 kstack_top: stack_top as u64,
+                cr3: 0,
                 state: State::Runnable,
             },
         );
@@ -141,6 +153,7 @@ pub(crate) fn start() {
             Task {
                 frame: 0,
                 kstack_top: 0,
+                cr3: paging::current_cr3(),
                 state: State::Runnable,
             },
         );
@@ -205,6 +218,14 @@ pub(crate) fn on_tick(frame: u64) -> u64 {
     }
     if next == cur {
         return frame;
+    }
+
+    // The address space goes with the task. Doing this from inside the handler
+    // is only safe because every address space maps the kernel identically, so
+    // the code performing the switch stays mapped across it.
+    let cr3 = unsafe { (*tasks.add(next)).cr3 };
+    if cr3 != 0 && cr3 != paging::current_cr3() {
+        paging::set_cr3(cr3);
     }
 
     // Point the TSS at the incoming task's own kernel stack before resuming it.

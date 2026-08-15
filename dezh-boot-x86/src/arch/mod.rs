@@ -2,6 +2,7 @@
 
 pub(crate) mod boot;
 pub(crate) mod gdt;
+pub(crate) mod paging;
 pub(crate) mod pic;
 pub(crate) mod timer;
 pub(crate) mod trap;

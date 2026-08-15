@@ -10,8 +10,9 @@
 //! preemptible tasks sharing it would interleave mid-line; only the boot task
 //! prints, and only after the scheduler is stopped.
 
+use crate::arch::paging;
 use crate::arch::timer;
-use crate::console::{print, print_i64};
+use crate::console::{print, print_hex, print_i64};
 use crate::sched;
 use core::sync::atomic::{AtomicU64, Ordering};
 
@@ -31,6 +32,16 @@ const RUN_TICKS: u64 = 30;
 const MIN_TURNS: usize = 3;
 const WORK_CHUNK_SUM: u64 = 500_500;
 static DEADLINE: AtomicU64 = AtomicU64::new(0);
+
+/// The address every worker's private page is mapped at — the same number in
+/// each of them, which is the point: what a task finds there depends on which
+/// address space is loaded, not on the address it asked for.
+const PRIVATE_VA: u64 = 1 << 39;
+/// What each worker expects to find there. Distinct per task, so a task reading
+/// its neighbour's page would see a number that is unmistakably not its own.
+fn private_magic(id: usize) -> u64 {
+    0xDE20_0000_0000 + id as u64
+}
 
 static ROUNDS: [AtomicU64; WORKERS] = [
     AtomicU64::new(0),
@@ -61,6 +72,13 @@ fn work_chunk() -> u64 {
 fn worker(id: usize) -> ! {
     while timer::ticks() < DEADLINE.load(Ordering::Relaxed) {
         if work_chunk() != WORK_CHUNK_SUM {
+            WRONG[id].fetch_add(1, Ordering::Relaxed);
+        }
+        // Read through the same address every worker uses. Whatever is there is
+        // whatever this task's own `cr3` maps, so a switch that failed to change
+        // address spaces would show up here as a neighbour's magic number.
+        let seen = unsafe { core::ptr::read_volatile(PRIVATE_VA as *const u64) };
+        if seen != private_magic(id) {
             WRONG[id].fetch_add(1, Ordering::Relaxed);
         }
         ROUNDS[id].fetch_add(1, Ordering::Relaxed);
@@ -96,6 +114,33 @@ pub(crate) fn run() {
     sched::spawn(2, worker2);
     sched::spawn(3, worker3);
     print("  [sched] 3 tasks spawned, round-robin with the boot task, 1 tick per turn\n");
+
+    // Each worker gets an address space of its own, and in it one page at the
+    // same address as everyone else's, holding a different number.
+    for id in 1..=WORKERS {
+        let cr3 = match paging::new_address_space() {
+            Some(cr3) => cr3,
+            None => {
+                print("  [sched] out of pages; tasks share one address space\n");
+                break;
+            }
+        };
+        match paging::map_new_page(cr3, PRIVATE_VA, paging::WRITABLE) {
+            None => {
+                print("  [sched] out of pages; tasks share one address space\n");
+                break;
+            }
+            Some(page) => unsafe {
+                core::ptr::write_volatile(page as *mut u64, private_magic(id - 1))
+            },
+        }
+        sched::set_address_space(id, cr3);
+    }
+    print("  [sched] each task has its own cr3 and a private page at ");
+    print_hex(PRIVATE_VA);
+    print(" (");
+    print_i64(paging::pages_used() as i64);
+    print(" pages used)\n");
 
     DEADLINE.store(timer::ticks() + RUN_TICKS, Ordering::Relaxed);
     sched::start();
@@ -151,6 +196,7 @@ pub(crate) fn run() {
 
     if wrong == 0 && starved == 0 {
         print("  [sched] preemption works: every task was stopped and resumed, none yielded\n");
+        print("  [sched] each task read its own page through its own cr3, every round\n");
     } else {
         print("  [sched] FAILED: a task was starved or its arithmetic was corrupted\n");
     }
