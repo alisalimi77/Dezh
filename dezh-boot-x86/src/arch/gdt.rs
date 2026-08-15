@@ -20,6 +20,10 @@ use core::arch::asm;
 
 pub(crate) const KERNEL_CS: u16 = 0x08;
 pub(crate) const KERNEL_DS: u16 = 0x10;
+/// Selectors handed to a ring-3 task carry RPL 3; the CPU refuses an `iretq`
+/// into user mode whose `cs` and `ss` do not.
+pub(crate) const USER_DS: u16 = 0x18 | 3;
+pub(crate) const USER_CS: u16 = 0x20 | 3;
 const TSS_SEL: u16 = 0x28;
 
 /// null, kernel code, kernel data, user data, user code, then the TSS — which is

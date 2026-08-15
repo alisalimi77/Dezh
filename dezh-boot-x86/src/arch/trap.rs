@@ -198,12 +198,18 @@ static IDT: Global<[IdtEntry; IDT_LEN]> = Global::new(
     }; IDT_LEN],
 );
 
-fn gate(addr: u64) -> IdtEntry {
+/// The vector a user task uses to ask the kernel for something. It is the only
+/// gate in the table a CPL3 task may take: every other one is DPL0, so `int` on
+/// any of them from ring 3 is a general-protection fault rather than a way in.
+pub(crate) const VEC_SYSCALL: usize = 0x80;
+
+fn gate(addr: u64, dpl: u8) -> IdtEntry {
     IdtEntry {
         off_lo: addr as u16,
         selector: gdt::KERNEL_CS,
         ist: 0,
-        attr: 0x8E, // present, DPL0, 64-bit interrupt gate
+        // present, 64-bit interrupt gate, callable from `dpl` and below
+        attr: 0x8E | (dpl << 5),
         off_mid: (addr >> 16) as u16,
         off_hi: (addr >> 32) as u32,
         zero: 0,
@@ -214,12 +220,13 @@ pub(crate) fn init() {
     unsafe {
         let base = IDT.get() as *mut IdtEntry;
         for (i, &addr) in isr_table.iter().enumerate() {
-            core::ptr::write(base.add(i), gate(addr));
+            core::ptr::write(base.add(i), gate(addr, 0));
         }
         let ext = core::ptr::addr_of!(isr_ext_stubs) as u64;
         for i in 32..IDT_LEN {
             let addr = ext + ((i - 32) * EXT_STUB_STRIDE) as u64;
-            core::ptr::write(base.add(i), gate(addr));
+            let dpl = if i == VEC_SYSCALL { 3 } else { 0 };
+            core::ptr::write(base.add(i), gate(addr, dpl));
         }
         let ptr = IdtPtr {
             limit: (core::mem::size_of::<[IdtEntry; IDT_LEN]>() - 1) as u16,
@@ -276,6 +283,9 @@ extern "C" fn irq_dispatch(vector: u64, frame: u64) -> u64 {
     if vector == timer::VEC_SPURIOUS as u64 {
         timer::on_spurious();
         return frame;
+    }
+    if vector == VEC_SYSCALL as u64 {
+        return sched::on_syscall(frame);
     }
     print("\n[trap] interrupt vector ");
     print_i64(vector as i64);

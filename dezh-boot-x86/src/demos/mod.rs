@@ -3,3 +3,4 @@
 pub(crate) mod agent;
 pub(crate) mod sched;
 pub(crate) mod timer;
+pub(crate) mod user;

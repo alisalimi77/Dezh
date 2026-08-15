@@ -40,6 +40,7 @@ pub extern "C" fn kmain() -> ! {
     demos::agent::run();
     demos::timer::run();
     demos::sched::run();
+    demos::user::run();
 
     // Prove the IDT works: deliberately raise a breakpoint (vector 3). Without an
     // IDT this would triple-fault and reset the machine; instead the handler
