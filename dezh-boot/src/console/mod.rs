@@ -57,11 +57,61 @@ pub(crate) fn cap_names(set: u32) -> &'static str {
     }
 }
 
+/// The order `help` prints the command groups in, and - because it is a hand
+/// written list next to a table that grows - the thing that decides whether a
+/// command is discoverable at all.
+const GROUPS: &[&str] = &[
+    "Inspect", "Storage", "Install", "Packages", "Apps", "Services", "Intent", "Effects", "Audit",
+    "Safety", "Demos", "Power",
+];
+
+/// Every group named in `COMMANDS` must appear in `GROUPS`, or `help` skips its
+/// commands in silence.
+///
+/// That is not a hypothetical. `Intent` and `Effects` were absent from this list
+/// while 40 of the 151 commands claimed them - the entire intent-to-effect
+/// surface, `overnight` and `redteam` included - so the one screen a reviewer
+/// types first did not mention the thing the system is about. Nothing failed; a
+/// list simply fell behind a table.
+///
+/// A runtime check would report that to a console nobody was reading, so the
+/// check happens when the kernel is built: add a group to a command and forget
+/// this list, and the build stops.
+const _: () = {
+    const fn str_eq(a: &str, b: &str) -> bool {
+        let (a, b) = (a.as_bytes(), b.as_bytes());
+        if a.len() != b.len() {
+            return false;
+        }
+        let mut i = 0;
+        while i < a.len() {
+            if a[i] != b[i] {
+                return false;
+            }
+            i += 1;
+        }
+        true
+    }
+
+    let mut i = 0;
+    while i < COMMANDS.len() {
+        let mut listed = false;
+        let mut j = 0;
+        while j < GROUPS.len() {
+            if str_eq(COMMANDS[i].group, GROUPS[j]) {
+                listed = true;
+            }
+            j += 1;
+        }
+        assert!(
+            listed,
+            "a command's group is missing from console::GROUPS, so `help` would not list it"
+        );
+        i += 1;
+    }
+};
+
 pub(crate) fn print_help(held: u32) {
-    const GROUPS: &[&str] = &[
-        "Inspect", "Storage", "Install", "Packages", "Apps", "Services", "Audit", "Safety",
-        "Demos", "Power",
-    ];
     kprintln!("commands (cap required -> held?):");
     for group in GROUPS {
         kprintln!("  [{}]", group);
