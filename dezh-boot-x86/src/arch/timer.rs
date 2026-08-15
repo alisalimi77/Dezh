@@ -16,7 +16,7 @@
 
 use crate::io::{inb, outb};
 use core::arch::asm;
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 const LAPIC_BASE: usize = 0xFEE0_0000;
 const LAPIC_ID: usize = 0x020;
@@ -168,10 +168,27 @@ pub(crate) fn calibrate() -> Option<u32> {
     }
 }
 
+/// The last count `arm_periodic` was given, so a later caller can restart the
+/// timer at the same measured rate without calibrating a second time.
+static INITIAL: AtomicU32 = AtomicU32::new(0);
+
 pub(crate) fn arm_periodic(initial: u32) {
+    INITIAL.store(initial, Ordering::Relaxed);
     lapic_write(LAPIC_TIMER_DIV, LAPIC_DIV_16);
     lapic_write(LAPIC_LVT_TIMER, LVT_PERIODIC | VEC_TIMER as u32);
     lapic_write(LAPIC_TIMER_INIT, initial);
+}
+
+/// Restarts the timer at the rate already measured. Returns false if it was
+/// never armed, in which case there is no measured rate to restart at.
+pub(crate) fn rearm() -> bool {
+    match INITIAL.load(Ordering::Relaxed) {
+        0 => false,
+        initial => {
+            arm_periodic(initial);
+            true
+        }
+    }
 }
 
 pub(crate) fn mask() {
