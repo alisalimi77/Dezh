@@ -6,7 +6,6 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
-import os
 import shutil
 import subprocess
 import sys
@@ -149,7 +148,6 @@ def write_checksums(paths: list[Path]) -> Path:
 
 
 def write_manifest(tag: str, paths: list[Path]) -> Path:
-    owner = os.environ.get("GITHUB_REPOSITORY_OWNER", "alisalimi77")
     manifest = OUT / "release-manifest.json"
     payload = {
         "name": "Dezh OS",
@@ -168,7 +166,10 @@ def write_manifest(tag: str, paths: list[Path]) -> Path:
             "python tools/review/run_full_review.py --quick",
             "python tools/review/run_full_review.py --full",
         ],
-        "container_image": f"ghcr.io/{owner}/dezh-review-env:{tag}",
+        # Not a registry reference. This used to name a GHCR image that the
+        # release workflow never managed to publish, so every manifest shipped
+        # so far pointed at something nobody could pull.
+        "review_environment": "docker build -f Dockerfile.review -t dezh-review-env .",
     }
     manifest.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
     return manifest
