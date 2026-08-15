@@ -18,6 +18,7 @@ mod demos;
 mod dev;
 mod global;
 mod io;
+mod sched;
 
 use console::print;
 use core::arch::asm;

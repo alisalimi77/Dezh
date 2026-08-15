@@ -12,6 +12,7 @@
 
 use crate::arch::timer;
 use crate::console::{print, print_hex, print_i64};
+use crate::sched;
 use crate::global::Global;
 use core::arch::{asm, global_asm};
 
@@ -96,7 +97,13 @@ isr_ext_stubs:
 /* The returnable path. On entry the CPU has pushed ss:rsp, rflags, cs:rip and
    the stub has pushed (dummy error, vector). The CPU aligns rsp to 16 before
    pushing its 5-qword frame, so 5 + 2 + 15 pushes leave rsp 16-byte aligned at
-   the `call`, which is what the SysV ABI requires of us. */
+   the `call`, which is what the SysV ABI requires of us.
+
+   Those 22 qwords are the whole of an interrupted context, laid out
+   contiguously on the interrupted stack — which is why the dispatcher is handed
+   `rsp` and its return value is loaded back into `rsp`. Returning a different
+   frame's address resumes a different task; returning the one it was given
+   resumes the task that was interrupted. That is the entire context switch. */
 isr_ext_common:
     push rax
     push rcx
@@ -114,7 +121,9 @@ isr_ext_common:
     push r14
     push r15
     mov rdi, [rsp + 15*8]   /* vector, below the 15 saved registers */
+    mov rsi, rsp            /* the interrupted context, all 22 qwords of it */
     call irq_dispatch
+    mov rsp, rax            /* whichever context the dispatcher chose to resume */
     pop r15
     pop r14
     pop r13
@@ -247,20 +256,25 @@ extern "C" fn exception_handler(vector: u64, error: u64, rip: u64) -> ! {
 
 /// Called from `isr_ext_common` for vectors 32..255, with interrupts off.
 ///
-/// Everything this returns from resumes the interrupted instruction stream, so
-/// it must stay short and must not print on the normal path: printing walks the
-/// VGA cursor, and a handler that printed could interleave with a print the
-/// interrupted code was halfway through. The one path that does print is the
-/// one that never returns.
+/// `frame` is the interrupted context's `rsp`; the returned value is loaded back
+/// into `rsp` before the stub restores registers, so returning `frame` resumes
+/// the interrupted task and returning another task's saved frame resumes that
+/// one instead.
+///
+/// Everything this returns from resumes some instruction stream, so it must stay
+/// short and must not print on the normal path: printing walks the VGA cursor,
+/// and a handler that printed could interleave with a print the interrupted code
+/// was halfway through. The one path that does print is the one that never
+/// returns.
 #[no_mangle]
-extern "C" fn irq_dispatch(vector: u64) {
+extern "C" fn irq_dispatch(vector: u64, frame: u64) -> u64 {
     if vector == timer::VEC_TIMER as u64 {
         timer::on_tick();
-        return;
+        return sched::on_tick(frame);
     }
     if vector == timer::VEC_SPURIOUS as u64 {
         timer::on_spurious();
-        return;
+        return frame;
     }
     print("\n[trap] interrupt vector ");
     print_i64(vector as i64);
