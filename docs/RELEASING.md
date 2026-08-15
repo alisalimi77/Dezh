@@ -25,7 +25,7 @@ A review release should give an external reviewer:
 - a review demo transcript
 - SDK `.dzp` sample packages
 - checksums and an artifact manifest
-- a containerized review environment
+- a review environment they can build locally from `Dockerfile.review`
 
 ### Version Names
 
@@ -84,15 +84,9 @@ The release workflow attaches:
 
 ### Container Package
 
-The release workflow also publishes:
-
-```text
-ghcr.io/alisalimi77/dezh-review-env:<tag>
-ghcr.io/alisalimi77/dezh-review-env:latest
-```
-
-These are GitHub Container Registry images, not Docker Hub images. They appear
-under GitHub Packages when the package visibility is public.
+The release workflow publishes no container image. It used to try; see
+[the review environment](#the-review-environment) for what happened and how to
+build it locally.
 
 This image contains Rust, Python, QEMU, and the Rust targets needed for review.
 
@@ -130,54 +124,50 @@ Each release should contain:
 This lets a reviewer inspect a fixed point in the project without guessing
 which commit, transcript, or binary was used.
 
-### GitHub Packages
+### The review environment
 
-GitHub Packages is used for the review environment container image:
-
-```text
-ghcr.io/alisalimi77/dezh-review-env:<tag>
-```
-
-This is **not** a Docker Hub image. Dezh publishes the review environment to
-GitHub Container Registry (GHCR), which is the container backend shown under
-GitHub's Packages section.
-
-Pull it with:
-
-```sh
-docker pull ghcr.io/alisalimi77/dezh-review-env:v0.1-review
-```
-
-The image is not the OS. It is the build-and-review environment: Rust targets,
-Python, and QEMU.
-
-**This image does not exist yet.** The paragraph above describes what the
-workflow attempts, not what has happened. Every release run so far — v0.2, v0.3
-and v0.4 — has failed at `docker push` with:
-
-```text
-denied: permission_denied: write_package
-```
-
-so no tag of `dezh-review-env` has ever been published, and `docker pull` will
-fail. This was previously written up as a *visibility* problem ("the package may
-need to be changed to public"), which was a guess and the wrong one: the push is
-refused before a package exists to have visibility.
-
-The workflow file is not the cause — it requests `packages: write`, and the
-repository's default workflow token permission is already `write`. The remaining
-suspect is the GHCR package's own access settings for this repository, which is
-changed in GitHub's web UI and not in this repo.
-
-Until that is sorted, build the review environment locally:
+Build it locally:
 
 ```sh
 docker build -f Dockerfile.review -t dezh-review-env .
 ```
 
-The release job is idempotent by design, so once the registry accepts the push
-the failed run can simply be re-run and the image appears for that tag with no
-re-tagging.
+The image is not the OS. It is the build-and-review environment: Rust targets,
+Python, and QEMU.
+
+**There is no published image, and the release no longer tries to make one.**
+The history is worth keeping, because the obvious guess about it was wrong twice.
+
+The release workflow used to end by pushing `dezh-review-env` to GHCR. It got as
+far as running on two releases and was refused on both:
+
+| Release | Step that failed | Why |
+| --- | --- | --- |
+| v0.2-review | `Create GitHub release` | A different fault entirely; fixed afterwards by making the release job re-runnable. The GHCR steps never ran. |
+| v0.3-review | `Publish review environment image` | `denied: permission_denied: write_package` |
+| v0.4-review | `Publish review environment image` | Same denial. |
+
+So no tag of the image has ever existed, and `docker pull` was never going to
+work — while this page listed the image under what the workflow publishes, and
+README offered it as a way in.
+
+Two explanations were written down before the right one. The first was a
+*visibility* problem ("the package may need to be changed to public"), which
+cannot be it: the push is refused before there is a package to have visibility.
+The second was that all three releases failed the same way, which is also wrong —
+v0.2 never reached the registry at all.
+
+What has actually been ruled out: the workflow requested `packages: write`, and
+the repository's default workflow-token permission is already `write`. The
+remaining suspect is the package's own Actions access, which is changed in
+GitHub's web UI and not in this repository.
+
+The steps were removed rather than left failing. A release run that goes red for
+a reason unrelated to the release is a signal people learn to ignore, which is
+the same reasoning `rust-toolchain.toml` records for pinning the toolchain — and
+here it would have been teaching that lesson to the reviewers this project is
+asking for critique from. `.github/workflows/release.yml` carries the removed
+steps in a comment, so restoring them is a paste and not a redesign.
 
 ### Dezh `.dzp` Packages
 
