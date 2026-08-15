@@ -65,6 +65,13 @@ const USED_OFF: usize = 4096;
 // the 4 KiB alignment) and RX ring 0x2000..0x3046, so staging goes above both and
 // still inside the window — writing past it would fault the daemon.
 const HDR_OFF: usize = 0x3100;
+/// Request/response staging, in the gap the 10-byte net header leaves before the
+/// frame buffer. The kernel writes the effect request here BEFORE launching this
+/// daemon, and the daemon overwrites it with the gateway's reply before exiting
+/// - the same shared-window handoff the block daemon uses, and the reason no new
+/// grant is needed for an effect that talks both ways.
+const REQ_OFF: usize = 0x3120;
+const REQ_MAX: usize = 0xE0;
 const FRAME_OFF: usize = 0x3200;
 /// Receive buffers. Two of 1536 bytes each — enough for a full Ethernet frame plus
 /// the virtio header — placed last so they end exactly on the 16 KiB grant
@@ -84,6 +91,12 @@ const ETHERTYPE_ARP: u16 = 0x0806;
 const IP_PROTO_ICMP: u8 = 1;
 const OP_SEND: usize = 0;
 const OP_PING: usize = 1;
+/// A real external effect: send the staged request, then WAIT for the reply and
+/// hand it back. The difference from OP_SEND is not the wire format, it is that
+/// the outcome is observed rather than assumed.
+const OP_EFFECT: usize = 2;
+const IP_PROTO_UDP: u8 = 17;
+const SRC_PORT: u16 = 12345;
 /// Our address and the QEMU user-net gateway, which answers ARP and ICMP.
 const SRC_IP: [u8; 4] = [10, 0, 2, 15];
 const SRC_MAC: [u8; 6] = [0x52, 0x54, 0x00, 0x12, 0x34, 0x56];
@@ -259,11 +272,18 @@ fn ip_checksum(off: usize, len: usize) -> u16 {
 /// Returns the frame length. Broadcast destination so the frame is unambiguous
 /// in a capture; source is QEMU user-net's guest address.
 fn build_frame(payload: &[u8], dst_ip: [u8; 4], dst_port: u16) -> usize {
+    build_frame_to([0xff; 6], payload, dst_ip, dst_port)
+}
+
+/// As `build_frame`, but to a known MAC. A one-way send can broadcast; a request
+/// whose reply we intend to WAIT for goes to the address ARP actually resolved,
+/// so the answer comes back to us rather than to whoever else is listening.
+fn build_frame_to(dst_mac: [u8; 6], payload: &[u8], dst_ip: [u8; 4], dst_port: u16) -> usize {
     let mut o = FRAME_OFF;
-    // Ethernet: dst broadcast, src 52:54:00:12:34:56, ethertype IPv4.
+    // Ethernet: src 52:54:00:12:34:56, ethertype IPv4.
     let mut i = 0;
     while i < 6 {
-        wr8(o + i, 0xff);
+        wr8(o + i, dst_mac[i]);
         i += 1;
     }
     let src_mac = [0x52u8, 0x54, 0x00, 0x12, 0x34, 0x56];
@@ -578,6 +598,132 @@ fn transmit(dma_pa: usize, frame_len: usize) -> bool {
     true
 }
 
+/// Read the request the kernel staged, as a byte slice into the DMA window.
+fn staged_request(len: usize) -> &'static [u8] {
+    let n = if len > REQ_MAX { REQ_MAX } else { len };
+    unsafe { core::slice::from_raw_parts((DMA_VA + REQ_OFF) as *const u8, n) }
+}
+
+/// Write the gateway's answer back where the kernel will read it, NUL-terminated
+/// so the kernel does not have to be told the length a second time.
+fn stage_reply(off: usize, len: usize) {
+    let n = if len > REQ_MAX - 1 { REQ_MAX - 1 } else { len };
+    let mut i = 0;
+    while i < n {
+        wr8(REQ_OFF + i, rd8(off + i));
+        i += 1;
+    }
+    wr8(REQ_OFF + n, 0);
+}
+
+/// Is this frame a UDP datagram from `src_ip` addressed to our source port?
+/// Returns the payload's DMA offset and length.
+///
+/// Every field is checked rather than assumed. A daemon that trusted the first
+/// frame off the wire would let anything on the segment answer for the gateway,
+/// and the whole point of the destination capability is that the operator named
+/// who they were willing to talk to.
+fn parse_udp_reply(off: usize, len: usize, src_ip: [u8; 4]) -> Option<(usize, usize)> {
+    if len < 14 + 20 + 8 {
+        return None;
+    }
+    // `rx_wait` has already stepped past the virtio net header and shortened
+    // `len` to match, so `off` is the Ethernet header. Adding NET_HDR_LEN again
+    // here parses ten bytes into it, which is exactly the bug the first run of
+    // the end-to-end test caught: the gateway committed, and Dezh saw nothing.
+    let o = off;
+    if ((rd8(o + 12) as u16) << 8 | rd8(o + 13) as u16) != ETHERTYPE_IPV4 {
+        return None;
+    }
+    let ip = o + 14;
+    let ihl = ((rd8(ip) & 0x0f) as usize) * 4;
+    if ihl < 20 || rd8(ip + 9) != IP_PROTO_UDP {
+        return None;
+    }
+    let mut i = 0;
+    while i < 4 {
+        if rd8(ip + 12 + i) != src_ip[i] {
+            return None;
+        }
+        i += 1;
+    }
+    let udp = ip + ihl;
+    let dport = (rd8(udp + 2) as u16) << 8 | rd8(udp + 3) as u16;
+    if dport != SRC_PORT {
+        return None;
+    }
+    let udp_len = ((rd8(udp + 4) as usize) << 8 | rd8(udp + 5) as usize).saturating_sub(8);
+    Some((udp + 8, udp_len))
+}
+
+/// `marz-effect`: the request/response path. Send the staged request to an
+/// authorized destination and WAIT for the answer.
+///
+/// This is what makes an effect an effect rather than a transmission: the
+/// outcome is observed. What it does NOT do is verify the outcome is true - the
+/// gateway is outside the TCB and can lie. Dezh proves the request was
+/// authorized, left the machine, and was answered.
+fn do_effect(dma_pa: usize, dst_ip: [u8; 4], dst_port: u16, req_len: usize) -> ! {
+    rx_arm(dma_pa);
+    let mut last_used = 0u16;
+
+    let arp_len = build_arp_request(dst_ip);
+    if !transmit(dma_pa, arp_len) {
+        sys_print(b"  [marz] ARP request transmit timed out\n");
+        sys_exit(1);
+    }
+    // Declared without a value: every path out of the loop below either assigns
+    // it or exits the daemon, so a placeholder MAC can never be transmitted.
+    let gw_mac;
+    let mut tries = 0;
+    loop {
+        let Some((id, off, len)) = rx_wait(&mut last_used) else {
+            sys_print(b"  [marz] no ARP reply arrived\n");
+            sys_exit(1);
+        };
+        let hit = parse_arp_reply(off, len, dst_ip);
+        rx_offer(dma_pa, id);
+        if let Some(mac) = hit {
+            gw_mac = mac;
+            break;
+        }
+        tries += 1;
+        if tries > 8 {
+            sys_print(b"  [marz] no ARP reply arrived\n");
+            sys_exit(1);
+        }
+    }
+
+    let payload = staged_request(req_len);
+    let frame_len = build_frame_to(gw_mac, payload, dst_ip, dst_port);
+    if !transmit(dma_pa, frame_len) {
+        sys_print(b"  [marz] effect request transmit timed out\n");
+        sys_exit(1);
+    }
+    sys_print(b"  [marz] effect request left the machine; waiting for the outcome\n");
+
+    tries = 0;
+    loop {
+        let Some((id, off, len)) = rx_wait(&mut last_used) else {
+            sys_print(b"  [marz] no reply from the gateway\n");
+            sys_exit(2);
+        };
+        let hit = parse_udp_reply(off, len, dst_ip);
+        if let Some((poff, plen)) = hit {
+            stage_reply(poff, plen);
+            rx_offer(dma_pa, id);
+            sys_print(b"  [marz] EFFECT-REPLY: the gateway answered\n");
+            sys_exit(0);
+        }
+        rx_offer(dma_pa, id);
+        tries += 1;
+        if tries > 8 {
+            sys_print(b"  [marz] no reply from the gateway\n");
+            sys_exit(2);
+        }
+    }
+}
+
 /// `marz-ping`: resolve the destination with ARP, then exchange a real ICMP echo.
 /// Unlike a send, this needs the RECEIVE path — the daemon must offer the NIC
 /// buffers, block on the device's interrupt, and parse what actually came back.
@@ -593,7 +739,9 @@ fn do_ping(dma_pa: usize, dst_ip: [u8; 4]) -> ! {
         sys_exit(1);
     }
     sys_print(b"  [marz] ARP request sent; waiting for a reply from the wire\n");
-    let mut gw_mac = [0u8; 6];
+    // Declared without a value: every path out of the loop below either assigns
+    // it or exits the daemon, so a placeholder MAC can never be transmitted.
+    let gw_mac;
     let mut tries = 0;
     loop {
         let Some((id, off, len)) = rx_wait(&mut last_used) else {
@@ -661,6 +809,9 @@ extern "C" fn main(op: usize, dma_pa: usize, dest: usize, _a3: usize) -> ! {
     let dst_port = (dest >> 32) as u16;
     if op == OP_PING {
         do_ping(dma_pa, dst_ip);
+    }
+    if op == OP_EFFECT {
+        do_effect(dma_pa, dst_ip, dst_port, _a3);
     }
     let _ = OP_SEND;
     let payload = b"DEZH-MARZ-EGRESS-v0";

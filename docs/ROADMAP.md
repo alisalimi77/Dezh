@@ -505,6 +505,45 @@ connector is outside the TCB, and a compromised gateway can lie about what it
 did. That is a smaller and much more defensible claim than pretending the OS
 speaks git.
 
+**Status: done.** `marz-effect <dest> <verb> <arg>` performs a real git commit
+on a real repository outside Dezh, over the UDP egress that already existed, and
+`git.revert` undoes it. Three commits: the gateway and its standalone proof, the
+daemon's request/response path, and the registered compensation.
+
+Against the acceptance criteria:
+
+| Criterion | Outcome |
+| --- | --- |
+| An effect that changes state on a real external system | met — a git commit, verified by `git`, not by Dezh's transcript |
+| Recorded with its intent | met — the console opens a mission; the commit message carries `Ahd#n` so the external system holds the attribution too |
+| Forecast by `sfar-plan` | met — and the forecast now names the registered compensating action rather than only counting it |
+| Undone by a compensating action that really runs | met — the file is gone and history is kept |
+| Reproducible in CI against a local gateway | met — `tools/ci/effect_test.py`, twelve checks |
+
+The honesty boundary is in the gateway's own header, not a footnote: **the
+gateway is outside the TCB and can lie about what it did.** Dezh proves the
+request was authorized for a named destination, left on the wire, was answered,
+and was recorded; and that the compensation ran. It does not prove the gateway
+was honest. That is a smaller claim than "the OS speaks git" and it is the true
+one.
+
+Two things the work turned up:
+
+- **"Not recorded" and "did not happen" are different.** The first end-to-end
+  run had an off-by-ten in the reply parser (`rx_wait` already steps past the
+  virtio header; the new parser added it again). The gateway committed and Dezh
+  saw nothing. Refusing to record an unobserved effect is right, but the
+  external system had still changed — which is the exact failure this workstream
+  exists to make visible, arrived at by accident.
+- **An effect record needs the undo, not just the class.** `sfar-plan` reported
+  `compensatable=1` while naming no compensation, which is a promise rather than
+  a plan. The daemon already persisted a registered compensation; the forecast
+  simply never printed it. It does now, and says so explicitly when one is
+  missing.
+
+Still modeled, and still labelled as such: `email.send` and `prod.deploy`. What
+changed is that the ledger now holds at least one effect that is not.
+
 *Cost:* medium. Effect schema, one connector, compensation registration, and the
 `marz` request/response path (which already receives).
 *Blocked on:* nothing — UDP egress and the ICMP receive path exist.

@@ -79,6 +79,7 @@ jobs:
           tools/demo/run_agent_demo.py
           tools/ci/qemu_smoke.py
           tools/ci/gateway_test.py
+          tools/ci/effect_test.py
           tools/gateway/dezh_gateway.py
           tools/ci/check_docs.py
           tools/ci/sdk_test.py
@@ -154,6 +155,12 @@ jobs:
       - name: Run SDK package install acceptance
         run: >
           python3 tools/ci/sdk_test.py
+          --kernel dezh-boot/target/riscv64gc-unknown-none-elf/debug/dezh-boot
+          --qemu qemu-system-riscv64
+
+      - name: Run W12 external-effect acceptance (real gateway + real git repo)
+        run: >
+          python3 tools/ci/effect_test.py
           --kernel dezh-boot/target/riscv64gc-unknown-none-elf/debug/dezh-boot
           --qemu qemu-system-riscv64
 
