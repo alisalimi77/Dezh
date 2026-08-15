@@ -911,6 +911,16 @@ def run_x86_64(qemu: str, kernel: Path, iso: Path | None = None) -> None:
         # Masking the timer stops the ticks while the same loop keeps running:
         # what rules out the ticks having come from some other source.
         session.wait_for("[timer] masked: tick count frozen at ")
+        # W16.2: the same interrupt path declining to resume what it interrupted.
+        # Turn counts are asserted and round counts are not: a turn can only be
+        # granted by the interrupt handler, while rounds only say how fast the
+        # host is.
+        session.wait_for("[sched] 3 tasks spawned, round-robin with the boot task")
+        session.wait_for("[sched] first turns went to task 1 2 3 0 1 2 3 0")
+        for task in (1, 2, 3):
+            session.wait_for(f"[sched] task {task}: ")
+            session.wait_for("checksum OK")
+        session.wait_for("[sched] preemption works: every task was stopped and resumed")
         # M2: the IDT catches a deliberately-raised breakpoint instead of
         # triple-faulting the machine.
         session.wait_for("[trap] CPU exception 3 (breakpoint)")

@@ -156,8 +156,8 @@ flowchart LR
 - Bare-metal RISC-V boot on QEMU `virt` in S-mode through OpenSBI.
 - x86_64 kernel boots from a GRUB Multiboot2 ISO in QEMU **and VirtualBox**,
   with a 256-vector IDT (faults reported, not silent triple-faults; a Local APIC
-  timer at 100 Hz whose interrupts return into the interrupted work), and runs
-  the byte-identical `.dzp` Dezh-IR package.
+  timer at 100 Hz that both returns into the interrupted work and preempts
+  kernel tasks round-robin), and runs the byte-identical `.dzp` Dezh-IR package.
 - Pol (Linux personality): a real, unmodified static Linux/RISC-V ELF runs
   capability-gated; the same bytes also run on real riscv64 Linux.
 - Sv39 U-mode process isolation and contained page faults.
@@ -202,7 +202,7 @@ for scope and honest wording rules):
 | --- | --- | --- | --- |
 | F1 | Agent containment: narrow grants, kernel denial, attenuated delegation, rollback of an agent's damage | **Reproducible today** (in CI) | [`tools/demo/run_agent_demo.py`](tools/demo/run_agent_demo.py) → [transcript](docs/transcripts/agent-f1.md) |
 | F2 | Cairn storage: versioned commits, capability-gated namespaces, rollback across reboot | **Reproducible today** (in CI) | `cairn-demo` console flow, exercised by [`tools/ci/qemu_smoke.py`](tools/ci/qemu_smoke.py) incl. a second-boot persistence phase |
-| F3 | Program-format portability: the byte-identical Dezh-IR `.dzp` runs on the RISC-V and x86_64 kernels | **Reproducible today** (in CI) | x86_64 kernel installs and runs the byte-identical `.dzp` agent package; bytes pinned by a `dezh-core` test — [x86 smoke](tools/ci/qemu_smoke.py). Honest scope: this proves the *program format + IR semantics* are portable, **not** kernel parity — the x86 kernel is deliberately thin (it has a timer and a returnable interrupt path, but no scheduler and no device IRQs; the rich runtime is RISC-V only). |
+| F3 | Program-format portability: the byte-identical Dezh-IR `.dzp` runs on the RISC-V and x86_64 kernels | **Reproducible today** (in CI) | x86_64 kernel installs and runs the byte-identical `.dzp` agent package; bytes pinned by a `dezh-core` test — [x86 smoke](tools/ci/qemu_smoke.py). Honest scope: this proves the *program format + IR semantics* are portable, **not** kernel parity — the x86 kernel is deliberately thin (it has a timer, a returnable interrupt path and a round-robin scheduler, but no device IRQs and no task isolation; the rich runtime is RISC-V only). |
 | F4 | Pol compatibility: unmodified static Linux binary, capability-gated | **Reproducible today** (in CI) | `linux-elf` runs a real static Linux/RISC-V ELF ([`linux-guest`](dezh-boot/linux-guest/)); the same bytes also run on real riscv64 Linux |
 | W8 | Intent → effect runtime: run an agent under one intent, account for every effect, and undo a whole mission honestly (retract / compensate / refuse-with-reason), with a contained escape | **Reproducible today** (in CI) | `overnight` collapses it into one story → [transcript](docs/transcripts/overnight.md); parts: `sfar-demo` `comp-demo` `sfar-cross-demo` `redteam` `why-denied` `tbar` in [`tools/ci/qemu_smoke.py`](tools/ci/qemu_smoke.py) |
 
@@ -488,9 +488,11 @@ High-level layout:
 
 - RISC-V QEMU is the primary bare-metal target today.
 - The x86_64 kernel boots from an ISO and runs Dezh-IR packages, and now has a
-  256-vector IDT with a returnable interrupt path driven by a Local APIC timer —
-  but that is where it stops: no device IRQs and no scheduler on x86. The rich
-  interactive surface — console, scheduler, IPC, Cairn, Pol — is RISC-V only.
+  256-vector IDT, a Local APIC timer, and a round-robin scheduler over kernel
+  tasks — but that is where it stops: no device IRQs, no storage, and no
+  isolation between x86 tasks, which all run at CPL0 in one address space. The
+  rich interactive surface — console, IPC, Cairn, Pol — and every isolation
+  claim are RISC-V only.
 - The block driver uses QEMU legacy virtio-mmio.
 - DMA isolation is modeled through page-table discipline and fixed grants; real
   IOMMU integration is future work.

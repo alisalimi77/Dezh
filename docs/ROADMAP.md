@@ -138,8 +138,11 @@ vector/error/RIP and halts — the boot deliberately raises a breakpoint to prov
 faults are caught, not silent triple-faults. Vectors 32..255 are the returnable
 path (W16.1): they save every general-purpose register, dispatch, restore and
 `iretq`, and a Local APIC timer armed at 100 Hz from a PIT-measured rate proves
-it by leaving an interrupted work loop intact across the ticks. Still future
-work: device IRQs and a scheduler on x86.
+it by leaving an interrupted work loop intact across the ticks. **W16.2** adds
+the other half: the dispatcher may hand back a *different* saved frame, which is
+the whole context switch, and three kernel tasks with no yield in them are
+round-robined by the tick. Still future work: device IRQs, storage, and any
+isolation at all between x86 tasks.
 
 ##### W6 — Independence and release packaging
 
@@ -611,16 +614,19 @@ Roughly 900 lines against 12,359. F3 proves the *program format* is portable; it
 does not prove the system is. Until x86 has a runtime, "ISA is an implementation
 backend, not the identity" (D021) is a RISC-V thesis.
 
-**W16.1 is done:** a 256-vector IDT, a Local APIC timer measured against the PIT
-and armed at 100 Hz, and an interrupt entry path that saves and restores every
-general-purpose register and returns into the interrupted work — asserted in CI
-on both x86 boot paths. Everything below it is still missing: no scheduler, no
-disk, no drivers.
+**W16.1 and W16.2 are done:** a 256-vector IDT, a Local APIC timer measured
+against the PIT and armed at 100 Hz, an interrupt entry path that saves and
+restores every general-purpose register, and a round-robin scheduler over kernel
+tasks that never yield — asserted in CI on both x86 boot paths, by turns granted
+rather than work completed. Everything below is still missing: no disk, no
+drivers, and no isolation — x86 tasks share one address space at CPL0, so
+scheduling there is not yet containment.
 
 This is also **the only practical route to an IOMMU** — see W17.
 
-*Cost:* very large. Timer and returnable IRQ path (done, W16.1), then a
-scheduler, a virtio-pci disk driver, then Cairn.
+*Cost:* very large. Timer and returnable IRQ path (done, W16.1), scheduler
+(done, W16.2), then paging and per-task isolation, a virtio-pci disk driver,
+then Cairn.
 *Blocked on:* nothing technically; competes with everything for time.
 *Acceptance:* the x86 kernel runs the console, the scheduler and Cairn; the same
 `.dzp` installs and persists on both ISAs.
