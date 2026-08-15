@@ -10,9 +10,17 @@
 #![no_std]
 #![no_main]
 
+mod console;
+mod dev;
+mod global;
+mod io;
+
+use console::{print, print_hex, print_i64, putb};
 use core::arch::{asm, global_asm};
 use core::panic::PanicInfo;
 use core::sync::atomic::{AtomicU64, Ordering};
+use global::Global;
+use io::{inb, io_wait, outb};
 
 // --- Boot trampoline: Multiboot1 -> 32-bit -> identity paging -> long mode ----
 global_asm!(
@@ -291,120 +299,6 @@ isr_table:
 "#
 );
 
-// --- COM1 serial -------------------------------------------------------------
-const COM1: u16 = 0x3F8;
-
-unsafe fn outb(port: u16, val: u8) {
-    asm!("out dx, al", in("dx") port, in("al") val, options(nomem, nostack));
-}
-unsafe fn inb(port: u16) -> u8 {
-    let val: u8;
-    asm!("in al, dx", out("al") val, in("dx") port, options(nomem, nostack));
-    val
-}
-
-// `COM1 + 0` is written out so the block reads as the UART register map it is:
-// offsets 0..5 in order. Folding the identity away would hide the one register
-// whose offset is zero.
-#[allow(clippy::identity_op)]
-fn serial_init() {
-    unsafe {
-        outb(COM1 + 1, 0x00); // disable interrupts
-        outb(COM1 + 3, 0x80); // enable DLAB
-        outb(COM1 + 0, 0x03); // divisor low (38400 baud)
-        outb(COM1 + 1, 0x00); // divisor high
-        outb(COM1 + 3, 0x03); // 8 bits, no parity, 1 stop
-        outb(COM1 + 2, 0xC7); // enable + clear FIFO
-        outb(COM1 + 4, 0x0B); // RTS/DSR set
-    }
-}
-
-fn serial_putb(b: u8) {
-    unsafe {
-        while inb(COM1 + 5) & 0x20 == 0 {} // wait for THR empty
-        outb(COM1, b);
-    }
-}
-
-// --- VGA text mode (0xB8000) -------------------------------------------------
-// A bootloader-loaded kernel on real hardware / VirtualBox has no serial console
-// on screen; it has the VGA text buffer. We mirror every byte to both, so the
-// demo is visible whether the reviewer watches a serial capture (QEMU/CI) or the
-// VM window (VirtualBox). 0xB8000 is inside the first 2 MiB the trampoline
-// identity-maps, so it is reachable in long mode.
-const VGA_BUF: *mut u16 = 0xB8000 as *mut u16;
-const VGA_COLS: usize = 80;
-const VGA_ROWS: usize = 25;
-const VGA_ATTR: u16 = 0x0F00; // white on black
-static mut VGA_POS: usize = 0;
-
-fn vga_clear() {
-    for i in 0..VGA_COLS * VGA_ROWS {
-        unsafe { core::ptr::write_volatile(VGA_BUF.add(i), VGA_ATTR | b' ' as u16) };
-    }
-    unsafe { VGA_POS = 0 };
-}
-
-fn vga_putb(b: u8) {
-    unsafe {
-        let mut pos = VGA_POS;
-        if b == b'\r' {
-            return;
-        } else if b == b'\n' {
-            pos = (pos / VGA_COLS + 1) * VGA_COLS;
-        } else {
-            core::ptr::write_volatile(VGA_BUF.add(pos), VGA_ATTR | b as u16);
-            pos += 1;
-        }
-        if pos >= VGA_COLS * VGA_ROWS {
-            // scroll up one line
-            for i in 0..VGA_COLS * (VGA_ROWS - 1) {
-                let v = core::ptr::read_volatile(VGA_BUF.add(i + VGA_COLS));
-                core::ptr::write_volatile(VGA_BUF.add(i), v);
-            }
-            for i in VGA_COLS * (VGA_ROWS - 1)..VGA_COLS * VGA_ROWS {
-                core::ptr::write_volatile(VGA_BUF.add(i), VGA_ATTR | b' ' as u16);
-            }
-            pos = VGA_COLS * (VGA_ROWS - 1);
-        }
-        VGA_POS = pos;
-    }
-}
-
-fn putb(b: u8) {
-    if b == b'\n' {
-        serial_putb(b'\r');
-    }
-    serial_putb(b);
-    vga_putb(b);
-}
-
-fn print(s: &str) {
-    for b in s.bytes() {
-        putb(b);
-    }
-}
-
-fn print_i64(mut v: i64) {
-    if v < 0 {
-        putb(b'-');
-        v = -v;
-    }
-    let mut buf = [0u8; 20];
-    let mut i = buf.len();
-    loop {
-        i -= 1;
-        buf[i] = b'0' + (v % 10) as u8;
-        v /= 10;
-        if v == 0 {
-            break;
-        }
-    }
-    for &b in &buf[i..] {
-        putb(b);
-    }
-}
-
 // The x86 implementation of the shared Dezh-core Host: capability checks + the
 // actual side effect (serial output). The Dezh-IR engine itself is shared.
 struct SerialHost {
@@ -432,28 +326,6 @@ impl dezh_core::ir::Host for SerialHost {
     }
     fn cairn_get(&mut self, _buf: &mut [u8]) -> Option<usize> {
         None
-    }
-}
-
-// --- A mutable global that is not `static mut` -------------------------------
-// Same reasoning as the RISC-V kernel's `mm::global::Global`: `static mut` hands
-// out `&mut` to storage an interrupt handler can also reach, which is aliasing
-// UB, and edition 2024 rejects it outright. `Global<T>` keeps the storage and
-// the zero cost but only ever yields a raw pointer, so no reference to the
-// global exists. It does not make concurrent access safe by itself — each
-// declaration below states who may touch it and when.
-#[repr(transparent)]
-struct Global<T>(core::cell::UnsafeCell<T>);
-// Safety: no reference to the inner value is ever handed out; every access goes
-// through `get()` inside an `unsafe` block whose argument is recorded at the
-// declaration site.
-unsafe impl<T> Sync for Global<T> {}
-impl<T> Global<T> {
-    const fn new(value: T) -> Self {
-        Self(core::cell::UnsafeCell::new(value))
-    }
-    fn get(&self) -> *mut T {
-        self.0.get()
     }
 }
 
@@ -542,7 +414,6 @@ fn idt_init() {
 // vector it lands on says plainly which one it was.
 fn pic_remap_and_mask() {
     unsafe {
-        let io_wait = || outb(0x80, 0);
         outb(0x20, 0x11); // ICW1: init, expect ICW4
         outb(0xA0, 0x11);
         io_wait();
@@ -737,19 +608,6 @@ const EXC_NAMES: [&str; 32] = [
     "VMM-comm", "security", "reserved-31",
 ];
 
-fn print_hex(mut v: u64) {
-    print("0x");
-    let mut buf = [0u8; 16];
-    for i in (0..16).rev() {
-        let nib = (v & 0xF) as u8;
-        buf[i] = if nib < 10 { b'0' + nib } else { b'a' + nib - 10 };
-        v >>= 4;
-    }
-    for &b in &buf {
-        putb(b);
-    }
-}
-
 #[no_mangle]
 extern "C" fn exception_handler(vector: u64, error: u64, rip: u64) -> ! {
     print("\n[trap] CPU exception ");
@@ -903,8 +761,7 @@ fn timer_demo() {
 #[no_mangle]
 pub extern "C" fn kmain() -> ! {
     use dezh_core::ir;
-    serial_init();
-    vga_clear();
+    console::init();
     idt_init();
     pic_remap_and_mask();
     print("\n");
