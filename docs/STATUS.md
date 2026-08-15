@@ -16,6 +16,7 @@ true today, so a reviewer never has to guess.
 | x86_64 boot | Boots via QEMU `-kernel` (PVH) and from a GRUB Multiboot2 ISO in QEMU **and VirtualBox**; a 32-vector exception IDT reports faults instead of triple-faulting. |
 | Drivers out of kernel | virtio-block is a U-mode daemon holding an explicit MMIO + DMA grant; clients reach it only over typed IPC. **Caveat (not buried):** without an IOMMU this gives fault isolation + least privilege of the driver *process*, not memory safety against a malicious driver that programs the device to DMA anywhere. The IOMMU is core to this story, not future polish. |
 | W8 — intent → effect runtime | An agent runs under one **intent** (`Ahd`); its derived capability is provably ⊆ the intent. Every effect is a ledger record (`Sand`) carrying `actor → intent → derived cap → reversibility`. A whole **mission** (`Sfar`) is rolled back honestly: reversible effects retracted, compensatable effects undone by a **recorded** compensating action, irreversible effects **refused with a reason** — and rollback needs authority over every namespace the mission touched. A five-escape adversary (`redteam`) is stopped at five named boundaries; `why-denied` names the boundary of the last denial; `Tbar` renders the `actor → intent → effect` provenance graph. The `overnight` flagship runs the whole story. |
+| W12 — an effect that really leaves | Until W12 every effect Dezh could attribute lived inside Dezh's own storage, so the ledger was checked against itself. `marz-effect` now drives a real external system: the request is authorized (NIC capability live, egress authority held for that named destination, DIFC export rule allows it), ARP-resolved, sent on the wire, and the **outcome comes back** and is ledgered — as `compensatable`, with the undo recorded *on* the effect, so `sfar-plan` can name the compensating action instead of promising one. The reply **lowers operator integrity**, because bytes off the wire are attacker-chosen. `tools/ci/effect_test.py` is the acceptance and it does **not** believe Dezh's transcript: all twelve checks read the external system's own state, including that a revoked NIC capability leaves it untouched. **Boundary:** the host gateway is *not* in Dezh's TCB — a compromised gateway can lie about what it did, and Dezh proves only the parts it owns. |
 | Device interrupts | The kernel is interrupt-driven, not polled: a PLIC routes virtio IRQs to the boot hart's S-mode context, drivers **sleep** on `sys_irq_wait` and are woken by the device, and the scheduler idles (`wfi`) for a device when nothing else is runnable (`irq-stat`). |
 | SMP bring-up | Secondary harts are started through the real **SBI HSM** protocol, each with its own stack and identity (`tp` = hart id); a parallel round proves >1 hart executes concurrently on coherent shared memory (`smp-demo`, and asserted at boot under `-smp 4`). The boot hart is chosen by firmware and is **not** assumed to be hart 0. |
 | SMP mutual exclusion | The kernel has a fair **ticket spinlock**. All harts hammer a non-atomic counter under it and the total is exact (`MUTEX-OK`) — proof the lock works, which atomics cannot show. This is the primitive symmetric scheduling is built on. |
@@ -26,6 +27,7 @@ true today, so a reviewer never has to guess.
 | Information flow, both directions | Secrecy **and** integrity are enforced on the live storage path. Reading a labelled namespace raises secrecy so a secret cannot be written down or exported (`taintflow-demo`); consuming **network input** lowers integrity so unvalidated bytes cannot become trusted state (`ingress-demo`, `INGRESS-OK`). The escapes are explicit, privileged and recorded: `declassify` for secrecy, `endorse` for integrity — and neither grants the other. |
 | Bidirectional networking | The Marz daemon **receives**, not just transmits: it offers the NIC receive buffers, blocks on the device interrupt, resolves the destination by **ARP**, and completes a real **ICMP echo** exchange, matching the reply by id and sequence (`marz-ping`, `NET-RX-OK`). CI decodes the packet capture structurally and asserts the echo left and the reply came back. |
 | Engineering baseline (W10) | Every tree lints with `-D warnings` on a **pinned** toolchain, so a regression cannot land quietly and "green locally" cannot disagree with CI. No reference to a `static mut` survives anywhere in the kernel — the four clusters that had them (device authority, namespace authority, information flow, the event ring) now go through a pointer, which matters because a `&mut` to a static two harts can reach is UB and secondary harts run real tasks. The superseded Step 1..9 prototypes moved to `spikes/`, off the shipping path. Manifest capability derivation — the narrowest security decision in the system — is unit-tested exhaustively in `dezh_core::mcap` rather than only observed in a transcript. |
+| Reviewability (W11) | The kernel was one file of 8,776 lines. It is now 724 lines of boot sequence plus 26 modules, moved across 23 commits that each had to stay green. This is listed here because it is the difference between a reviewer being *able* to audit a subsystem and being told to trust a summary of it — the audience this repository asks for critique from reads code, not diagrams. Three gaps are stated rather than rounded away in [the roadmap's W11 acceptance table](ROADMAP.md): `pkg.rs` is over the size cap, `smp` still holds four `static mut`, and the command table is separate from its handlers. |
 
 ## What is measured, and how honestly
 
@@ -107,17 +109,25 @@ true today, so a reviewer never has to guess.
 - **Networking is a probe, not a stack.** Marz does Ethernet, ARP, IPv4, UDP
   egress and ICMP echo — enough to prove the edge is real and reachable in both
   directions. There is **no TCP, no DNS, no DHCP (the address is static), no
-  inbound listening and no routing**, and received packets are not ledgered
-  effects. See [Marz](SUBSYSTEMS.md#marz-guarded-egress).
-- **W8 effect-runtime honesty.** External effects (`email.send`, `prod.deploy`,
-  a compensatable `api-key`) are **modeled**, not wired to real connectors — the
-  point proven is the *mechanism* (attribution, honest rollback, compensation),
-  not a network/DB/secrets integration (that is the future "Gateways" line).
+  inbound listening and no routing**. Only `marz-effect` ledgers what comes back
+  (see the effect-gateway row above); `marz-ping`'s ICMP replies are not effect
+  records. See [Marz](SUBSYSTEMS.md#marz-guarded-egress).
+- **Effect-runtime honesty (W8 + W12).** Most modeled effects (`email.send`,
+  `prod.deploy`, a compensatable `api-key`) are still **models** — they prove
+  the mechanism, not an integration. One is not: `marz-effect` drives a real
+  external system through the host gateway. The limit there is stated in the
+  row above and is worth repeating, because it is the kind of thing a reader
+  should not have to find twice — **the gateway is outside Dezh's TCB.** Dezh
+  proves the effect was authorized, left the machine, was ledgered under an
+  intent, and that its compensation ran. It cannot prove the gateway was honest
+  about what it did on the other side.
   Ledger integrity trusts the storage daemon (records are parent-linked and
   hashed for corruption detection + rollback, not signed against a malicious
   writer). The commit log is a fixed 255 slots with no GC yet. Intents (`Ahd`)
-  are runtime sessions, not persisted, and there is no lease/revocation for
-  long-lived agents. See [Threat model](SECURITY_MODEL.md#threat-model).
+  are runtime sessions and are not persisted across a reboot; for their lease
+  and revocation status, which this bullet used to deny and the list above
+  grants, see that entry — leases and `intent-revoke` are real, in-flight
+  clawback is not. See [Threat model](SECURITY_MODEL.md#threat-model).
 - **In-kernel U-mode task caveat (RISC-V).** Some baked demo tasks share the
   kernel binary and must avoid non-inlined calls; real apps use the separate-ELF
   and `.dzp` loader paths, which do not have this constraint.

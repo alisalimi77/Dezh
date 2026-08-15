@@ -1,5 +1,57 @@
 # Release Notes
 
+## v0.4-review Candidate
+
+The release where the effect ledger stops being checked against itself, and
+where the kernel becomes something a stranger can actually read.
+
+v0.3 could attribute and undo an agent's night — but every effect it attributed
+lived inside Dezh's own storage. The ledger was the only witness to its own
+claims. That is the gap this release closes.
+
+### What a reviewer can now do
+
+- Run `marz-effect <dest> <verb> <arg>` and watch an effect **leave the
+  machine**: authorized against a live NIC capability, egress authority for that
+  named destination and the DIFC export rule, ARP-resolved, sent on the wire —
+  and then the **outcome comes back** and is ledgered. It records
+  `compensatable` and carries **the undo itself**, not just the class, so
+  `sfar-plan` names the compensating action rather than promising one exists.
+  The reply lowers operator integrity, because bytes off the wire are
+  attacker-chosen.
+- Check that claim without trusting us. `tools/ci/effect_test.py` runs twelve
+  checks and **none of them read Dezh's transcript** — every assertion about
+  external state is made against the external system itself, including that a
+  revoked NIC capability leaves it untouched.
+- Read the kernel. `main.rs` went from 8,776 lines to 724 plus 26 modules,
+  across 23 commits that each stayed green.
+- Type `help` and see all 151 commands. In v0.3 it silently listed 111: the
+  `Intent` and `Effects` groups were missing from a hand-written list, so
+  `intent-open`, `sand-log`, `tbar`, `why-denied`, `overnight` and `redteam`
+  were absent from the first screen a reviewer reads. The list is now checked
+  against the command table when the kernel is built.
+
+### The boundary, stated up front
+
+The host gateway that performs the external effect is **not in Dezh's TCB**. A
+compromised gateway can lie about what it did. Dezh proves the parts it owns —
+authorized, left the machine, ledgered under an intent, compensation ran — and
+not the gateway's honesty. That is a smaller claim than "the OS speaks git",
+and it is the true one.
+
+### Honest scope
+
+Everything named in the v0.3 notes that is still open stays open: no IOMMU, the
+x86 kernel has no scheduler or drivers, Pol is a small syscall subset, the
+console's own scheduler is single-hart, and in-flight capability clawback does
+not exist. See [STATUS.md](STATUS.md), which now also lists the three W11 gaps
+rather than rounding them away.
+
+One correction to the v0.3 notes: they described intents as having no lease or
+revocation. That had already stopped being true when `lease-demo` shipped, and
+STATUS.md said so in one place while denying it in another. The contradiction is
+fixed in favour of the accurate half.
+
 ## v0.3-review Candidate
 
 The milestone where the no-ambient-authority rule stops being a single-core,

@@ -136,21 +136,27 @@ aimed at autonomous agents as first-class principals.
 
 ## 6. Limitations (see `STATUS.md`, `SECURITY_MODEL.md#threat-model`)
 
-QEMU-only; not formally verified (seL4 is the bar); external effects are
-*modeled*, not wired to real connectors; ledger integrity trusts the storage
+QEMU-only; not formally verified (seL4 is the bar); most external effects are
+still *modeled* rather than wired to connectors, the exception being
+`marz-effect`, which drives a real external system through a host gateway that
+is **outside the TCB** — so Dezh proves authorization, egress, ledgering and
+compensation, and not the gateway's honesty; ledger integrity trusts the storage
 daemon (records are hashed/chained for corruption + rollback, not signed against
 a malicious writer); the commit log is a fixed 255 slots with no GC; intents are
-runtime sessions with no lease/revocation for long-lived agents yet; no IOMMU; a
-small Pol syscall subset; no package signing. Each is named rather than elided.
+runtime sessions that do not survive a reboot, and in-flight capability clawback
+does not exist, though leases and `intent-revoke` do; no IOMMU; a small Pol
+syscall subset. Each is named rather than elided.
 
 ## 7. Future work
 
-Leases/revocation for long-lived agents (before real networking); a
-multi-dimensional, formally-specified intent algebra (operation × resource ×
-namespace × time × quota × destination × data-class × delegation-depth) with
-property tests that no dimension widens on derivation; real **Gateways**
-(git/CI/deploy/HTTP/DB/secrets connectors with enforced effect schemas and
-compensation); unifying the host-crate and bare-metal authority implementations
+In-flight capability clawback (leases and `intent-revoke` shipped; taking back a
+capability already running inside another task did not); a multi-dimensional,
+formally-specified intent algebra (operation × resource × namespace × time ×
+quota × destination × data-class × delegation-depth) with property tests that no
+dimension widens on derivation; **Gateways** beyond the first one — the git
+connector exists, HTTP/DB/secrets/CI/deploy do not, and none of them yet carry
+enforced effect schemas; unifying the host-crate and bare-metal authority
+implementations
 to a single source of truth; and, longer term, hardware-enforced capabilities
 (CHERI) and verification of the smallest kernel authority rules.
 
