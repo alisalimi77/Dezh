@@ -48,21 +48,36 @@ authority underneath it:
   `unknown` and is never optimistically "undone".
 - **Egress is a first-class effect.** Network authority names a *destination*,
   not "the network"; export is checked against an information-flow taint (the
-  Flume rule that leaving the system is a declassification); and every send is
+  Flume rule that leaving the system is a declassification); and a raw send is
   recorded as an **irreversible** effect that rollback refuses.
+- **The effect leaves the machine and the outcome comes back.** This is the part
+  I most expect to be attacked, so it is stated narrowly. `marz-effect` drives a
+  real external system through a host gateway: authorized against a live device
+  capability, egress authority for that named destination and the export rule,
+  ARP-resolved, sent on the wire — and the reply is ledgered, as `compensatable`,
+  carrying **the undo itself** rather than only its class, so the rollback
+  forecast names the compensating action instead of promising one exists. The
+  reply also *lowers integrity*, because bytes off the wire are attacker-chosen.
 
 **Evidence, not slides.** Everything is exercised in CI on a RISC-V kernel under
-QEMU. The one I'd point a skeptic at first: the egress test does not trust the
-kernel's own logs — QEMU captures the packets and the test **fails unless exactly
-the authorized frames are on the wire**. If a refused send leaked, or an
-authorized one never left, CI goes red. The capability algebra (`derived ⊆
-intent`; delegation only attenuates) is proved by exhaustive enumeration in a host
-test rather than asserted in prose.
+QEMU. The one I'd point a skeptic at first: the external-effect test **never
+reads Dezh's own transcript**. Every assertion about what happened out there is
+made against the external system's own state, including the negative case — a
+revoked device capability must leave it byte-for-byte untouched. The egress test
+is the same idea one layer down: QEMU captures the packets and it **fails unless
+exactly the authorized frames are on the wire**, so a refused send that leaked or
+an authorized one that never left both turn CI red. The capability algebra
+(`derived ⊆ intent`; delegation only attenuates) is proved by exhaustive
+enumeration in a host test rather than asserted in prose.
 
 **Where it is weak, in my own words.** Not formally verified — seL4 is the bar and
 I am not near it. QEMU only. **No IOMMU**, so a user-space driver gives fault
 isolation and least privilege of the driver *process*, not memory safety against a
-malicious driver; that is core to the story, not future polish. Information flow
+malicious driver; that is core to the story, not future polish. **The gateway
+that performs the external effect is outside the TCB** — a compromised one can
+lie about what it did, so what is proved is authorization, egress, ledgering and
+that the compensation ran, not the gateway's honesty; it is one connector, and
+the rest of the modeled effects are still models. Information flow
 is enforced on the storage path and at egress, not across every channel. Packages
 are signed, but there is no key distribution or transparency service.
 `print`/`time`/`ipc` are still plain permission bits on purpose (they name no
@@ -74,7 +89,7 @@ unbypassable given the trusted base I describe; whether the reversibility
 classification is honest; and whether the novelty claim survives contact with
 prior art you know better than I do.
 
-Repo: `<repo-url>` · Design + prior-art comparison: `docs/RELATED_WORK.md`,
+Repo: <https://github.com/alisalimi77/Dezh> · Design + prior-art comparison: `docs/RELATED_WORK.md`,
 `docs/SUBSYSTEMS.md#marz-guarded-egress` · Honest limits: `docs/STATUS.md`, `docs/SECURITY_MODEL.md#threat-model`
 
 ---
@@ -98,12 +113,18 @@ reverse — then reversible work is retracted, compensatable work is undone by a
 recorded compensating action, and anything genuinely irreversible is **refused
 with an explanation** instead of being silently "rolled back".
 
-Two things that usually surprise people:
+Three things that usually surprise people:
 
 - **Exfiltration is refused at the wire, not audited afterwards.** If the agent
   reads something secret it becomes tainted, and a send to a destination not
   cleared for that secret is blocked before a packet exists. Network authority
   names a *destination*, so "it had network access" is not a thing here.
+- **The undo is recorded with the effect, not guessed later.** One connector is
+  real rather than modeled: an effect that leaves the machine, changes an
+  external system, and comes back to be ledgered with the specific action that
+  reverses it. So the morning forecast names the compensating command instead of
+  claiming a class and hoping. Honest limit: that gateway is outside the trusted
+  base, so it can lie about what it did on the far side.
 - **It is one command.** `overnight` runs the whole story: an agent loose under
   one intent, a morning of forecast and provenance, an honest rollback, and a
   contained escape attempt.
@@ -114,13 +135,13 @@ teams whose agents change real repos/CI/deploys to tell me where the effect mode
 breaks against their workflow — especially which effects would need typed
 connectors, and what "undo" has to mean for them.
 
-Repo: `<repo-url>` · Start here: `docs/transcripts/overnight.md`
+Repo: <https://github.com/alisalimi77/Dezh> · Start here: `docs/transcripts/overnight.md`
 
 ---
 
 ## Sending checklist
 
-- Replace `<repo-url>` and verify every link resolves.
+- Verify every link resolves before sending.
 - Re-read [STATUS.md](STATUS.md): if a limitation changed, fix the post first.
 - Ask for critique on something specific; a post with no question gets no review.
 - One channel at a time. Answer the hard replies before posting anywhere else.
