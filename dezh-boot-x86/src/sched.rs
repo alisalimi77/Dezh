@@ -98,6 +98,8 @@ static TRACED: AtomicUsize = AtomicUsize::new(0);
 /// Offsets into a saved frame, in qwords, in the order `isr_ext_common` pops it.
 pub(crate) const FRAME_RDI: usize = 8;
 pub(crate) const FRAME_RAX: usize = 14;
+pub(crate) const FRAME_ERR: usize = 16;
+pub(crate) const FRAME_RIP: usize = 17;
 pub(crate) const FRAME_CS: usize = 18;
 
 /// Reads one qword out of a saved frame.
@@ -299,6 +301,42 @@ pub(crate) fn finish() {
         (*t).state = State::Idle;
     }
     timer::sti();
+}
+
+pub(crate) fn current() -> usize {
+    CURRENT.load(Ordering::Relaxed)
+}
+
+/// Tasks killed by a fault of their own making, and the last one to go.
+static KILLS: AtomicUsize = AtomicUsize::new(0);
+static LAST_KILLED: AtomicUsize = AtomicUsize::new(usize::MAX);
+
+pub(crate) fn kills() -> usize {
+    KILLS.load(Ordering::Relaxed)
+}
+
+pub(crate) fn last_killed() -> usize {
+    LAST_KILLED.load(Ordering::Relaxed)
+}
+
+/// Ends the running task because it faulted, and returns whoever runs next.
+///
+/// If nothing else is runnable there is no next: resuming the frame would take
+/// the same fault forever, so the machine stops and says why.
+pub(crate) fn kill_current(frame: u64) -> u64 {
+    let id = CURRENT.load(Ordering::Relaxed);
+    KILLS.fetch_add(1, Ordering::Relaxed);
+    LAST_KILLED.store(id, Ordering::Relaxed);
+    exit_current();
+    let next = reschedule(frame);
+    if next == frame {
+        crate::console::print("[trap] nothing else to run; halting.
+");
+        loop {
+            unsafe { core::arch::asm!("hlt") };
+        }
+    }
+    next
 }
 
 pub(crate) fn switches() -> usize {

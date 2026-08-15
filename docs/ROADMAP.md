@@ -141,8 +141,11 @@ path (W16.1): they save every general-purpose register, dispatch, restore and
 it by leaving an interrupted work loop intact across the ticks. **W16.2** adds
 the other half: the dispatcher may hand back a *different* saved frame, which is
 the whole context switch, and three kernel tasks with no yield in them are
-round-robined by the tick. Still future work: device IRQs, storage, and any
-isolation at all between x86 tasks.
+round-robined by the tick. **W16.3** makes that containment: per-task address
+spaces, a GDT and TSS that can describe an untrusted task, ring 3, one DPL3
+syscall gate, and a fault that kills the faulting task instead of the machine.
+Still future work: device IRQs, storage, and capability checks on the x86
+syscall surface.
 
 ##### W6 — Independence and release packaging
 
@@ -614,19 +617,20 @@ Roughly 900 lines against 12,359. F3 proves the *program format* is portable; it
 does not prove the system is. Until x86 has a runtime, "ISA is an implementation
 backend, not the identity" (D021) is a RISC-V thesis.
 
-**W16.1 and W16.2 are done:** a 256-vector IDT, a Local APIC timer measured
-against the PIT and armed at 100 Hz, an interrupt entry path that saves and
-restores every general-purpose register, and a round-robin scheduler over kernel
-tasks that never yield — asserted in CI on both x86 boot paths, by turns granted
-rather than work completed. Everything below is still missing: no disk, no
-drivers, and no isolation — x86 tasks share one address space at CPL0, so
-scheduling there is not yet containment.
+**W16.1, W16.2 and W16.3 are done:** a 256-vector IDT, a Local APIC timer
+measured against the PIT and armed at 100 Hz, an interrupt entry path that saves
+and restores every general-purpose register, a round-robin scheduler over kernel
+tasks that never yield, per-task address spaces, and ring 3 — a CPL3 task that
+touches memory it was not given is killed alone while its neighbour finishes.
+All asserted in CI on both x86 boot paths. Still missing: no disk, no drivers,
+and no capability check on the x86 syscall surface, so an x86 task is contained
+but its authority is not yet derived from an intent.
 
 This is also **the only practical route to an IOMMU** — see W17.
 
 *Cost:* very large. Timer and returnable IRQ path (done, W16.1), scheduler
-(done, W16.2), then paging and per-task isolation, a virtio-pci disk driver,
-then Cairn.
+(done, W16.2), paging and ring-3 containment (done, W16.3), then a
+capability-checked syscall surface, a virtio-pci disk driver, then Cairn.
 *Blocked on:* nothing technically; competes with everything for time.
 *Acceptance:* the x86 kernel runs the console, the scheduler and Cairn; the same
 `.dzp` installs and persists on both ISAs.

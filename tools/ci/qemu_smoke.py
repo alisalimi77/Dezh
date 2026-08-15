@@ -921,8 +921,22 @@ def run_x86_64(qemu: str, kernel: Path, iso: Path | None = None) -> None:
             session.wait_for(f"[sched] task {task}: ")
             session.wait_for("checksum OK")
         session.wait_for("[sched] preemption works: every task was stopped and resumed")
+        session.wait_for("[sched] each task read its own page through its own cr3")
+        # W16.3: containment. Two CPL3 tasks, each in its own address space; one
+        # reaches for an address it was never given. The privilege is asserted
+        # from the `cs` the CPU saved (0x23 = ring 3), which a task cannot forge.
+        session.wait_for("[user] task 4 (")
+        session.wait_for("nothing else marked USER")
+        session.wait_for("[trap] task 5 faulted at CPL3: page-fault touching 0x0000000000000000")
+        session.wait_for("[trap] killing the task; the machine keeps running")
+        session.wait_for("[user] calls arrived from CPL 3 (cs=0x0000000000000023)")
+        session.wait_for("[user] task 5: 1 syscalls, then killed by the kernel (1 task killed, id 5)")
+        session.wait_for(
+            "[user] containment: the faulting task died, its neighbour ran on and finished"
+        )
         # M2: the IDT catches a deliberately-raised breakpoint instead of
-        # triple-faulting the machine.
+        # triple-faulting the machine. The exception path still halts for a
+        # kernel-mode fault; only a CPL3 fault costs just the task.
         session.wait_for("[trap] CPU exception 3 (breakpoint)")
         session.wait_for("[trap] halting")
     finally:

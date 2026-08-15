@@ -61,6 +61,14 @@ pub(crate) fn alloc_page() -> Option<*mut u8> {
     }
 }
 
+/// The address a page fault was taken on. Only meaningful inside a page-fault
+/// handler, and only before interrupts are re-enabled.
+pub(crate) fn fault_address() -> u64 {
+    let cr2: u64;
+    unsafe { asm!("mov {}, cr2", out(reg) cr2, options(nomem, nostack)) };
+    cr2
+}
+
 pub(crate) fn current_cr3() -> u64 {
     let cr3: u64;
     unsafe { asm!("mov {}, cr3", out(reg) cr3, options(nomem, nostack)) };

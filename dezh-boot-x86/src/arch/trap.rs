@@ -1,16 +1,18 @@
-//! Two kinds of trap, and the reason they cannot share an exit.
+//! Traps: three kinds, one entry path.
 //!
-//! Without an IDT any CPU exception triple-faults and resets the machine. The
-//! first 32 stubs give every exception a uniform (vector, error, rip) frame and
-//! route it to a Rust handler that reports it and halts — so a fault is
-//! diagnosable, not a silent reboot.
+//! Without an IDT any CPU exception triple-faults and resets the machine. Every
+//! stub here — exception, interrupt, syscall — saves all fifteen general-purpose
+//! registers, calls a dispatcher with the frame, restores whatever frame the
+//! dispatcher returned, and `iretq`s.
 //!
-//! Vectors 32..255 must not end in halt: an interrupt interrupts work that was
-//! going fine, so the stub has to hand control back to the exact instruction it
-//! stole the CPU from. Those stubs save every general-purpose register, call a
-//! dispatcher, restore them, and `iretq`.
+//! What differs is what the dispatcher decides. An interrupt resumes the work it
+//! interrupted, or hands the CPU to another task. A syscall answers and resumes
+//! the caller. A fault depends on who faulted: a kernel fault still ends in a
+//! reported halt, because there is nothing left to trust, while a fault at CPL3
+//! kills that task alone and returns some other task's frame.
 
 use crate::arch::gdt;
+use crate::arch::paging;
 use crate::arch::timer;
 use crate::console::{print, print_hex, print_i64};
 use crate::sched;
@@ -25,13 +27,13 @@ global_asm!(
 isr\n:
     push 0           /* dummy error code so every frame is uniform */
     push \n          /* vector number */
-    jmp isr_common
+    jmp isr_ext_common
 .endm
 .macro ISR_ERR n
 .global isr\n
 isr\n:
     push \n          /* CPU already pushed the real error code */
-    jmp isr_common
+    jmp isr_ext_common
 .endm
 
 ISR_NOERR 0
@@ -67,16 +69,11 @@ ISR_NOERR 29
 ISR_NOERR 30
 ISR_NOERR 31
 
-isr_common:
-    mov rdi, [rsp]        /* vector */
-    mov rsi, [rsp + 8]    /* error code */
-    mov rdx, [rsp + 16]   /* faulting RIP */
-    call exception_handler
-3:
-    hlt
-    jmp 3b
-
-/* Vectors 32..255. Generated with .rept, so no stub carries a label of its
+/* Vectors 32..255, and since step 4 the exception stubs above as well. A fault
+   used to end in `hlt` on the spot, which is the only honest answer when the
+   kernel itself faulted and the wrong one when a user task did: that task has to
+   die while the machine carries on. Both kinds therefore go through the one path
+   that can hand a different context back. Generated with .rept, so no stub carries a label of its
    own; instead every stub is padded to a fixed 16-byte stride and Rust computes
    stub(v) = isr_ext_stubs + (v - 32) * 16. The padding is what makes that
    arithmetic true: the assembler picks a 2-byte `push imm8` below vector 128
@@ -246,12 +243,40 @@ const EXC_NAMES: [&str; 32] = [
     "VMM-comm", "security", "reserved-31",
 ];
 
-#[no_mangle]
-extern "C" fn exception_handler(vector: u64, error: u64, rip: u64) -> ! {
+/// A CPU exception. Who faulted decides what it costs.
+fn exception(vector: u64, frame: u64) -> u64 {
+    let (error, rip, cs) = unsafe {
+        (
+            sched::frame_get(frame, sched::FRAME_ERR),
+            sched::frame_get(frame, sched::FRAME_RIP),
+            sched::frame_get(frame, sched::FRAME_CS),
+        )
+    };
+    let name = EXC_NAMES.get(vector as usize).copied().unwrap_or("?");
+
+    // A fault at CPL3 is the task's own doing, and costs the task rather than
+    // the machine. Printing here is safe for the same reason the syscall path
+    // is: the only code that prints runs on the boot task, and the boot task is
+    // not the one that faulted.
+    if cs & 3 == 3 {
+        print("\n[trap] task ");
+        print_i64(sched::current() as i64);
+        print(" faulted at CPL3: ");
+        print(name);
+        print(" touching ");
+        print_hex(paging::fault_address());
+        print(", rip=");
+        print_hex(rip);
+        print(", error=");
+        print_hex(error);
+        print("\n[trap] killing the task; the machine keeps running.\n");
+        return sched::kill_current(frame);
+    }
+
     print("\n[trap] CPU exception ");
     print_i64(vector as i64);
     print(" (");
-    print(EXC_NAMES.get(vector as usize).copied().unwrap_or("?"));
+    print(name);
     print("), error=");
     print_hex(error);
     print(", rip=");
@@ -276,6 +301,9 @@ extern "C" fn exception_handler(vector: u64, error: u64, rip: u64) -> ! {
 /// returns.
 #[no_mangle]
 extern "C" fn irq_dispatch(vector: u64, frame: u64) -> u64 {
+    if vector < 32 {
+        return exception(vector, frame);
+    }
     if vector == timer::VEC_TIMER as u64 {
         timer::on_tick();
         return sched::on_tick(frame);
