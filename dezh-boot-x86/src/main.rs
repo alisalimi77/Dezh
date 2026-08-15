@@ -12,6 +12,7 @@
 
 use core::arch::{asm, global_asm};
 use core::panic::PanicInfo;
+use core::sync::atomic::{AtomicU64, Ordering};
 
 // --- Boot trampoline: Multiboot1 -> 32-bit -> identity paging -> long mode ----
 global_asm!(
@@ -48,10 +49,11 @@ mb2_end:
 
 .section .bss
 .align 4096
-pml4:  .skip 4096
-pdpt:  .skip 4096
-pd:    .skip 4096
-pt:    .skip 4096
+pml4:    .skip 4096
+pdpt:    .skip 4096
+pd:      .skip 4096
+pt:      .skip 4096
+pd_apic: .skip 4096
 .align 16
 stack_bottom: .skip 16384
 stack_top:
@@ -97,6 +99,18 @@ _start:
     inc ecx
     cmp ecx, 512
     jb 1b
+
+    /* The Local APIC's registers live at 0xFEE00000, which the 2 MiB identity
+       map above does not reach, so long mode cannot see the APIC at all without
+       this. 0xFEE00000 selects PDPT[3] and, inside it, PD[503]; one 2 MiB page
+       there is enough for the whole APIC window. Flags: present | writable |
+       page-size | PWT | PCD — MMIO must not be cached. */
+    mov eax, offset pd_apic
+    or eax, 0x3
+    mov [pdpt + 3*8], eax
+    mov dword ptr [pdpt + 3*8 + 4], 0
+    mov dword ptr [pd_apic + 503*8], 0xFEE0009B
+    mov dword ptr [pd_apic + 503*8 + 4], 0
 
     /* load CR3 */
     mov eax, offset pml4
@@ -546,6 +560,173 @@ fn pic_remap_and_mask() {
     }
 }
 
+// --- Local APIC timer --------------------------------------------------------
+// The choice between the Local APIC timer and the legacy 8259 + PIT was decided
+// by where this is going: a scheduler needs a timer per CPU, and the LAPIC is
+// per CPU while the PIT is one global counter shared by all of them. The RISC-V
+// side already has a per-hart timer, so this keeps the two kernels the same
+// shape. Every 64-bit CPU has a LAPIC; the PIT and the 8259 are legacy parts
+// that modern platforms are removing.
+//
+// The two costs of that choice are paid here. The APIC register window is at
+// 0xFEE00000, outside the 2 MiB the trampoline identity-maps, so the trampoline
+// now maps it. And unlike the PIT the LAPIC timer runs at a frequency nobody
+// tells you, so it has to be measured — against the PIT, which is still the one
+// clock on the machine with a frequency fixed by hardware. Every rate this
+// kernel prints is that measurement, not a datasheet number.
+const LAPIC_BASE: usize = 0xFEE0_0000;
+const LAPIC_ID: usize = 0x020;
+const LAPIC_TPR: usize = 0x080;
+const LAPIC_EOI: usize = 0x0B0;
+const LAPIC_SVR: usize = 0x0F0;
+const LAPIC_LVT_TIMER: usize = 0x320;
+const LAPIC_TIMER_INIT: usize = 0x380;
+const LAPIC_TIMER_CUR: usize = 0x390;
+const LAPIC_TIMER_DIV: usize = 0x3E0;
+
+const LVT_MASKED: u32 = 1 << 16;
+const LVT_PERIODIC: u32 = 1 << 17;
+const SVR_ENABLE: u32 = 1 << 8;
+const LAPIC_DIV_16: u32 = 0x3; // divide configuration register encoding
+const LAPIC_DIVISOR: u64 = 16;
+
+const IA32_APIC_BASE: u32 = 0x1B;
+const APIC_BASE_GLOBAL_ENABLE: u64 = 1 << 11;
+
+/// Timer vector, chosen above the 0x20..0x2F block the 8259s were remapped into
+/// so the two can never be confused for one another.
+const VEC_TIMER: u8 = 0x30;
+/// The APIC's own "never mind" vector, given a number of its own so a spurious
+/// delivery is countable instead of landing on some unrelated handler.
+const VEC_SPURIOUS: u8 = 0xFF;
+
+const TIMER_HZ: u64 = 100;
+const PIT_HZ: u64 = 1_193_182;
+const CALIBRATE_MS: u64 = 10;
+
+/// Incremented by the timer handler, read by ordinary kernel code. Relaxed is
+/// enough: nothing is published alongside it, and the handler runs on the same
+/// CPU as the reader, so the only thing being protected is the increment itself.
+static TICKS: AtomicU64 = AtomicU64::new(0);
+/// Spurious APIC deliveries. Expected to stay zero; counted rather than ignored
+/// so that "zero" is an observation instead of an assumption.
+static SPURIOUS: AtomicU64 = AtomicU64::new(0);
+
+fn lapic_read(reg: usize) -> u32 {
+    unsafe { core::ptr::read_volatile((LAPIC_BASE + reg) as *const u32) }
+}
+fn lapic_write(reg: usize, val: u32) {
+    unsafe { core::ptr::write_volatile((LAPIC_BASE + reg) as *mut u32, val) };
+}
+
+unsafe fn rdmsr(msr: u32) -> u64 {
+    let (lo, hi): (u32, u32);
+    asm!("rdmsr", in("ecx") msr, out("eax") lo, out("edx") hi, options(nomem, nostack));
+    ((hi as u64) << 32) | lo as u64
+}
+unsafe fn wrmsr(msr: u32, val: u64) {
+    asm!(
+        "wrmsr",
+        in("ecx") msr,
+        in("eax") val as u32,
+        in("edx") (val >> 32) as u32,
+        options(nomem, nostack),
+    );
+}
+
+fn sti() {
+    unsafe { asm!("sti", options(nomem, nostack)) };
+}
+fn cli() {
+    unsafe { asm!("cli", options(nomem, nostack)) };
+}
+
+/// Turns the Local APIC on. Returns false if firmware relocated the register
+/// window away from the address the trampoline mapped, in which case none of the
+/// register accesses below would mean anything and the caller must not proceed.
+fn lapic_enable() -> bool {
+    let base = unsafe { rdmsr(IA32_APIC_BASE) };
+    if (base & 0xFFFF_F000) as usize != LAPIC_BASE {
+        return false;
+    }
+    unsafe { wrmsr(IA32_APIC_BASE, base | APIC_BASE_GLOBAL_ENABLE) };
+    lapic_write(LAPIC_TPR, 0); // accept every priority; firmware may have raised it
+    lapic_write(LAPIC_SVR, SVR_ENABLE | VEC_SPURIOUS as u32);
+    true
+}
+
+/// Counts how far the LAPIC timer gets while the PIT measures `CALIBRATE_MS`.
+///
+/// PIT channel 2 is used because it is the one channel wired to no interrupt
+/// line and whose output is readable from port 0x61 bit 5 — it can be timed
+/// against without an IRQ path existing yet. Returns `None` rather than
+/// spinning forever on a machine that has no PIT.
+fn lapic_calibrate() -> Option<u32> {
+    let reload = (PIT_HZ * CALIBRATE_MS / 1000) as u16;
+    unsafe {
+        let p61 = inb(0x61);
+        outb(0x61, (p61 & 0xFD) | 0x01); // speaker off, gate on
+        outb(0x43, 0xB2); // channel 2, lo/hi byte, mode 1 one-shot, binary
+        outb(0x42, reload as u8);
+        outb(0x80, 0); // settle between the two halves of the reload value
+        outb(0x42, (reload >> 8) as u8);
+
+        // Dropping the gate and raising it retriggers the one-shot: t = 0 is
+        // here, and channel 2's output stays low until the count runs out.
+        let gate = inb(0x61) & 0xFE;
+        outb(0x61, gate);
+        outb(0x61, gate | 1);
+
+        lapic_write(LAPIC_TIMER_DIV, LAPIC_DIV_16);
+        lapic_write(LAPIC_LVT_TIMER, LVT_MASKED); // count, but deliver nothing
+        lapic_write(LAPIC_TIMER_INIT, u32::MAX);
+
+        let mut spins: u64 = 0;
+        while inb(0x61) & 0x20 == 0 {
+            spins += 1;
+            if spins > 200_000_000 {
+                lapic_write(LAPIC_TIMER_INIT, 0);
+                return None;
+            }
+        }
+        let remaining = lapic_read(LAPIC_TIMER_CUR);
+        lapic_write(LAPIC_TIMER_INIT, 0);
+        match u32::MAX - remaining {
+            0 => None,
+            counted => Some(counted),
+        }
+    }
+}
+
+fn lapic_arm_periodic(initial: u32) {
+    lapic_write(LAPIC_TIMER_DIV, LAPIC_DIV_16);
+    lapic_write(LAPIC_LVT_TIMER, LVT_PERIODIC | VEC_TIMER as u32);
+    lapic_write(LAPIC_TIMER_INIT, initial);
+}
+
+fn lapic_mask_timer() {
+    lapic_write(LAPIC_LVT_TIMER, LVT_MASKED);
+    lapic_write(LAPIC_TIMER_INIT, 0);
+}
+
+/// A deterministic unit of work, run under the armed timer.
+///
+/// Its running total and loop counter are live in registers across whatever
+/// interrupt lands in the middle of it, so an entry path that lost a register
+/// shows up here as a wrong sum rather than as a plausible-looking number. The
+/// `black_box` is what keeps the sum from being folded away at compile time in
+/// the release profile, where there would otherwise be no loop left to interrupt.
+fn work_chunk() -> u64 {
+    let mut sum: u64 = 0;
+    let mut i: u64 = 1;
+    while i <= 1000 {
+        sum = sum.wrapping_add(core::hint::black_box(i));
+        i += 1;
+    }
+    sum
+}
+const WORK_CHUNK_SUM: u64 = 500_500;
+
 const EXC_NAMES: [&str; 32] = [
     "divide-by-zero", "debug", "NMI", "breakpoint", "overflow", "bound-range",
     "invalid-opcode", "device-not-available", "double-fault", "coprocessor-overrun",
@@ -594,12 +775,128 @@ extern "C" fn exception_handler(vector: u64, error: u64, rip: u64) -> ! {
 /// one that never returns.
 #[no_mangle]
 extern "C" fn irq_dispatch(vector: u64) {
+    if vector == VEC_TIMER as u64 {
+        TICKS.fetch_add(1, Ordering::Relaxed);
+        lapic_write(LAPIC_EOI, 0);
+        return;
+    }
+    if vector == VEC_SPURIOUS as u64 {
+        // A spurious vector is the APIC withdrawing an interrupt it had already
+        // started to deliver. It takes no EOI — sending one would acknowledge an
+        // interrupt that is still in service.
+        SPURIOUS.fetch_add(1, Ordering::Relaxed);
+        return;
+    }
     print("\n[trap] interrupt vector ");
     print_i64(vector as i64);
     print(" arrived with no handler installed.\n");
     print("[trap] halting (no ambient recovery).\n");
     loop {
         unsafe { asm!("hlt") };
+    }
+}
+
+/// Arms the timer and then refuses to stop working while it fires.
+///
+/// The exception path already in this kernel ends every trap in `hlt`, which is
+/// only ever an admission that the machine cannot go on. This is the other kind
+/// of trap: the CPU is taken away from a loop that was in the middle of a sum
+/// and has to be handed back to it. The output below is what distinguishes the
+/// two — a tick count that grew, a work loop that kept its arithmetic intact
+/// across every one of those ticks, and, after the timer is masked, a tick count
+/// that stops while the same loop keeps running.
+fn timer_demo() {
+    print("\nTimer: arming the Local APIC timer and staying at work through it.\n");
+    if !lapic_enable() {
+        print("  [timer] Local APIC is not at the mapped window; timer not armed.\n");
+        return;
+    }
+    print("  [timer] Local APIC enabled, id=");
+    print_i64((lapic_read(LAPIC_ID) >> 24) as i64);
+    print("\n");
+
+    let counted = match lapic_calibrate() {
+        None => {
+            print("  [timer] PIT calibration returned no counts; timer not armed.\n");
+            return;
+        }
+        Some(c) => c,
+    };
+    let per_second = counted as u64 * (1000 / CALIBRATE_MS);
+    print("  [timer] measured ");
+    print_i64(counted as i64);
+    print(" LAPIC counts in ");
+    print_i64(CALIBRATE_MS as i64);
+    print(" ms at divide-16 (APIC bus ");
+    print_i64((per_second * LAPIC_DIVISOR) as i64);
+    print(" Hz)\n");
+
+    let per_tick = per_second / TIMER_HZ;
+    if per_tick == 0 || per_tick > u32::MAX as u64 {
+        print("  [timer] measured rate will not fit the requested tick; timer not armed.\n");
+        return;
+    }
+
+    print("  [timer] armed: vector 0x30, periodic, ");
+    print_i64(TIMER_HZ as i64);
+    print(" Hz\n");
+    lapic_arm_periodic(per_tick as u32);
+    sti();
+
+    const TARGET_TICKS: u64 = 10;
+    let mut rounds: u64 = 0;
+    let mut wrong: u64 = 0;
+    while TICKS.load(Ordering::Relaxed) < TARGET_TICKS {
+        if work_chunk() != WORK_CHUNK_SUM {
+            wrong += 1;
+        }
+        rounds += 1;
+    }
+    let ticks = TICKS.load(Ordering::Relaxed);
+
+    // Mask the timer and keep the same loop running with interrupts still on.
+    // If the ticks had been coming from anything other than the source just
+    // armed, the count would carry on climbing here.
+    lapic_mask_timer();
+    for _ in 0..64 {
+        // Drain anything the APIC had already begun delivering when the mask
+        // landed, so the frozen reading below is taken after the last of them.
+        let _ = work_chunk();
+    }
+    let frozen = TICKS.load(Ordering::Relaxed);
+    for _ in 0..2000 {
+        if work_chunk() != WORK_CHUNK_SUM {
+            wrong += 1;
+        }
+        rounds += 1;
+    }
+    let after = TICKS.load(Ordering::Relaxed);
+    cli();
+
+    print("  [timer] took ");
+    print_i64(ticks as i64);
+    print(" ticks; the work loop completed ");
+    print_i64(rounds as i64);
+    print(" rounds\n");
+    if wrong == 0 && ticks >= TARGET_TICKS && rounds > 0 {
+        print("  [timer] interrupts returned: work resumed after every tick, checksum OK\n");
+    } else {
+        print("  [timer] FAILED: ");
+        print_i64(wrong as i64);
+        print(" corrupted rounds\n");
+    }
+    if after == frozen {
+        print("  [timer] masked: tick count frozen at ");
+        print_i64(after as i64);
+        print(" while the work loop kept running\n");
+    } else {
+        print("  [timer] FAILED: ticks kept arriving after the timer was masked\n");
+    }
+    let spurious = SPURIOUS.load(Ordering::Relaxed);
+    if spurious != 0 {
+        print("  [timer] spurious APIC deliveries: ");
+        print_i64(spurious as i64);
+        print("\n");
     }
 }
 
@@ -656,6 +953,8 @@ pub extern "C" fn kmain() -> ! {
             }
         }
     }
+
+    timer_demo();
 
     // Prove the IDT works: deliberately raise a breakpoint (vector 3). Without an
     // IDT this would triple-fault and reset the machine; instead the handler
