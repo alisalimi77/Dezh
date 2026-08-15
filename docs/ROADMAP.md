@@ -132,11 +132,14 @@ ISAs provably execute the same bytes. A Multiboot2 header + `tools/x86/build-iso
 (GRUB `grub-mkrescue`) produce a BIOS ISO that boots in QEMU `-cdrom` **and in
 VirtualBox** (screenshot: docs/assets/dezh-x86-virtualbox.png); output is
 mirrored to the VGA text buffer so it is visible on the VM screen. The QEMU
-`-kernel` PVH path still works for CI. **M2 (partial, DONE for exceptions):**
-the x86 kernel installs a 32-vector exception IDT and routes every CPU fault to
-a handler that reports vector/error/RIP and halts — the boot deliberately raises
-a breakpoint to prove faults are caught, not silent triple-faults. Still future
-work: a returnable interrupt path (timer / device IRQs).
+`-kernel` PVH path still works for CI. **M2 (DONE):** the x86 kernel installs a
+256-vector IDT. The first 32 route every CPU fault to a handler that reports
+vector/error/RIP and halts — the boot deliberately raises a breakpoint to prove
+faults are caught, not silent triple-faults. Vectors 32..255 are the returnable
+path (W16.1): they save every general-purpose register, dispatch, restore and
+`iretq`, and a Local APIC timer armed at 100 Hz from a PIT-measured rate proves
+it by leaving an interrupted work loop intact across the ticks. Still future
+work: device IRQs and a scheduler on x86.
 
 ##### W6 — Independence and release packaging
 
@@ -604,15 +607,20 @@ found by hand in W9 and is exactly what a three-line test catches.
 
 ##### W16 — x86_64 to system parity (P6)
 
-522 lines against 12,359. No timer, no returnable interrupt path, no scheduler,
-no disk, no drivers. F3 proves the *program format* is portable; it does not
-prove the system is. Until x86 has a runtime, "ISA is an implementation backend,
-not the identity" (D021) is a RISC-V thesis.
+Roughly 900 lines against 12,359. F3 proves the *program format* is portable; it
+does not prove the system is. Until x86 has a runtime, "ISA is an implementation
+backend, not the identity" (D021) is a RISC-V thesis.
+
+**W16.1 is done:** a 256-vector IDT, a Local APIC timer measured against the PIT
+and armed at 100 Hz, and an interrupt entry path that saves and restores every
+general-purpose register and returns into the interrupted work — asserted in CI
+on both x86 boot paths. Everything below it is still missing: no scheduler, no
+disk, no drivers.
 
 This is also **the only practical route to an IOMMU** — see W17.
 
-*Cost:* very large. Timer, returnable IRQ path, scheduler, a virtio-pci disk
-driver, then Cairn.
+*Cost:* very large. Timer and returnable IRQ path (done, W16.1), then a
+scheduler, a virtio-pci disk driver, then Cairn.
 *Blocked on:* nothing technically; competes with everything for time.
 *Acceptance:* the x86 kernel runs the console, the scheduler and Cairn; the same
 `.dzp` installs and persists on both ISAs.

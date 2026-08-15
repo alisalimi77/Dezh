@@ -14,6 +14,7 @@ true today, so a reviewer never has to guess.
 | F3 — multi-ISA | The same Dezh-IR bytecode runs on the RISC-V and x86_64 kernels; the bytes are pinned byte-identical by a test; x86 runs it as a real `.dzp` package. |
 | F4 — Pol (Linux personality) | A real, unmodified static Linux/RISC-V ELF runs under a capability-gated Linux syscall shim; the same bytes also run on real riscv64 Linux. |
 | x86_64 boot | Boots via QEMU `-kernel` (PVH) and from a GRUB Multiboot2 ISO in QEMU **and VirtualBox**; a 32-vector exception IDT reports faults instead of triple-faulting. |
+| x86_64 returnable interrupts | A 256-vector IDT: exceptions still end in a reported halt, while vectors 32..255 save every general-purpose register, dispatch, restore, and `iretq`. A Local APIC timer is armed at 100 Hz from a rate **measured** against PIT channel 2 (~999 MHz APIC bus under QEMU, printed as counted). Proof is a work loop that keeps summing 1..=1000 across the ticks with no round corrupted, and a tick count that freezes when the timer is masked while that loop runs on. No device IRQs and no scheduler on x86 yet. |
 | Drivers out of kernel | virtio-block is a U-mode daemon holding an explicit MMIO + DMA grant; clients reach it only over typed IPC. **Caveat (not buried):** without an IOMMU this gives fault isolation + least privilege of the driver *process*, not memory safety against a malicious driver that programs the device to DMA anywhere. The IOMMU is core to this story, not future polish. |
 | W8 — intent → effect runtime | An agent runs under one **intent** (`Ahd`); its derived capability is provably ⊆ the intent. Every effect is a ledger record (`Sand`) carrying `actor → intent → derived cap → reversibility`. A whole **mission** (`Sfar`) is rolled back honestly: reversible effects retracted, compensatable effects undone by a **recorded** compensating action, irreversible effects **refused with a reason** — and rollback needs authority over every namespace the mission touched. A five-escape adversary (`redteam`) is stopped at five named boundaries; `why-denied` names the boundary of the last denial; `Tbar` renders the `actor → intent → effect` provenance graph. The `overnight` flagship runs the whole story. |
 | W12 — an effect that really leaves | Until W12 every effect Dezh could attribute lived inside Dezh's own storage, so the ledger was checked against itself. `marz-effect` now drives a real external system: the request is authorized (NIC capability live, egress authority held for that named destination, DIFC export rule allows it), ARP-resolved, sent on the wire, and the **outcome comes back** and is ledgered — as `compensatable`, with the undo recorded *on* the effect, so `sfar-plan` can name the compensating action instead of promising one. The reply **lowers operator integrity**, because bytes off the wire are attacker-chosen. `tools/ci/effect_test.py` is the acceptance and it does **not** believe Dezh's transcript: all twelve checks read the external system's own state, including that a revoked NIC capability leaves it untouched. **Boundary:** the host gateway is *not* in Dezh's TCB — a compromised gateway can lie about what it did, and Dezh proves only the parts it owns. |
@@ -45,8 +46,11 @@ true today, so a reviewer never has to guess.
 
 - **VM targets only.** No real-hardware port; no real device drivers beyond
   virtio under QEMU/VirtualBox.
-- **x86 kernel is thin.** Exception IDT exists, but there is no returnable
-  interrupt path yet — no timer, no device IRQs, no scheduler on x86. The rich
+- **x86 kernel is thin.** It now has a returnable interrupt path: a 256-vector
+  IDT, a Local APIC timer whose rate is measured against the PIT, and an entry
+  path that saves and restores every general-purpose register and `iretq`s back
+  into the interrupted work, asserted in CI on both boot paths. That is the
+  whole of it — there are no device IRQs and no scheduler on x86, and the rich
   interactive surface (console, scheduler, IPC, Cairn, Pol) is RISC-V only.
 - **Pol is a small syscall subset.** `write`, `exit`/`exit_group` are serviced;
   everything else returns a clean `-ENOSYS`. No threads, no dynamic linking, no

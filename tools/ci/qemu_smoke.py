@@ -890,10 +890,27 @@ def run_x86_64(qemu: str, kernel: Path, iso: Path | None = None) -> None:
         session.wait_for("Dezh x86_64")
         session.wait_for("long mode reached. 64-bit kernel running.")
         session.wait_for("IDT installed: 32 CPU-exception vectors")
+        session.wait_for("plus 224 interrupt vectors on a path that saves state and returns")
+        session.wait_for("Legacy 8259 PICs remapped to 0x20..0x2F and fully masked")
         session.wait_for("Dezh .dzp agent package (sum 1..=5 with a loop) on x86_64:")
         session.wait_for(".dzp verified: kind=dezh-ir, name=agent-sum")
         session.wait_for("[ir] => 15")
         session.wait_for("[ir] DENIED: agent holds no PRINT capability")
+        # W16.1: a hardware timer interrupt that returns. The exception
+        # assertions further down still end in halt — this path is the other
+        # kind, where the interrupted work has to carry on afterwards.
+        session.wait_for("[timer] Local APIC enabled, id=")
+        # The rate is measured against the PIT, never assumed, so the count
+        # itself is not asserted — only that a measurement was taken.
+        session.wait_for("LAPIC counts in 10 ms at divide-16 (APIC bus ")
+        session.wait_for("[timer] armed: vector 0x30, periodic, 100 Hz")
+        session.wait_for("ticks; the work loop completed ")
+        session.wait_for(
+            "[timer] interrupts returned: work resumed after every tick, checksum OK"
+        )
+        # Masking the timer stops the ticks while the same loop keeps running:
+        # what rules out the ticks having come from some other source.
+        session.wait_for("[timer] masked: tick count frozen at ")
         # M2: the IDT catches a deliberately-raised breakpoint instead of
         # triple-faulting the machine.
         session.wait_for("[trap] CPU exception 3 (breakpoint)")
