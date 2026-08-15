@@ -10,6 +10,7 @@
 //! stole the CPU from. Those stubs save every general-purpose register, call a
 //! dispatcher, restore them, and `iretq`.
 
+use crate::arch::gdt;
 use crate::arch::timer;
 use crate::console::{print, print_hex, print_i64};
 use crate::sched;
@@ -200,7 +201,7 @@ static IDT: Global<[IdtEntry; IDT_LEN]> = Global::new(
 fn gate(addr: u64) -> IdtEntry {
     IdtEntry {
         off_lo: addr as u16,
-        selector: 0x08, // 64-bit code segment from the boot GDT
+        selector: gdt::KERNEL_CS,
         ist: 0,
         attr: 0x8E, // present, DPL0, 64-bit interrupt gate
         off_mid: (addr >> 16) as u16,

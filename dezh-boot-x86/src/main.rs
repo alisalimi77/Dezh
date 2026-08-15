@@ -27,6 +27,7 @@ use core::panic::PanicInfo;
 #[no_mangle]
 pub extern "C" fn kmain() -> ! {
     console::init();
+    arch::gdt::init();
     arch::trap::init();
     arch::pic::remap_and_mask();
     print("\n");
@@ -34,6 +35,7 @@ pub extern "C" fn kmain() -> ! {
     print("IDT installed: 32 CPU-exception vectors (faults are reported, not silent)\n");
     print("  plus 224 interrupt vectors on a path that saves state and returns.\n");
     print("Legacy 8259 PICs remapped to 0x20..0x2F and fully masked.\n");
+    print("GDT replaced: kernel and user code/data segments, plus a TSS.\n");
 
     demos::agent::run();
     demos::timer::run();

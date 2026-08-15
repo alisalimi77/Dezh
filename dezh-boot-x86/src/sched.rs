@@ -9,6 +9,7 @@
 //! memory — isolation on x86 is not part of this step. The RISC-V kernel has
 //! that; this does not yet.
 
+use crate::arch::gdt;
 use crate::arch::timer;
 use crate::global::Global;
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -37,6 +38,10 @@ struct Task {
     /// Where this task's saved frame sits. Meaningless while the task is the one
     /// running, since its context is live in the CPU rather than on its stack.
     frame: u64,
+    /// Top of the stack the CPU must switch to when an interrupt arrives while
+    /// this task is running at CPL3. Zero for the boot task, which never leaves
+    /// ring 0 and therefore keeps whatever stack it is already on.
+    kstack_top: u64,
     state: State,
 }
 
@@ -48,6 +53,7 @@ struct Task {
 static TASKS: Global<[Task; MAX_TASKS]> = Global::new(
     [Task {
         frame: 0,
+        kstack_top: 0,
         state: State::Idle,
     }; MAX_TASKS],
 );
@@ -94,7 +100,7 @@ unsafe fn build_frame(stack_top: *mut u8, entry: extern "C" fn() -> !) -> u64 {
     push(0); // ss: null is legal at CPL0 in long mode, and is what boot set
     push(top); // rsp the task runs on once iretq has restored it
     push(0x202); // rflags: interrupts enabled, plus the always-set bit 1
-    push(0x08); // cs: the 64-bit code segment from the boot GDT
+    push(gdt::KERNEL_CS as u64); // cs
     push(entry as usize as u64); // rip
     push(0); // the stub's dummy error code
     push(timer::VEC_TIMER as u64); // the stub's vector slot
@@ -119,6 +125,7 @@ pub(crate) fn spawn(id: usize, entry: extern "C" fn() -> !) {
             t,
             Task {
                 frame,
+                kstack_top: stack_top as u64,
                 state: State::Runnable,
             },
         );
@@ -133,6 +140,7 @@ pub(crate) fn start() {
             t,
             Task {
                 frame: 0,
+                kstack_top: 0,
                 state: State::Runnable,
             },
         );
@@ -197,6 +205,14 @@ pub(crate) fn on_tick(frame: u64) -> u64 {
     }
     if next == cur {
         return frame;
+    }
+
+    // Point the TSS at the incoming task's own kernel stack before resuming it.
+    // It has no effect while every task runs in ring 0, and it is the difference
+    // between an isolated task and a broken one the moment one does not.
+    let kstack = unsafe { (*tasks.add(next)).kstack_top };
+    if kstack != 0 {
+        gdt::set_kernel_stack(kstack);
     }
 
     CURRENT.store(next, Ordering::Relaxed);
