@@ -54,14 +54,28 @@ SMOKE = ROOT / "tools" / "ci" / "qemu_smoke.py"
 # (pattern, what it is about, the demo that disproves it)
 RETIRED_CLAIMS: list[tuple[str, str, str]] = [
     (
+        # `no package signing` is the same escape as the lease entry below: the
+        # third alternative wants the word "implemented", and the whitepaper's
+        # limitations list said it in two words instead. Bare noun-phrase
+        # denials are how these sentences are actually written in a list.
         r"(checksums?[^.]{0,80}not production signatures"
         r"|not production signatures[^.]{0,80}checksums?"
-        r"|package signing is (?:not|un)implemented)",
+        r"|package signing is (?:not|un)implemented"
+        r"|no package signing)",
         "package signing",
         "sig-demo",
     ),
     (
+        # `there is no lease/revocation` is here because it got through. STATUS
+        # granted leases and `intent-revoke` in one bullet and denied them in
+        # another sixty lines later, and shipped that way for weeks: the first
+        # alternative below wants "there is no revocation" and the sentence read
+        # "there is no lease/revocation", so one slash bought it a pass. The
+        # docstring's warning that this lints phrasings rather than claims is
+        # not a hedge - this is what it looks like when it bites.
         r"(there is no revocation"
+        r"|there is no lease"
+        r"|no lease\s*/\s*revocation"
         r"|revocation is (?:not implemented|absent|unimplemented)"
         r"|no (?:lease|revocation) (?:mechanism|semantics) exists?)",
         "intent lease and revocation",
