@@ -138,11 +138,16 @@ long_mode_start:
 "#
 );
 
-// --- IDT: 32 CPU-exception stubs (M2) ----------------------------------------
-// Without an IDT any CPU exception triple-faults and resets the machine. These
-// stubs give every exception a uniform (vector, error, rip) frame and route it
-// to a Rust handler that reports it and halts — so a fault is diagnosable, not a
-// silent reboot. A returnable interrupt path (timer, IRQs) is future work.
+// --- IDT: 32 CPU-exception stubs, then 224 returnable interrupt stubs ---------
+// Without an IDT any CPU exception triple-faults and resets the machine. The
+// first 32 stubs give every exception a uniform (vector, error, rip) frame and
+// route it to a Rust handler that reports it and halts — so a fault is
+// diagnosable, not a silent reboot.
+//
+// Vectors 32..255 are a different path and must not end in halt: an interrupt
+// interrupts work that was going fine, so the stub has to hand control back to
+// the exact instruction it stole the CPU from. Those stubs save every
+// general-purpose register, call a dispatcher, restore them, and `iretq`.
 global_asm!(
     r#"
 .code64
@@ -201,6 +206,65 @@ isr_common:
 3:
     hlt
     jmp 3b
+
+/* Vectors 32..255. Generated with .rept, so no stub carries a label of its
+   own; instead every stub is padded to a fixed 16-byte stride and Rust computes
+   stub(v) = isr_ext_stubs + (v - 32) * 16. The padding is what makes that
+   arithmetic true: the assembler picks a 2-byte `push imm8` below vector 128
+   and a 5-byte `push imm32` at or above it, and relaxes `jmp` between 2 and 5
+   bytes, so the bodies are not all the same length. EXT_STUB_STRIDE in the
+   Rust side must stay equal to this .balign. */
+.balign 16
+.global isr_ext_stubs
+isr_ext_stubs:
+.set vecno, 32
+.rept 224
+    push 0            /* dummy error code: no vector >= 32 pushes a real one */
+    push vecno
+    jmp isr_ext_common
+    .balign 16
+.set vecno, vecno+1
+.endr
+
+/* The returnable path. On entry the CPU has pushed ss:rsp, rflags, cs:rip and
+   the stub has pushed (dummy error, vector). The CPU aligns rsp to 16 before
+   pushing its 5-qword frame, so 5 + 2 + 15 pushes leave rsp 16-byte aligned at
+   the `call`, which is what the SysV ABI requires of us. */
+isr_ext_common:
+    push rax
+    push rcx
+    push rdx
+    push rbx
+    push rbp
+    push rsi
+    push rdi
+    push r8
+    push r9
+    push r10
+    push r11
+    push r12
+    push r13
+    push r14
+    push r15
+    mov rdi, [rsp + 15*8]   /* vector, below the 15 saved registers */
+    call irq_dispatch
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop r11
+    pop r10
+    pop r9
+    pop r8
+    pop rdi
+    pop rsi
+    pop rbp
+    pop rbx
+    pop rdx
+    pop rcx
+    pop rax
+    add rsp, 16             /* drop the vector and the dummy error code */
+    iretq
 
 .section .rodata
 .align 8
@@ -357,10 +421,40 @@ impl dezh_core::ir::Host for SerialHost {
     }
 }
 
+// --- A mutable global that is not `static mut` -------------------------------
+// Same reasoning as the RISC-V kernel's `mm::global::Global`: `static mut` hands
+// out `&mut` to storage an interrupt handler can also reach, which is aliasing
+// UB, and edition 2024 rejects it outright. `Global<T>` keeps the storage and
+// the zero cost but only ever yields a raw pointer, so no reference to the
+// global exists. It does not make concurrent access safe by itself — each
+// declaration below states who may touch it and when.
+#[repr(transparent)]
+struct Global<T>(core::cell::UnsafeCell<T>);
+// Safety: no reference to the inner value is ever handed out; every access goes
+// through `get()` inside an `unsafe` block whose argument is recorded at the
+// declaration site.
+unsafe impl<T> Sync for Global<T> {}
+impl<T> Global<T> {
+    const fn new(value: T) -> Self {
+        Self(core::cell::UnsafeCell::new(value))
+    }
+    fn get(&self) -> *mut T {
+        self.0.get()
+    }
+}
+
 // --- IDT setup (Rust side) ---------------------------------------------------
 extern "C" {
     static isr_table: [u64; 32];
+    /// First byte of the vector-32..255 stub table; the stubs have no labels of
+    /// their own, only a fixed stride (see the .rept block above).
+    static isr_ext_stubs: u8;
 }
+
+/// Bytes between two consecutive entries of `isr_ext_stubs`. Must equal the
+/// `.balign` inside the .rept block.
+const EXT_STUB_STRIDE: usize = 16;
+const IDT_LEN: usize = 256;
 
 #[repr(C, packed)]
 #[derive(Clone, Copy)]
@@ -380,35 +474,75 @@ struct IdtPtr {
     base: u64,
 }
 
-static mut IDT: [IdtEntry; 32] = [IdtEntry {
-    off_lo: 0,
-    selector: 0,
-    ist: 0,
-    attr: 0,
-    off_mid: 0,
-    off_hi: 0,
-    zero: 0,
-}; 32];
+/// The IDT. Written once by `idt_init` on the boot CPU before interrupts are
+/// enabled, and read by the CPU only thereafter; nothing else touches it.
+static IDT: Global<[IdtEntry; IDT_LEN]> = Global::new(
+    [IdtEntry {
+        off_lo: 0,
+        selector: 0,
+        ist: 0,
+        attr: 0,
+        off_mid: 0,
+        off_hi: 0,
+        zero: 0,
+    }; IDT_LEN],
+);
+
+fn idt_gate(addr: u64) -> IdtEntry {
+    IdtEntry {
+        off_lo: addr as u16,
+        selector: 0x08, // 64-bit code segment from the boot GDT
+        ist: 0,
+        attr: 0x8E, // present, DPL0, 64-bit interrupt gate
+        off_mid: (addr >> 16) as u16,
+        off_hi: (addr >> 32) as u32,
+        zero: 0,
+    }
+}
 
 fn idt_init() {
     unsafe {
-        for i in 0..32 {
-            let addr = isr_table[i];
-            IDT[i] = IdtEntry {
-                off_lo: addr as u16,
-                selector: 0x08, // 64-bit code segment from the boot GDT
-                ist: 0,
-                attr: 0x8E, // present, DPL0, 64-bit interrupt gate
-                off_mid: (addr >> 16) as u16,
-                off_hi: (addr >> 32) as u32,
-                zero: 0,
-            };
+        let base = IDT.get() as *mut IdtEntry;
+        for (i, &addr) in isr_table.iter().enumerate() {
+            core::ptr::write(base.add(i), idt_gate(addr));
+        }
+        let ext = core::ptr::addr_of!(isr_ext_stubs) as u64;
+        for i in 32..IDT_LEN {
+            let addr = ext + ((i - 32) * EXT_STUB_STRIDE) as u64;
+            core::ptr::write(base.add(i), idt_gate(addr));
         }
         let ptr = IdtPtr {
-            limit: (core::mem::size_of::<[IdtEntry; 32]>() - 1) as u16,
-            base: core::ptr::addr_of!(IDT) as u64,
+            limit: (core::mem::size_of::<[IdtEntry; IDT_LEN]>() - 1) as u16,
+            base: base as u64,
         };
         asm!("lidt [{}]", in(reg) &ptr, options(nostack));
+    }
+}
+
+// --- Legacy 8259 PICs: remapped out of the way, then fully masked ------------
+// At reset the two 8259s deliver IRQ0..15 on vectors 0x08..0x0F and 0x70..0x77 —
+// on top of the CPU exception vectors. A single stray legacy IRQ would then be
+// reported as a double fault or a coprocessor overrun. We move them to
+// 0x20..0x2F and mask every line: this kernel takes its timer from the Local
+// APIC, so nothing should arrive here, and if a line ever unmasks itself the
+// vector it lands on says plainly which one it was.
+fn pic_remap_and_mask() {
+    unsafe {
+        let io_wait = || outb(0x80, 0);
+        outb(0x20, 0x11); // ICW1: init, expect ICW4
+        outb(0xA0, 0x11);
+        io_wait();
+        outb(0x21, 0x20); // ICW2: master vector base
+        outb(0xA1, 0x28); // ICW2: slave vector base
+        io_wait();
+        outb(0x21, 0x04); // ICW3: slave on master IRQ2
+        outb(0xA1, 0x02); // ICW3: slave cascade identity
+        io_wait();
+        outb(0x21, 0x01); // ICW4: 8086 mode
+        outb(0xA1, 0x01);
+        io_wait();
+        outb(0x21, 0xFF); // OCW1: mask every line
+        outb(0xA1, 0xFF);
     }
 }
 
@@ -451,15 +585,36 @@ extern "C" fn exception_handler(vector: u64, error: u64, rip: u64) -> ! {
     }
 }
 
+/// Called from `isr_ext_common` for vectors 32..255, with interrupts off.
+///
+/// Everything this returns from resumes the interrupted instruction stream, so
+/// it must stay short and must not print on the normal path: `print` walks the
+/// VGA cursor, and a handler that printed could interleave with a print the
+/// interrupted code was halfway through. The one path that does print is the
+/// one that never returns.
+#[no_mangle]
+extern "C" fn irq_dispatch(vector: u64) {
+    print("\n[trap] interrupt vector ");
+    print_i64(vector as i64);
+    print(" arrived with no handler installed.\n");
+    print("[trap] halting (no ambient recovery).\n");
+    loop {
+        unsafe { asm!("hlt") };
+    }
+}
+
 #[no_mangle]
 pub extern "C" fn kmain() -> ! {
     use dezh_core::ir;
     serial_init();
     vga_clear();
     idt_init();
+    pic_remap_and_mask();
     print("\n");
     print("Dezh x86_64 - long mode reached. 64-bit kernel running.\n");
-    print("IDT installed: 32 CPU-exception vectors (faults are reported, not silent).\n");
+    print("IDT installed: 32 CPU-exception vectors (faults are reported, not silent)\n");
+    print("  plus 224 interrupt vectors on a path that saves state and returns.\n");
+    print("Legacy 8259 PICs remapped to 0x20..0x2F and fully masked.\n");
 
     // Install and run a real .dzp package (F3, D003/D016): the SAME Dezh-IR bytes
     // the RISC-V kernel runs, wrapped in the SAME architecture-independent .dzp
