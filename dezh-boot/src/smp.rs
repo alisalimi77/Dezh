@@ -33,6 +33,15 @@ use crate::arch::timer::{rdtime, sbi_set_timer, QUANTUM, STIE};
 /// already stripped by the caller.
 const SCAUSE_TIMER: usize = 5;
 
+/// How long an idle secondary hart sleeps before re-checking for work.
+///
+/// Deliberately shorter than `QUANTUM`: this is a wake-up latency the SMP
+/// rounds pay, not a scheduling slice. At the 10 MHz `rdtime` of the `virt`
+/// board it is about a millisecond, which is invisible next to the bounded spin
+/// the boot hart already allows a round, and far cheaper than the alternative -
+/// a hart spinning here costs the console real throughput on an emulated host.
+const IDLE_TICK: u64 = 10_000;
+
 //
 // Honest scope. The boot hart runs the OS: the scheduler and every kernel data
 // structure are single-threaded `static mut`, so a symmetric scheduler over them
@@ -719,14 +728,40 @@ extern "C" fn hart_main(hartid: usize) -> ! {
 
     let mut served = SMP_GEN.load(Ordering::Acquire);
     loop {
-        // Wait for the boot hart to open a new round. spin_loop (not wfi) so a
-        // TCG round-robin host keeps making progress and we wake promptly. While
-        // waiting, also pick up a U-mode task the boot hart posted to this hart.
+        // Wait for the boot hart to open a new round, and pick up any U-mode
+        // task posted here while waiting.
+        //
+        // This used to spin unconditionally, on the reasoning that a TCG
+        // round-robin host keeps making progress that way and the hart wakes
+        // promptly. Both halves are true and the cost was not being counted: on
+        // TCG every vCPU shares one host budget, so harts spinning here take it
+        // from the hart running the console — which is the hart draining the
+        // UART. Pasting a 64-character line lands 8/10 intact at `-smp 1`, 2/8
+        // at `-smp 4`, and 0/3 at `-smp 8`, where most lines never arrive at
+        // all. That is issue #19, and it was never a race: it is starvation.
         while SMP_GEN.load(Ordering::Acquire) == served {
             if AP_SCHED_ON.load(Ordering::Acquire) {
+                // A U-mode scheduling window is open, so the boot hart may post
+                // work at any moment and the demos measure how much overlap it
+                // gets. Stay hot here; the window is short and bounded.
                 unsafe { ap_schedule(hartid) };
+                core::hint::spin_loop();
+                continue;
             }
-            core::hint::spin_loop();
+            // Nothing to do. Sleep instead of burning the shared budget.
+            //
+            // `sie.STIE` is set so the timer is *locally* enabled, which is what
+            // makes `wfi` resume; `sstatus.SIE` stays clear so no trap is taken
+            // when it does. That distinction is load-bearing: this loop runs in
+            // S-mode with `stvec` at zero, so an actual trap here would jump to
+            // address zero. The spec grants exactly this - `wfi` resumes for a
+            // locally enabled interrupt regardless of the global enable.
+            unsafe {
+                sbi_set_timer(rdtime() + IDLE_TICK);
+                asm!("csrs sie, {}", in(reg) STIE);
+                asm!("wfi");
+                asm!("csrc sie, {}", in(reg) STIE);
+            }
         }
         served = SMP_GEN.load(Ordering::Acquire);
 

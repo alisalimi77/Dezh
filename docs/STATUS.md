@@ -143,15 +143,18 @@ true today, so a reviewer never has to guess.
   and revocation status, which this bullet used to deny and the list above
   grants, see that entry — leases and `intent-revoke` are real, in-flight
   clawback is not. See [Threat model](SECURITY_MODEL.md#threat-model).
-- **Console input can still be lost under `-smp 4`.** UART0 is now routed
-  through the PLIC and both the handler and `getc` drain the FIFO into a ring, so
-  a pasted line survives on the single-hart boot the guide gives: twelve of
-  twelve 64-character lines arrive intact, against two of eight before. Under
-  `-smp 4` the same test still loses characters at the same rate as before, and
-  the cause is not yet found — the ring's own accounting (`irq-stat` reports
-  ring-full drops) stays at zero, so the bytes are going missing before any
-  drain runs. Paste with more than one hart at your own risk; the SMP demos
-  themselves send short lines and are unaffected. Tracked as issue #19.
+- **Console input is reliable but not perfect.** UART0 is routed through the
+  PLIC and both the interrupt handler and `getc` drain the FIFO into a ring, so
+  a pasted line no longer depends on the console happening to be inside `getc`.
+  Pasting 64-character lines: 9/10 at `-smp 1`, 8/9 at `-smp 2`, 10/10 at
+  `-smp 4`, 8/9 at `-smp 8`. What is **gone** is the collapse with hart count —
+  the same test was 2/8 at `-smp 4` and 0/3 at `-smp 8`, where most lines never
+  arrived at all. That was never a race: idle secondary harts spun, and on an
+  emulated host every vCPU shares one budget, so they took it from the hart
+  draining the UART. They now sleep. What **remains** is occasional loss at every
+  hart count, cause not yet identified; `irq-stat` reports the ring's own
+  full-count, which stays at zero, so the bytes go missing before any drain runs.
+  Tracked as issue #19.
 - **In-kernel U-mode task caveat (RISC-V).** Some baked demo tasks share the
   kernel binary and must avoid non-inlined calls; real apps use the separate-ELF
   and `.dzp` loader paths, which do not have this constraint.
