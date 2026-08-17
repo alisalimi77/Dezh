@@ -148,7 +148,9 @@ pub(crate) fn run() {
 
     // The boot task is task 0 and is preempted along with the rest; this loop is
     // what it does with its turns.
-    while DONE.load(Ordering::Relaxed) < WORKERS as u64 {}
+    while DONE.load(Ordering::Relaxed) < WORKERS as u64 {
+        core::hint::spin_loop();
+    }
 
     sched::stop();
     timer::cli();

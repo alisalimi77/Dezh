@@ -224,7 +224,9 @@ pub(crate) fn run() {
     sched::start();
     timer::sti();
 
-    while EXITS.load(Ordering::Relaxed) < 2 {}
+    while EXITS.load(Ordering::Relaxed) < 2 {
+        core::hint::spin_loop();
+    }
 
     sched::stop();
     timer::cli();

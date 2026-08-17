@@ -204,7 +204,9 @@ pub(crate) fn run() {
     sched::start();
     timer::sti();
 
-    while EXITED.load(Ordering::Relaxed) == 0 {}
+    while EXITED.load(Ordering::Relaxed) == 0 {
+        core::hint::spin_loop();
+    }
 
     sched::stop();
     timer::cli();
