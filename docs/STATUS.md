@@ -87,12 +87,17 @@ true today, so a reviewer never has to guess.
   is still single-hart.** Secondary harts come up via SBI HSM, the kernel has a fair
   spinlock, several harts drain one shared queue, and real U-mode tasks are
   scheduled symmetrically across harts with per-task address spaces keeping them
-  isolated (`smp-sched`, `smp-isolate`). What is **not** done: tasks on secondary
-  harts run to completion — **no preemption or migration there** (no timer armed on
-  a secondary yet) — and the *console's* scheduler with its task table, IPC
+  isolated (`smp-sched`, `smp-isolate`). A secondary hart now also arms **its own
+  timer** while a U-mode task runs there, so such a task is interrupted and
+  resumed instead of owning the hart until it exits — `smp-preempt` reports the
+  tick count for the specific hart that ran the task, and refuses to claim
+  success if the task landed on the boot hart, which has preempted since W9.
+  What is **not** done: that interrupt only resumes the task, it does not yet
+  pick a *different* one, so there is still **no migration** and no scheduling
+  decision on a secondary. The *console's* scheduler with its task table, IPC
   mailboxes and frame allocator is still single-threaded on the boot hart and not
   under the lock, so daemons and console tasks are not yet dispatchable on any hart.
-  Merging the two into one lock-protected scheduler is **W13** (see
+  Merging the two into one lock-protected scheduler is the rest of **W13** (see
   [ROADMAP.md](ROADMAP.md)).
 - No production installer, no side-channel hardening, no formal verification.
 - **The live capabilities are a per-task bitmask; the object-capability

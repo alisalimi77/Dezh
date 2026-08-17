@@ -9,11 +9,11 @@ use core::sync::atomic::Ordering;
 
 use crate::smp::{
     ap_free_slot, ap_prepare_slot, ap_run_batch, smp_round,
-    AP_LIVE_MAX, AP_SLOTS, AP_SLOT_EXIT, AP_SLOT_FAULT, AP_SLOT_HART, AP_SLOT_RUNS, BOOT_HART,
-    HARTS_ONLINE, MAX_HARTS, NJOBS, SMP_LOCK_WORK, SMP_STARTED, SMP_WORK,
+    AP_LIVE_MAX, AP_SLOTS, AP_SLOT_EXIT, AP_SLOT_FAULT, AP_SLOT_HART, AP_SLOT_RUNS, AP_SPIN_ITERS,
+    BOOT_HART, HARTS_ONLINE, HART_TICKS, MAX_HARTS, NJOBS, SMP_LOCK_WORK, SMP_STARTED, SMP_WORK,
 };
 use crate::mm::paging::task_stack_top;
-use crate::smp::{ap_rogue_task, ap_worker_task};
+use crate::smp::{ap_rogue_task, ap_spin_task, ap_worker_task};
 use crate::{kprint, kprintln};
 
 /// Interactive `smp-demo`: re-run a parallel round and explain what it proves.
@@ -84,6 +84,62 @@ pub(crate) fn run_smp_demo() {
     );
     kprintln!("[smp] proven: several harts drain one shared run queue under a lock, each item exactly once - the core of a symmetric scheduler.");
     kprintln!("[smp] next: make each job a U-mode task dispatch (needs per-hart trap state + address-space switch); see ROADMAP.");
+}
+
+/// Interactive `smp-preempt`: prove a secondary hart's own timer interrupts a
+/// U-mode task running there.
+///
+/// The gap this closes, in W9's own words: tasks on secondary harts ran to
+/// completion, with no timer armed there. A task that did not exit owned that
+/// hart, and the boot hart's timer could not help - it is a different hart's
+/// timer. The evidence is per-hart on purpose: a single total would be satisfied
+/// by the boot hart, which has been preempting since W9.
+pub(crate) fn run_smp_preempt_demo() {
+    let boot = BOOT_HART.load(Ordering::Relaxed);
+    if SMP_STARTED.load(Ordering::Relaxed) == 0 {
+        kprintln!("[smp-preempt] no secondary harts. Launch QEMU with -smp N.");
+        return;
+    }
+    kprintln!(
+        "[smp-preempt] running a task on a secondary hart that never yields ({AP_SPIN_ITERS} iterations, longer than one quantum)"
+    );
+
+    let before: [u64; MAX_HARTS] =
+        core::array::from_fn(|h| HART_TICKS[h].load(Ordering::Relaxed));
+
+    if !ap_prepare_slot(0, ap_spin_task as *const () as usize, 0) {
+        kprintln!("[smp-preempt] out of frames while building the task's address space.");
+        return;
+    }
+    let ok = ap_run_batch(1);
+    let hart = AP_SLOT_HART[0].load(Ordering::Relaxed) as usize;
+    let faulted = AP_SLOT_FAULT[0].load(Ordering::Relaxed);
+    ap_free_slot(0);
+
+    if !ok {
+        kprintln!("[smp-preempt] TIMEOUT: no hart reported the task done.");
+        return;
+    }
+    if faulted {
+        kprintln!("[smp-preempt] the task FAULTED on hart {hart}.");
+        return;
+    }
+    if hart >= MAX_HARTS {
+        kprintln!("[smp-preempt] the task reported an impossible hart id {hart}.");
+        return;
+    }
+
+    let took = HART_TICKS[hart].load(Ordering::Relaxed) - before[hart];
+    kprintln!("[smp-preempt] the task ran on hart {hart} (boot hart is {boot}) and exited");
+    kprintln!("[smp-preempt] timer interrupts taken ON THAT HART while it ran = {took}");
+    if hart != boot && took > 0 {
+        kprintln!("[smp-preempt] {took} interrupts on hart {hart}, task resumed each time -> PREEMPT-OK");
+        kprintln!("[smp-preempt] what this does NOT yet show: the hart choosing a DIFFERENT task. That needs the console's task table under a lock; see ROADMAP W13.");
+    } else if hart == boot {
+        kprintln!("[smp-preempt] INCONCLUSIVE - the task landed on the boot hart, which has had a timer since W9. Try more harts.");
+    } else {
+        kprintln!("[smp-preempt] FAILED - no timer interrupt arrived on hart {hart}; it still runs U-mode uninterruptibly.");
+    }
 }
 
 /// Interactive `smp-task`: dispatch one real U-mode task onto a secondary hart and

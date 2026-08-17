@@ -718,6 +718,21 @@ def run_riscv64(qemu: str, kernel: Path) -> None:
                     "a U-mode task ran to completion on a hart other than the boot hart",
                 ],
             ),
+            # A secondary hart's OWN timer interrupts a U-mode task running there.
+            # Until W13 step 1 no timer was armed on a secondary, so a task that
+            # did not exit owned that hart outright - the boot hart's timer is a
+            # different hart's timer and cannot preempt it. PREEMPT-OK is only
+            # printed when the task landed off the boot hart AND that hart's tick
+            # count moved, so a regression that stops arming the timer fails here
+            # rather than passing quietly on the boot hart's own preemption.
+            (
+                "smp-preempt",
+                [
+                    "a U-mode task on a secondary hart that never yields",
+                    "finished - and it was interrupted on the way",
+                    "-> PREEMPT-OK",
+                ],
+            ),
             # Symmetric scheduling: one task queue, every hart pulling from it,
             # several U-mode tasks executing at the same instant on different harts.
             (

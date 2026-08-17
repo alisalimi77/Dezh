@@ -578,6 +578,23 @@ from "several convincing demos" to "an operating system".
 *Acceptance:* a daemon migrates between harts under load; a task on a secondary
 is preempted by that hart's own timer; `smp-*` and every existing demo unchanged.
 
+**Step 1 — done: a secondary hart's own timer.** `ap_execute` arms the timer and
+sets `sie.STIE` around the U-mode window, and the per-hart trap path services the
+tick and resumes. `smp-preempt` is the evidence and is deliberately narrow: it
+counts ticks for the *specific* hart the task ran on, and prints `INCONCLUSIVE`
+rather than success if that hart was the boot hart. The negative control was run
+— with the arming line removed the same demo reports zero ticks and `FAILED`.
+Asserted in `tools/ci/qemu_smoke.py`.
+
+This buys the second half of the acceptance and none of the first. The tick
+resumes the interrupted task; it does not choose another, because choosing means
+reading a task table that is still `Global<T>` on the boot hart with no lock.
+
+**Step 2 — next: the console's tables under one lock.** `sched.rs` says it
+itself: "every `Global` here needs a concurrency argument stronger than *only one
+hart reaches it*". That is the real body of W13, and W14 waits on it because the
+task table is the thing object-capabilities have to be threaded through.
+
 ##### W14 — Object-capabilities as the live substrate (P4)
 
 `docs/STATUS.md` calls this "the single largest planned change", and it is still

@@ -27,6 +27,11 @@ use crate::{SYS_EXIT, SYS_PRINT};
 use crate::{
     _hart_start, kprintln, sys_exit, sys_print, Uart, SYS_DENIED,
 };
+use crate::arch::timer::{rdtime, sbi_set_timer, QUANTUM, STIE};
+
+/// `scause` code for a supervisor timer interrupt, with the interrupt bit
+/// already stripped by the caller.
+const SCAUSE_TIMER: usize = 5;
 
 //
 // Honest scope. The boot hart runs the OS: the scheduler and every kernel data
@@ -265,6 +270,11 @@ pub(crate) static SMP_GEN: AtomicU64 = AtomicU64::new(0); // round counter the b
 pub(crate) static SMP_COUNTER: AtomicU64 = AtomicU64::new(0); // the shared target of the parallel work
 pub(crate) static HART_RAN: [AtomicBool; MAX_HARTS] = [const { AtomicBool::new(false) }; MAX_HARTS];
 pub(crate) static HART_ROUNDS: [AtomicU64; MAX_HARTS] = [const { AtomicU64::new(0) }; MAX_HARTS];
+/// Supervisor timer interrupts each hart has taken while a U-mode task ran on
+/// it. Per hart rather than one counter, because the claim being made is that a
+/// secondary is interrupted by *its own* timer - a single total could be
+/// satisfied entirely by the boot hart, which has had a timer since W9.
+pub(crate) static HART_TICKS: [AtomicU64; MAX_HARTS] = [const { AtomicU64::new(0) }; MAX_HARTS];
 
 /// A fair ticket spinlock. This is the load-bearing primitive for symmetric
 /// scheduling: a run queue shared by more than one hart cannot exist without
@@ -519,6 +529,31 @@ pub(crate) extern "C" fn ap_worker_task(slot: usize) -> ! {
     sys_exit(slot)
 }
 
+/// A U-mode task that never yields, long enough to outrun a scheduling quantum.
+///
+/// `ap_worker_task` spins too, but only far enough to show a syscall being
+/// serviced off the boot hart - whether it crosses a quantum depends on how fast
+/// the host emulates, which is not something to assert on. This one is sized so
+/// that it cannot finish inside one, so "the hart's timer fired" is a claim
+/// about the kernel rather than about the host's speed.
+#[link_section = ".user.text"]
+#[no_mangle]
+pub(crate) extern "C" fn ap_spin_task(slot: usize) -> ! {
+    sys_print(b"  [ap-spin] a U-mode task on a secondary hart that never yields\n");
+    let mut i = 0usize;
+    while i < AP_SPIN_ITERS {
+        unsafe { asm!("nop") };
+        i += 1;
+    }
+    sys_print(b"  [ap-spin] finished - and it was interrupted on the way\n");
+    sys_exit(slot)
+}
+
+/// Chosen by measurement, not by feel: at 10 MHz `rdtime` a `QUANTUM` of 50,000
+/// is ~5 ms, and this many iterations takes comfortably longer than that under
+/// QEMU TCG, which is the slowest thing CI runs on.
+pub(crate) const AP_SPIN_ITERS: usize = 40_000_000;
+
 /// A U-mode task that reaches into ANOTHER task's stack (address in `a1`). With
 /// per-task address spaces that page is not mapped U here, so it must fault.
 #[link_section = ".user.text"]
@@ -547,7 +582,31 @@ extern "C" fn ap_trap_handler(frame: *mut usize) -> *const usize {
     let f = unsafe { &mut *(frame as *mut [usize; 32]) };
 
     if interrupt {
-        // The AP enables no interrupts while running a task; ignore and resume.
+        // Supervisor timer. Until now the AP ran with interrupts masked, so a
+        // U-mode task on a secondary held that hart until it exited: no timer
+        // was armed there and nothing could take the CPU back. The hart now
+        // arms its own timer before entering U-mode, so this arrives on the
+        // hart the task is running on, is serviced there, and the task resumes.
+        //
+        // Resuming rather than switching is the whole of the change: this hart
+        // still runs one task to completion. What it no longer does is run it
+        // *uninterruptibly*. Choosing a different task here is the next step,
+        // and it needs the console's task table under a lock first.
+        if code == SCAUSE_TIMER {
+            // Which hart this is, without reading `tp` - the task owns `tp` and
+            // the trap path is required not to touch it. `ap_execute` recorded
+            // the hart in `AP_SLOT_HART` before entering U-mode, and `slot`
+            // reached us through `sscratch`, so the answer is already here.
+            if slot < AP_SLOTS {
+                let hid = AP_SLOT_HART[slot].load(Ordering::Relaxed) as usize;
+                if hid < MAX_HARTS {
+                    HART_TICKS[hid].fetch_add(1, Ordering::Relaxed);
+                }
+            }
+            sbi_set_timer(rdtime() + QUANTUM);
+            return frame;
+        }
+        // Anything else: the AP enables no other interrupt source.
         return frame;
     }
     if code == 8 {
@@ -612,9 +671,23 @@ unsafe fn ap_execute(hartid: usize, slot: usize) {
     asm!("csrw stvec, {}", in(reg) utrap_ap as *const () as usize);
     asm!("csrs sstatus, {}", in(reg) 1usize << 18); // SUM: S-mode may read the task's U pages
 
+    // Arm this hart's own timer for the duration of the task. Before this the
+    // secondary ran U-mode with `sie.STIE` clear, so nothing could take the CPU
+    // back from a task that did not exit - the boot hart's timer is a different
+    // hart's timer and cannot preempt this one. `sstatus.SIE` is left alone:
+    // U-mode traps are taken regardless of it, and setting it would also expose
+    // the hart's kernel-mode stretches here, which is not what this step claims.
+    sbi_set_timer(rdtime() + QUANTUM);
+    asm!("csrs sie, {}", in(reg) STIE);
+
     let fp = core::ptr::addr_of!(ctx.frame) as *const usize;
     let kp = core::ptr::addr_of!(ctx.kctx) as *const usize;
     ap_run(fp, kp); // returns (via ap_return) when the task exits or faults
+
+    // Disarm before leaving U-mode behind: the hart's compute and queue rounds
+    // run in S-mode with no trap vector installed, so a timer arriving there
+    // would have nowhere to go.
+    asm!("csrc sie, {}", in(reg) STIE);
 
     // Back to bare mode so the hart's compute/queue rounds are unaffected.
     asm!("csrw stvec, {}", in(reg) 0usize);

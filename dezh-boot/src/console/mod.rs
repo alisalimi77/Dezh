@@ -526,6 +526,7 @@ pub(crate) fn dispatch(cmd: &str, arg: &str, plan: &KernelPlan, memory: &[Memory
         "cap-demo" => run_cap_demo(),
         "smp-demo" => run_smp_demo(),
         "smp-task" => run_smp_task_demo(),
+        "smp-preempt" => run_smp_preempt_demo(),
         "smp-sched" => run_smp_sched_demo(),
         "smp-isolate" => run_smp_isolate_demo(),
         "ns-revoke" => ns_revoke(plan, arg),
