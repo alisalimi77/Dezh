@@ -35,6 +35,10 @@ pub(crate) const PLIC_CONTEXT_STRIDE: usize = 0x1000;
 /// read by plic_handle. Defaults to context 1 (hart 0) until init runs.
 pub(crate) static PLIC_S_CLAIM: AtomicUsize = AtomicUsize::new(PLIC_CONTEXT_BASE + 0x1000 + 4);
 pub(crate) const VIRTIO_IRQ_BASE: u32 = 1;
+/// UART0 on the QEMU `virt` board. It went unrouted for as long as only the
+/// virtio slots were enabled here, which is why the console had to poll for
+/// input and lost whatever arrived while it was busy - see `dev::uart`.
+pub(crate) const UART_IRQ: u32 = 10;
 pub(crate) const SEIE: usize = 1 << 9;
 pub(crate) const VR_INTERRUPT_STATUS: usize = 0x060;
 pub(crate) const VR_INTERRUPT_ACK: usize = 0x064;
@@ -60,7 +64,9 @@ pub(crate) fn plic_init(boot_hart: usize) {
             write_volatile((PLIC_BASE + irq as usize * 4) as *mut u32, 1);
             irq += 1;
         }
-        let mask: u32 = ((1u32 << VIRTIO_MMIO_COUNT) - 1) << VIRTIO_IRQ_BASE;
+        write_volatile((PLIC_BASE + UART_IRQ as usize * 4) as *mut u32, 1);
+        let mask: u32 =
+            (((1u32 << VIRTIO_MMIO_COUNT) - 1) << VIRTIO_IRQ_BASE) | (1u32 << UART_IRQ);
         write_volatile(enable as *mut u32, mask);
         write_volatile(threshold as *mut u32, 0);
         asm!("csrs sie, {}", in(reg) SEIE);
@@ -76,6 +82,12 @@ pub(crate) fn plic_handle() -> u32 {
         let irq = read_volatile(claim as *const u32);
         if irq == 0 {
             return 0;
+        }
+        if irq == UART_IRQ {
+            // Emptying the receiver is what deasserts the UART's line, so this
+            // is the ACK as much as the read, and it has to happen before the
+            // `claim` write below or the PLIC re-raises immediately.
+            crate::dev::uart::rx_drain();
         }
         if irq >= VIRTIO_IRQ_BASE && irq < VIRTIO_IRQ_BASE + VIRTIO_MMIO_COUNT as u32 {
             let slot = (irq - VIRTIO_IRQ_BASE) as usize;
@@ -113,8 +125,13 @@ pub(crate) fn irq_stat() {
         IRQ_WAKEUPS.load(Ordering::Relaxed)
     );
     kprintln!(
-        "  source: PLIC S-mode context of the boot hart (claim @ {:#x}); virtio slots raise IRQ 1..8",
-        PLIC_S_CLAIM.load(Ordering::Relaxed)
+        "  source: PLIC S-mode context of the boot hart (claim @ {:#x}); virtio slots raise IRQ 1..8, UART0 raises IRQ {}",
+        PLIC_S_CLAIM.load(Ordering::Relaxed),
+        UART_IRQ
     );
     kprintln!("  before this, every device wait was a busy-loop; devices can now report completion");
+    kprintln!(
+        "  console input dropped by a full receive ring = {} (non-zero means input outran the console by more than 256 bytes)",
+        crate::dev::uart::RX_OVERRUNS.load(Ordering::Relaxed)
+    );
 }

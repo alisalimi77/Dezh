@@ -138,6 +138,15 @@ true today, so a reviewer never has to guess.
   and revocation status, which this bullet used to deny and the list above
   grants, see that entry — leases and `intent-revoke` are real, in-flight
   clawback is not. See [Threat model](SECURITY_MODEL.md#threat-model).
+- **Console input can still be lost under `-smp 4`.** UART0 is now routed
+  through the PLIC and both the handler and `getc` drain the FIFO into a ring, so
+  a pasted line survives on the single-hart boot the guide gives: twelve of
+  twelve 64-character lines arrive intact, against two of eight before. Under
+  `-smp 4` the same test still loses characters at the same rate as before, and
+  the cause is not yet found — the ring's own accounting (`irq-stat` reports
+  ring-full drops) stays at zero, so the bytes are going missing before any
+  drain runs. Paste with more than one hart at your own risk; the SMP demos
+  themselves send short lines and are unaffected. Tracked as issue #19.
 - **In-kernel U-mode task caveat (RISC-V).** Some baked demo tasks share the
   kernel binary and must avoid non-inlined calls; real apps use the separate-ELF
   and `.dzp` loader paths, which do not have this constraint.
