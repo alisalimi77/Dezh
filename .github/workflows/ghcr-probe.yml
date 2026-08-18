@@ -41,51 +41,39 @@ jobs:
           set +e
           echo "package: $IMAGE"
 
-          # 1. The registry token exchange. Its `access` claim is the answer: if
-          #    push is not granted here, `docker push` cannot succeed. The raw
-          #    response is printed first, because the failures worth seeing are
-          #    the ones that do not come back as the JSON we expected.
+          # 1. The registry token exchange. It issues a token even when the
+          #    scope it grants is narrower than the one asked for, so this alone
+          #    proves nothing - it is here to separate "no credential at all"
+          #    from "credential without write authority".
           resp=$(curl -sS -u "$ACTOR:$TOKEN" "https://ghcr.io/token?scope=repository:${IMAGE}:pull,push&service=ghcr.io" 2>&1)
-          echo "--- token response (first 600 bytes) ---"
-          echo "$resp" | head -c 600
-          echo
-          echo "----------------------------------------"
-
           jwt=$(echo "$resp" | jq -r '.token // empty' 2>/dev/null)
           if [ -z "$jwt" ]; then
-            echo "RESULT: no token issued - see the response above"
+            echo "RESULT: no token issued"
+            echo "$resp" | head -c 600
             exit 1
           fi
+          echo "token issued"
 
-          # The granted scope lives in the JWT payload, which is base64url.
-          payload=$(echo "$jwt" | cut -d. -f2 | tr '_-' '/+')
-          case $(( ${#payload} % 4 )) in
-            2) payload="${payload}==" ;;
-            3) payload="${payload}=" ;;
-          esac
-          actions=$(echo "$payload" | base64 -d 2>/dev/null | jq -r '[.access[]?.actions[]?] | join(",")')
-          echo "granted actions: ${actions:-(none)}"
-
-          # 2. Exercise it. A blob upload session is the first thing `docker
-          #    push` does and the step that returned the denial. 202 means we
-          #    may write; 403 is the failure we are chasing. Nothing is
-          #    committed, so no tag or version appears on the package.
+          # 2. The verdict, and the only thing that decides it. Opening a blob
+          #    upload session is the first write `docker push` performs and the
+          #    step that returned `denied: permission_denied: write_package`.
+          #    202 means this repository may write to the package; 403 is the
+          #    failure. An opened session commits nothing, so no tag or version
+          #    appears.
+          #
+          #    An earlier version of this probe also decoded the token's `access`
+          #    claim and let that decide. The decode failed on its own base64
+          #    handling and reported DENIED while the upload session returned
+          #    202 - the probe contradicting its own evidence. The claim is gone;
+          #    the request that actually gets refused is what answers.
           code=$(curl -sS -o /tmp/body -w '%{http_code}' -X POST -H "Authorization: Bearer $jwt" "https://ghcr.io/v2/${IMAGE}/blobs/uploads/")
           echo "blob upload session: HTTP $code"
           head -c 400 /tmp/body 2>/dev/null
           echo
 
-          case "$actions" in
-            *push*)
-              if [ "$code" = "202" ]; then
-                echo "RESULT: PUSH AUTHORISED - restore the publish steps in release.yml"
-                exit 0
-              fi
-              echo "RESULT: token granted push, registry refused the upload ($code)"
-              exit 1
-              ;;
-            *)
-              echo "RESULT: STILL DENIED - the package's Actions access does not include this repository"
-              exit 1
-              ;;
-          esac
+          if [ "$code" = "202" ]; then
+            echo "RESULT: PUSH AUTHORISED - restore the publish steps in release.yml"
+            exit 0
+          fi
+          echo "RESULT: DENIED - the package's Actions access does not give this repository write"
+          exit 1
