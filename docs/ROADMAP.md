@@ -400,6 +400,80 @@ smoke-test edit is a step that got something wrong.
 
 ---
 
+#### Cross-ISA status, and where the two kernels actually diverge
+
+W5 and W16 are the only workstreams with x86 in the title, and reading the rest
+of this file it would be easy to conclude that everything else is ISA-neutral.
+It is not. Every workstream from W8 onward has landed on RISC-V alone, and this
+section exists so that fact is stated once, in a table, rather than inferred
+from silence.
+
+**What is genuinely shared.** `dezh-core` — 2,228 lines of `mcap`, `dzp`, `ir`,
+`sig`, `ocap`, `difc`, `b64`. Both kernels execute the same pinned `.dzp` bytes
+(`demo_sum_bytes_are_pinned`, in CI), and both derive authority through
+`mcap`'s `requested ∩ ceiling`. That is the whole of the shared surface: x86
+reaches `dezh_core::{mcap, dzp, ir}` and nothing else, and it does not depend on
+`dezh-kernel` at all — even though `dezh-kernel` already models
+`BootTarget::QemuVirtioX86_64`.
+
+| Capability | RISC-V | x86_64 | Why the gap |
+|---|---|---|---|
+| Boots, long/S-mode, own page tables | yes | yes | — |
+| Runs the pinned `.dzp` / Dezh-IR package | yes | yes | the F3 claim; the point of `dezh-core` |
+| Authority as `requested ∩ ceiling` | yes | yes | shared `mcap` |
+| Timer, returnable IRQ path | yes | yes | W9 / W16.1 |
+| Preemptive scheduler, ring 3, per-task address space | yes | yes | W9 / W16.2–3 |
+| Bootable ISO (GRUB, VirtualBox) | no | yes | the one place x86 is ahead; RISC-V boots via `-kernel` |
+| Console (941 lines vs 56) | yes | no | never built on x86 |
+| Device IRQs (PLIC), blocking, `irq_wait` | yes | no | W16 remainder |
+| Disk, virtio-block driver | yes | no | W16 remainder; blocks Cairn and the ledger |
+| IPC (typed, timeouts, mailboxes) | yes | no | no counterpart in x86's task model |
+| Cairn (commit log, namespaces, rollback) | yes | no | needs a disk first |
+| Effect ledger (Sand), mission (Sfar) | yes | no | needs Cairn first |
+| DIFC taint, Marz egress, ocap tables | yes | no | never built on x86 |
+| Pol (foreign Linux binary) | yes | no | RISC-V-specific by nature (Linux syscall ABI per ISA) |
+| Package install lifecycle (`pkg.rs`, 3,059 lines) | yes | no | needs a disk first |
+| SMP: several harts, one scheduler (W13) | in progress | no | no x86 AP bring-up at all |
+
+**The divergence that actually costs money is not the missing features — it is
+the data model underneath them.** These two schedulers were derived twice,
+independently, and they do not agree on what a task *is*:
+
+| | `dezh-boot/src/sched.rs` | `dezh-boot-x86/src/sched.rs` |
+|---|---|---|
+| size | 1,203 lines | 437 lines |
+| task state | `Unused / Ready / Blocked / Done` | `Idle / Runnable` |
+| the running task | `[usize; MAX_HARTS]`, `NO_TASK` doubling as the run claim | one `AtomicUsize` |
+| saved frame | 33 slots (32 registers + the dispatching hart) | 22 qwords |
+| blocking, IPC, resource accounting | yes | none |
+
+So a step like W13 cannot be *ported* to x86; it would have to be re-derived,
+because there is no `Blocked` state to teach about harts and no claim to make
+per-hart. Every deep change from here is paid for twice unless something
+changes.
+
+**What we are choosing, deliberately.** Not parity. D021's claim is that the ISA
+is an implementation backend, and what that claim needs is for x86 to have a
+*runtime* — which W16.1–W16.4 delivered — not for x86 to have Cairn. So x86 is
+a second-class backend until W16 completes, and this file says so rather than
+implying otherwise by omission.
+
+**The rule going forward.** Every workstream below carries a `*Cross-ISA:*` line
+saying which of three it is: **shared** (lands once, in `dezh-core` or
+`dezh-kernel`), **RISC-V first** (will need re-deriving on x86, and W16 owns
+that debt), or **RISC-V only by design** (nothing to port). An entry with no
+such line is a gap in this ledger, not an ISA-neutral workstream.
+
+**The extraction question, and its answer for now.** The obvious fix to the
+double-payment is to lift the arch-independent half of the scheduler — task
+table, state machine, IPC, the run claim, the capability checks — into a crate
+behind a trait, leaving frame layout, trap assembly, `satp`/`cr3`, PLIC/APIC and
+SBI/ACPI on the arch side. That is the right end state and it is **not** the
+right next move: W13 is mid-surgery on exactly the interface such a trait would
+have to name, and an abstraction extracted from code that is still changing
+freezes the wrong shape. Order: finish W13, then extract, then make both kernels
+prove the same contract. Doing it in the other order costs the extraction twice.
+
 #### The order after W10, and why
 
 W11–W17 are ranked by one criterion: **how much other work each unblocks per
@@ -487,6 +561,8 @@ not a move.
   what remains is the loader's own job. `abi` and the console dispatcher got
   globs, because enumerating a shared vocabulary measures nothing.
 
+*Cross-ISA:* RISC-V only by design — x86 is 2,598 lines across 21 files and was
+never the monolith this splits.
 *Cost:* large but mechanical; one module per commit. Actual: 23 commits.
 *Blocked on:* nothing.
 *Acceptance:* no file in `dezh-boot/src/` over 1,200 lines; `main.rs` is the
@@ -556,6 +632,8 @@ Two things the work turned up:
 Still modeled, and still labelled as such: `email.send` and `prod.deploy`. What
 changed is that the ledger now holds at least one effect that is not.
 
+*Cross-ISA:* RISC-V first. The connector is arch-neutral but the ledger it
+records into is Cairn, which x86 has no disk for.
 *Cost:* medium. Effect schema, one connector, compensation registration, and the
 `marz` request/response path (which already receives).
 *Blocked on:* nothing — UDP egress and the ICMP receive path exist.
@@ -573,6 +651,9 @@ under the lock. Merging them into one lock-protected structure, so every task in
 the system (daemons included) is dispatchable on any hart, is what moves Dezh
 from "several convincing demos" to "an operating system".
 
+*Cross-ISA:* RISC-V first, and the most expensive entry in that column — x86 has
+no AP bring-up and no `Blocked` state, so this is a re-derivation, not a port.
+See the extraction note above.
 *Cost:* large, and genuinely hard — this is real concurrency work.
 *Blocked on:* W11 in practice; the tables must be modules with owners first.
 *Acceptance:* a daemon migrates between harts under load; a task on a secondary
@@ -735,6 +816,8 @@ Linux-style ambient authority — but it is a bit per class, not an unforgeable
 per-object reference in the seL4/CHERI sense. The ocap tables today are a gate
 layered above it, not the thing authority is made of.
 
+*Cross-ISA:* shared, and this is the strongest candidate for it — `ocap` already
+lives in `dezh-core`, and x86 already derives authority through `mcap`.
 *Cost:* large; it touches every syscall check and the IPC attestation path.
 *Blocked on:* W11 and W13 (the task table is the thing being changed).
 *Acceptance:* a task holds object handles, not a bitmask; delegation is a graph
@@ -750,6 +833,9 @@ GC** (currently untested), the ticket lock's arithmetic, run-queue push/pop unde
 simulated interleaving, and the Marz checksum — whose odd-length-body bug was
 found by hand in W9 and is exactly what a three-line test catches.
 
+*Cross-ISA:* both, separately, and x86 is the cheaper half — it is on edition
+2021 like the rest of the workspace, but it carries zero `static mut` against
+RISC-V's 16, so only the attribute conversions apply to it.
 *Cost:* medium, entirely mechanical.
 *Blocked on:* W11.
 *Acceptance:* every `Cargo.toml` on edition 2024 with no new `#[allow]`;
@@ -773,6 +859,8 @@ is derived but its effects are not yet accounted for.
 
 This is also **the only practical route to an IOMMU** — see W17.
 
+*Cross-ISA:* this workstream **is** the cross-ISA debt. Everything in the
+"RISC-V first" column above is owed here.
 *Cost:* very large. Timer and returnable IRQ path (done, W16.1), scheduler
 (done, W16.2), paging and ring-3 containment (done, W16.3), intent-derived
 capability checks (done, W16.4), then a virtio-pci disk driver, then Cairn and
@@ -807,6 +895,8 @@ threat model, and the comparison matrix — which a serious reviewer accepts. Wh
 they do not accept is a claim that was never true. W12 closes a gap of that
 second kind, which is why it ranks above this one despite being less famous.
 
+*Cross-ISA:* x86 first, uniquely — VT-d is mature on QEMU 8.2 while the RISC-V
+IOMMU needs QEMU 9.1 and a virtio-pci migration.
 *Cost:* large, after a larger prerequisite.
 *Blocked on:* W16 (x86) or a virtio-pci migration plus QEMU 9.1+ (RISC-V).
 *Acceptance:* the block daemon's DMA is confined by hardware, and a deliberately
