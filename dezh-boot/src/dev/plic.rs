@@ -134,4 +134,12 @@ pub(crate) fn irq_stat() {
         "  console input dropped by a full receive ring = {} (non-zero means input outran the console by more than 256 bytes)",
         crate::dev::uart::RX_OVERRUNS.load(Ordering::Relaxed)
     );
+    kprintln!(
+        "  console input dropped by the UART itself (LSR.OE) = {} (non-zero means the receiver was not read in time)",
+        crate::dev::uart::RX_HW_OVERRUNS.load(Ordering::Relaxed)
+    );
+    kprintln!(
+        "  console input bytes received = {} (short of what was sent, with both drop counts zero, means the bytes never reached the device)",
+        crate::dev::uart::RX_BYTES.load(Ordering::Relaxed)
+    );
 }

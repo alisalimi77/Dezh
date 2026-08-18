@@ -151,10 +151,15 @@ true today, so a reviewer never has to guess.
   the same test was 2/8 at `-smp 4` and 0/3 at `-smp 8`, where most lines never
   arrived at all. That was never a race: idle secondary harts spun, and on an
   emulated host every vCPU shares one budget, so they took it from the hart
-  draining the UART. They now sleep. What **remains** is occasional loss at every
-  hart count, cause not yet identified; `irq-stat` reports the ring's own
-  full-count, which stays at zero, so the bytes go missing before any drain runs.
-  Tracked as issue #19.
+  draining the UART. They now sleep.
+  What remains is **not a Dezh defect**, and `irq-stat` is now the instrument
+  that says so: it reports bytes received alongside both drop counts. Six runs
+  sending 204 bytes gave 204/202/200/188 received with **zero** drops at every
+  layer, and the shortfall matched the echoed line's shortfall exactly each time
+  (64/62/60/48). The guest is never handed those bytes, always on the first line
+  after boot, so no change inside Dezh can recover them. Treat single-run paste
+  results on a host pipe as noise — the same configuration measured 0/10 and
+  10/10 minutes apart. See issue #19.
 - **In-kernel U-mode task caveat (RISC-V).** Some baked demo tasks share the
   kernel binary and must avoid non-inlined calls; real apps use the separate-ELF
   and `.dzp` loader paths, which do not have this constraint.

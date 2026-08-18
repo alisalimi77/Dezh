@@ -19,6 +19,17 @@ const UART_LSR: usize = 5;
 const IER_RX_AVAIL: u8 = 0x01;
 /// LSR bit 0: a byte is waiting in the receive register or FIFO.
 const LSR_RX_READY: u8 = 0x01;
+/// LSR bit 1: Overrun Error - a byte arrived before the previous one was read,
+/// and the hardware threw it away. Reading `LSR` clears it.
+///
+/// This is the receiver saying, in its own words, that it lost something. Worth
+/// asking directly: the ring's full-count answers "did software fall behind",
+/// and it has stayed at zero while characters kept disappearing, which only
+/// narrows the question to everything below software.
+const LSR_OVERRUN: u8 = 0x02;
+/// LSR bit 5: Transmit Holding Register Empty - the previous byte has left and
+/// `THR` may be written again.
+const LSR_TX_EMPTY: u8 = 0x20;
 /// `sstatus.SIE`, the supervisor interrupt enable.
 const SSTATUS_SIE: usize = 1 << 1;
 
@@ -52,6 +63,20 @@ static RX_TAIL: AtomicUsize = AtomicUsize::new(0);
 /// behind - so `irq-stat` reports it rather than leaving the operator to infer
 /// it from a mangled command.
 pub(crate) static RX_OVERRUNS: AtomicU32 = AtomicU32::new(0);
+/// Times the *hardware* reported it dropped a byte (`LSR.OE`). Distinct from
+/// `RX_OVERRUNS`, which is the ring overflowing: this one means the receiver
+/// was not read in time, which no amount of ring capacity fixes.
+pub(crate) static RX_HW_OVERRUNS: AtomicU32 = AtomicU32::new(0);
+/// Every byte the guest actually took out of the receiver.
+///
+/// With the two counters above, "characters went missing" becomes arithmetic
+/// rather than argument: send a known number of bytes and compare. That is what
+/// settled the tail of issue #19. Across six runs sending 204 bytes, the
+/// shortfall in this counter matched the shortfall in the echoed line exactly -
+/// 204/64, 202/62, 200/60, 188/48 - with both drop counts at zero every time.
+/// The guest was never given those bytes. Nothing in Dezh lost them, and no
+/// change to Dezh can recover them.
+pub(crate) static RX_BYTES: AtomicU32 = AtomicU32::new(0);
 
 pub(crate) struct Uart;
 
@@ -62,8 +87,25 @@ impl Uart {
             write_volatile(UART_BASE.add(UART_IER), IER_RX_AVAIL);
         }
     }
+    /// Wait for the transmitter before handing it a byte.
+    ///
+    /// This used to write `THR` unconditionally. The 16550 has one holding
+    /// register, and writing it again before the previous byte has moved out
+    /// overwrites that byte - the character is not delayed, it is gone. QEMU
+    /// drains instantly enough that this was never observed here, so this is a
+    /// correctness fix with no measured symptom, not a bug fix. It matters on
+    /// anything with a real baud rate, which is the direction the project says
+    /// it is going.
+    ///
+    /// Stated plainly because it was briefly credited with fixing issue #19 and
+    /// did not: adding it changed no measurement.
     pub(crate) fn putc(&self, byte: u8) {
-        unsafe { write_volatile(UART_BASE.add(UART_THR), byte) }
+        unsafe {
+            while read_volatile(UART_BASE.add(UART_LSR)) & LSR_TX_EMPTY == 0 {
+                core::hint::spin_loop();
+            }
+            write_volatile(UART_BASE.add(UART_THR), byte)
+        }
     }
     /// Every received byte reaches the console through the ring, whether the
     /// interrupt handler put it there or this did.
@@ -151,10 +193,14 @@ pub(crate) fn rx_drain() {
     RX_LOCK.lock();
     loop {
         let lsr = unsafe { read_volatile(UART_BASE.add(UART_LSR)) };
+        if lsr & LSR_OVERRUN != 0 {
+            RX_HW_OVERRUNS.fetch_add(1, Ordering::Relaxed);
+        }
         if lsr & LSR_RX_READY == 0 {
             break;
         }
         let byte = unsafe { read_volatile(UART_BASE.add(UART_RBR)) };
+        RX_BYTES.fetch_add(1, Ordering::Relaxed);
         let head = RX_HEAD.load(Ordering::Relaxed);
         if head.wrapping_sub(RX_TAIL.load(Ordering::Acquire)) >= RX_CAP {
             // Full. Drop the newest rather than overwrite the oldest: the tail is
