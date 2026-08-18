@@ -590,10 +590,36 @@ This buys the second half of the acceptance and none of the first. The tick
 resumes the interrupted task; it does not choose another, because choosing means
 reading a task table that is still `Global<T>` on the boot hart with no lock.
 
-**Step 2 — next: the console's tables under one lock.** `sched.rs` says it
-itself: "every `Global` here needs a concurrency argument stronger than *only one
-hart reaches it*". That is the real body of W13, and W14 waits on it because the
-task table is the thing object-capabilities have to be threaded through.
+**Step 2 — done: the tables are private, and the reachable surface is locked.**
+`sync::TicketLock` is one lock for the kernel and masks the acquiring hart's
+interrupts, because `plic_handle` writes scheduler state from interrupt context.
+The task table is private to `sched`; the five accessors other modules call and
+`wake_irq_waiters` take the lock.
+
+**Step 3a — done: the scheduler entry is lock-safe.** `schedule_or_return` and
+`idle_until_device` take the lock in scopes rather than across the sleep, since
+the sleep services the PLIC and reaches the same lock.
+
+**Step 3b — next, and it needs a decision before it needs code.** What is left
+is `utrap_handler`: 280 lines, ~35 table accesses, 29 return points, 8 of which
+call `schedule_or_return` — which now takes the lock itself, so a guard held
+across the handler would deadlock on them.
+
+Two shapes, and the obvious one is wrong:
+
+- *One lock across the syscall dispatch.* Mechanical to write, and it puts
+  `SYS_PRINT` — a byte-at-a-time UART write — inside a critical section with
+  this hart's interrupts masked. A long line would hold off every device
+  interrupt on the hart for the length of the print. Correct and unusable.
+- *Fine-grained, one critical section per table touch.* Keeps the sections
+  short, but a syscall stops being atomic against another hart: read `TSTATE`,
+  release, act on a value that has changed. Which of those reads actually need
+  to be atomic together is the design question, and it is answerable — the
+  syscall paths that matter are IPC send/receive and the capability checks.
+
+This is where W13 stops being mechanical, and it is worth doing deliberately
+rather than fast, because W14 threads object-capabilities through the same
+table.
 
 ##### W14 — Object-capabilities as the live substrate (P4)
 
