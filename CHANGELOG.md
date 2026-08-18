@@ -3,6 +3,45 @@
 All notable public-review changes are tracked here. Dezh follows milestone
 review tags rather than production semantic-version releases at this stage.
 
+## v0.5-review Candidate
+
+Two workstreams and one bug that turned out to be three.
+
+### W16 — x86_64 stops being a demo target
+
+- **Returnable interrupts:** the IDT grows from 32 exception vectors to 256;
+  vectors 32..255 save every register, dispatch, restore and `iretq`.
+- **Preemption:** three tasks that never yield, none of which keeps the CPU.
+- **Per-task address spaces:** every task gets its own `cr3`.
+- **Ring 3:** tasks run at CPL3 with one door back into the kernel, and a
+  faulting task dies without taking the machine with it.
+- **Capability-checked syscalls:** x86 had no check at all. A task now carries a
+  capability word and the syscall path reads the task table, never a register
+  the caller set. `granted = requested ∩ ceiling`, computed by the same
+  `dezh_core::mcap` function the RISC-V kernel calls.
+
+### W13 — one scheduler across all harts (steps 1 and 2)
+
+- A secondary hart arms **its own timer**, so a U-mode task there is interrupted
+  and resumed rather than owning the hart (`smp-preempt`, with a negative
+  control: remove the arming and the same demo reports zero ticks).
+- Idle secondary harts sleep instead of spinning, which was starving the console
+  on an emulated host.
+- One ticket lock for the whole kernel, masking interrupts as part of acquiring.
+- The task table is private to `sched`, and its reachable surface is locked.
+
+### Fixed
+
+- **Console input.** UART0 was never enabled at the PLIC, so the console polled
+  and lost bytes to anything faster than typing. Routed now, with a receive ring
+  and byte counters in `irq-stat`.
+- **The x86 lint gate was passing locally and failing in CI.** A rustup
+  directory override forced `stable` on the repository root, and a directory
+  override outranks `rust-toolchain.toml` — so every local `cargo clippy` ran a
+  lint set two releases behind the gate the pin exists to guarantee.
+- **The release workflow no longer publishes a container image.** It never
+  succeeded in publishing one; the step failed on every release that reached it.
+
 ## v0.4-review Candidate
 
 Two milestones since v0.3-review, and one correction.

@@ -1,5 +1,79 @@
 # Release Notes
 
+## v0.5-review Candidate
+
+The release where the second ISA stops being a demo target, and where a
+secondary hart stops running a task uninterruptibly.
+
+v0.4 shipped with `STATUS.md` saying the x86 kernel had "no returnable interrupt
+path yet — no timer, no device IRQs, no scheduler on x86", and that tasks on
+secondary RISC-V harts "run to completion — no preemption or migration there".
+Both sentences are why this release exists.
+
+### x86_64: from a boot smoke to a kernel that does not trust its tasks
+
+Sixteen commits, each green on both boot paths (QEMU `-kernel` PVH and the GRUB
+Multiboot2 ISO):
+
+- **A returnable interrupt path.** The IDT grows from 32 exception vectors to
+  256, and vectors 32..255 save every register, dispatch, restore and `iretq` —
+  an interrupt now interrupts work and hands control back, rather than ending it.
+- **Preemption.** Three tasks that never yield, and none of them keeps the CPU.
+- **Per-task address spaces.** Every task gets its own `cr3` and reads a
+  different page from the same address.
+- **Ring 3.** A task runs at CPL3 with one door back into the kernel, and a
+  faulting task dies without taking the machine with it.
+- **Authority derived from intent, not asserted by the caller.** x86 had no
+  capability check at all — its syscalls served anyone. A task now carries a
+  capability word and the syscall path consults the task table, never a register
+  the caller set. The derivation is `granted = requested ∩ ceiling`, computed by
+  **the same `dezh_core::mcap` function the RISC-V kernel calls**, so a second
+  implementation cannot drift from the exhaustive test that pins it. Two CPL3
+  tasks run byte-identical code from a byte-identical manifest and end up with
+  different authority.
+
+### RISC-V: W13 steps 1 and 2
+
+- **A secondary hart arms its own timer**, so a U-mode task there is interrupted
+  and resumed instead of owning the hart until it exits (`smp-preempt`). The
+  demo counts ticks per hart and refuses to claim success if the task landed on
+  the boot hart, which has preempted since W9.
+- **Idle secondary harts sleep.** They used to spin, and on an emulated host
+  every vCPU shares one budget — so they were taking it from the hart draining
+  the console.
+- **One ticket lock for the whole kernel**, which masks the acquiring hart's
+  interrupts. Not a performance choice: `plic_handle` writes scheduler state
+  from interrupt context, so without masking a hart can take the lock, take an
+  interrupt, and wait for itself.
+- **The task table is private to the scheduler** and its reachable surface is
+  under that lock. Six modules used to read and write it directly.
+
+### The console stops losing pasted input
+
+UART0 is IRQ 10 on the `virt` board and had never been enabled at the PLIC,
+which routed only the virtio slots — so `getc` spun on the line-status register
+and read the receive register directly. That keeps up with a person typing and
+loses bytes to anything faster. It is routed now, with a receive ring both the
+handler and `getc` drain into, and `irq-stat` reports bytes received plus the
+two places a byte could be dropped.
+
+### Honest scope
+
+- **No migration.** The timer interrupt on a secondary resumes the task it
+  interrupted; it does not pick a different one, because choosing means reading
+  a task table that is still the boot hart's. That is the rest of W13.
+- **x86 derives authority but does not account for effects.** No `Ahd` token, no
+  `Sand` ledger, no mission there. It has no device IRQs, no storage, no install
+  path, and nothing frees a dead task's pages.
+- **Console input can still be lost, and it is not ours.** Six runs sending 204
+  bytes measured 204/202/200/188 received with zero drops at every layer, the
+  shortfall matching the echoed line exactly each time. The guest is never handed
+  those bytes. Single-run paste measurements on a host pipe are noise — the same
+  configuration gave 0/10 and 10/10 minutes apart.
+- The release workflow no longer publishes a container image. It never
+  succeeded in publishing one; see [RELEASING](RELEASING.md#the-review-environment).
+
+
 ## v0.4-review Candidate
 
 The release where the effect ledger stops being checked against itself, and

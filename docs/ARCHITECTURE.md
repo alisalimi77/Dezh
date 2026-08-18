@@ -34,8 +34,9 @@ shape.
    whichever one firmware chose — it is never assumed to be hart 0.
 2. The kernel validates the boot contract from `dezh-kernel`.
 3. The kernel installs trap handling, timer support, and Sv39 paging.
-4. The PLIC is programmed to route virtio interrupts to the boot hart's S-mode
-   context, so device I/O can block instead of spin.
+4. The PLIC is programmed to route virtio **and UART0** interrupts to the boot
+   hart's S-mode context, so device I/O can block instead of spin and console
+   input does not depend on the console being the thing that looks for it.
 5. Secondary harts are started over the SBI HSM protocol, each with its own
    stack, trap stack, and per-hart `ApCtx` reached through `sscratch`.
 6. A capability-scoped console starts over UART on the boot hart.
@@ -194,8 +195,12 @@ neighbour's memory page-faults and dies on its own hart while the neighbour runs
 on. Per-hart trap state is reached through `sscratch`, never `tp` — a U-mode task
 owns every integer register and will have clobbered `tp` by the time it traps.
 
-Honest scope: tasks on secondary harts run to completion (no preemption or
-migration there yet), and the console's own scheduler is still single-hart.
+Honest scope: a secondary hart arms **its own timer** while a U-mode task runs
+there, so such a task is interrupted and resumed rather than owning the hart
+until it exits (`smp-preempt`). What that interrupt does *not* do is pick a
+different task — there is no migration and no scheduling decision on a
+secondary, because choosing means reading a task table that is still the boot
+hart's. The console's own scheduler is still single-hart.
 
 ### Information Flow: Secrecy And Integrity
 
@@ -407,6 +412,19 @@ Device I/O is interrupt-driven, not polled. A driver that is waiting occupies no
 CPU, and the kernel has somewhere to idle when nothing is runnable — without
 which blocking on I/O is impossible, since the scheduler would simply return.
 
+The console was the exception until recently, and it is worth saying how it was
+wrong, because the shape recurs. `getc` spun on the UART's line-status register
+and read the receive register directly. That keeps up with a person typing and
+loses bytes to anything faster: the FIFO is sixteen deep with no flow control,
+and the console spends most of its time *not* in `getc` — echoing a character,
+then running a whole command and printing as it goes. UART0 is IRQ 10 on the
+`virt` board and had never been enabled at the PLIC, which only routed the
+virtio slots. It is routed now, and both the interrupt handler and `getc` drain
+the FIFO into a ring the console reads, so input no longer depends on the
+console happening to be looking. `irq-stat` reports bytes received and the two
+places a byte could be dropped, so "characters went missing" is an arithmetic
+question rather than an argument.
+
 ```mermaid
 sequenceDiagram
     participant D as Driver (U-mode)
@@ -431,11 +449,37 @@ The kernel services the PLIC by hand in its idle path deliberately: the hardware
 clears `sstatus.SIE` on trap entry, so a pending interrupt would wake `wfi` and
 never be taken, stranding the sleeping driver.
 
+### Mutual Exclusion, And Why The Lock Masks Interrupts
+
+One ticket lock serves the whole kernel (`sync::TicketLock`): fair, so no hart
+starves under contention, and it **masks the acquiring hart's interrupts** for
+the length of the critical section. That second part is not a performance
+choice, it is what makes the lock usable at all for state an interrupt handler
+touches:
+
+1. a hart takes the lock,
+2. a device interrupt lands **on that same hart**,
+3. the handler waits for a lock whose holder cannot run until the handler
+   returns.
+
+Nothing about a fair queue helps; the hart is simply stuck. `plic_handle` writes
+scheduler state from interrupt context, so this is reachable rather than
+theoretical — and the console receive path hit the same shape for real, where a
+try-lock used to dodge it livelocked instead, the handler losing every race and
+the UART re-raising its line immediately.
+
+Acquiring returns a guard, so releasing and restoring the interrupt state cannot
+be forgotten or ordered wrongly.
+
 ### SMP: Symmetric Scheduling
 
 The boot hart runs the console; secondary harts pull U-mode tasks off a shared
 queue and run them in parallel. Each task carries its own address space, so
-parallelism does not cost isolation.
+parallelism does not cost isolation. A secondary also arms its own timer while a
+U-mode task runs there, so the task is interrupted and resumed rather than
+owning the hart until it exits — and when a secondary has nothing to do it
+sleeps rather than spinning, because on an emulated host a spinning hart takes
+budget from the one running the console.
 
 ```mermaid
 flowchart LR
