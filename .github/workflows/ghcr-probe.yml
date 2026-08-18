@@ -38,39 +38,54 @@ jobs:
           ACTOR: ${{ github.actor }}
           TOKEN: ${{ github.token }}
         run: |
-          set -u
+          set +e
           echo "package: $IMAGE"
 
-          # 1. The registry token exchange. Its `access` claim is the answer:
-          #    if push is not granted here, `docker push` cannot succeed.
-          resp=$(curl -s -u "$ACTOR:$TOKEN" \
-            "https://ghcr.io/token?scope=repository:${IMAGE}:pull,push&service=ghcr.io")
-          jwt=$(printf '%s' "$resp" | python3 -c 'import sys,json;print(json.load(sys.stdin).get("token",""))')
+          # 1. The registry token exchange. Its `access` claim is the answer: if
+          #    push is not granted here, `docker push` cannot succeed. The raw
+          #    response is printed first, because the failures worth seeing are
+          #    the ones that do not come back as the JSON we expected.
+          resp=$(curl -sS -u "$ACTOR:$TOKEN" "https://ghcr.io/token?scope=repository:${IMAGE}:pull,push&service=ghcr.io" 2>&1)
+          echo "--- token response (first 600 bytes) ---"
+          echo "$resp" | head -c 600
+          echo
+          echo "----------------------------------------"
+
+          jwt=$(echo "$resp" | jq -r '.token // empty' 2>/dev/null)
           if [ -z "$jwt" ]; then
-            echo "RESULT: no token issued at all"
-            printf '%s\n' "$resp"
+            echo "RESULT: no token issued - see the response above"
             exit 1
           fi
 
-          payload=$(printf '%s' "$jwt" | cut -d. -f2)
-          pad=$(( ${#payload} % 4 )); [ $pad -ne 0 ] && payload="${payload}$(printf '=%.0s' $(seq $((4-pad))))"
-          actions=$(printf '%s' "$payload" | tr '_-' '/+' | base64 -d 2>/dev/null \
-            | python3 -c 'import sys,json;d=json.load(sys.stdin);print(",".join(a for e in d.get("access",[]) for a in e.get("actions",[])) or "(none)")')
-          echo "granted actions: $actions"
+          # The granted scope lives in the JWT payload, which is base64url.
+          payload=$(echo "$jwt" | cut -d. -f2 | tr '_-' '/+')
+          case $(( ${#payload} % 4 )) in
+            2) payload="${payload}==" ;;
+            3) payload="${payload}=" ;;
+          esac
+          actions=$(echo "$payload" | base64 -d 2>/dev/null | jq -r '[.access[]?.actions[]?] | join(",")')
+          echo "granted actions: ${actions:-(none)}"
 
           # 2. Exercise it. A blob upload session is the first thing `docker
-          #    push` does, and it is what returns the denial. 202 means we may
-          #    write; 403 is the failure we are chasing. Nothing is committed,
-          #    so no tag or version appears.
-          code=$(curl -s -o /tmp/body -w '%{http_code}' -X POST \
-            -H "Authorization: Bearer $jwt" \
-            "https://ghcr.io/v2/${IMAGE}/blobs/uploads/")
+          #    push` does and the step that returned the denial. 202 means we
+          #    may write; 403 is the failure we are chasing. Nothing is
+          #    committed, so no tag or version appears on the package.
+          code=$(curl -sS -o /tmp/body -w '%{http_code}' -X POST -H "Authorization: Bearer $jwt" "https://ghcr.io/v2/${IMAGE}/blobs/uploads/")
           echo "blob upload session: HTTP $code"
-          cat /tmp/body 2>/dev/null || true
+          head -c 400 /tmp/body 2>/dev/null
           echo
 
-          case "$actions:$code" in
-            *push*:202) echo "RESULT: PUSH AUTHORISED - restore the publish steps in release.yml" ;;
-            *push*:*)   echo "RESULT: token granted push but the registry refused the upload ($code)" ; exit 1 ;;
-            *)          echo "RESULT: STILL DENIED - the package's Actions access does not include this repository" ; exit 1 ;;
+          case "$actions" in
+            *push*)
+              if [ "$code" = "202" ]; then
+                echo "RESULT: PUSH AUTHORISED - restore the publish steps in release.yml"
+                exit 0
+              fi
+              echo "RESULT: token granted push, registry refused the upload ($code)"
+              exit 1
+              ;;
+            *)
+              echo "RESULT: STILL DENIED - the package's Actions access does not include this repository"
+              exit 1
+              ;;
           esac
