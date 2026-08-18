@@ -28,6 +28,7 @@ use crate::{
     _hart_start, kprintln, sys_exit, sys_print, Uart, SYS_DENIED,
 };
 use crate::arch::timer::{rdtime, sbi_set_timer, QUANTUM, STIE};
+use crate::sync::TicketLock;
 
 /// `scause` code for a supervisor timer interrupt, with the interrupt bit
 /// already stripped by the caller.
@@ -292,31 +293,6 @@ pub(crate) static HART_TICKS: [AtomicU64; MAX_HARTS] = [const { AtomicU64::new(0
 /// gives FIFO fairness — no hart starves under contention, unlike a bare
 /// test-and-set. `lock` publishes with Acquire and `unlock` with Release, so an
 /// ordinary read-modify-write inside the critical section is correct.
-struct TicketLock {
-    next: AtomicU32,
-    serving: AtomicU32,
-}
-impl TicketLock {
-    const fn new() -> Self {
-        Self {
-            next: AtomicU32::new(0),
-            serving: AtomicU32::new(0),
-        }
-    }
-    fn lock(&self) {
-        let ticket = self.next.fetch_add(1, Ordering::Relaxed);
-        while self.serving.load(Ordering::Acquire) != ticket {
-            core::hint::spin_loop();
-        }
-    }
-    fn unlock(&self) {
-        // Only the holder calls this and each unlock advances the queue by one,
-        // so a store is enough — no read-modify-write needed.
-        self.serving
-            .store(self.serving.load(Ordering::Relaxed) + 1, Ordering::Release);
-    }
-}
-
 static SMP_LOCK: TicketLock = TicketLock::new();
 /// A deliberately NON-atomic counter, mutated only under `SMP_LOCK`. Atomics
 /// (as in `SMP_COUNTER`) prove coherent shared memory but cannot prove a lock
@@ -356,18 +332,17 @@ pub(crate) static JOB_HART: [AtomicU32; NJOBS] = [const { AtomicU32::new(u32::MA
 pub(crate) static JOBS_DONE: AtomicU64 = AtomicU64::new(0);
 
 pub(crate) fn runq_push(id: u32) {
-    SMP_RUNQ_LOCK.lock();
+    let _held = SMP_RUNQ_LOCK.lock();
     unsafe {
         let q = &mut *core::ptr::addr_of_mut!(RUNQ);
         q.buf[q.tail % RUNQ_CAP] = id;
         q.tail += 1;
     }
-    SMP_RUNQ_LOCK.unlock();
 }
 
 pub(crate) fn runq_pop() -> Option<u32> {
-    SMP_RUNQ_LOCK.lock();
-    let r = unsafe {
+    let _held = SMP_RUNQ_LOCK.lock();
+    unsafe {
         let q = &mut *core::ptr::addr_of_mut!(RUNQ);
         if q.head == q.tail {
             None
@@ -376,9 +351,7 @@ pub(crate) fn runq_pop() -> Option<u32> {
             q.head += 1;
             Some(v)
         }
-    };
-    SMP_RUNQ_LOCK.unlock();
-    r
+    }
 }
 
 /// Pop and "run" jobs until the queue is empty. Called concurrently by every hart.
@@ -461,18 +434,17 @@ pub(crate) static AP_LIVE: AtomicU64 = AtomicU64::new(0);
 pub(crate) static AP_LIVE_MAX: AtomicU64 = AtomicU64::new(0);
 
 pub(crate) fn ap_q_push(slot: u32) {
-    AP_Q_LOCK.lock();
+    let _held = AP_Q_LOCK.lock();
     unsafe {
         let q = &mut *core::ptr::addr_of_mut!(AP_Q);
         q.buf[q.tail % RUNQ_CAP] = slot;
         q.tail += 1;
     }
-    AP_Q_LOCK.unlock();
 }
 
 pub(crate) fn ap_q_pop() -> Option<u32> {
-    AP_Q_LOCK.lock();
-    let r = unsafe {
+    let _held = AP_Q_LOCK.lock();
+    unsafe {
         let q = &mut *core::ptr::addr_of_mut!(AP_Q);
         if q.head == q.tail {
             None
@@ -481,9 +453,7 @@ pub(crate) fn ap_q_pop() -> Option<u32> {
             q.head += 1;
             Some(v)
         }
-    };
-    AP_Q_LOCK.unlock();
-    r
+    }
 }
 
 /// Build a private address space for one task slot: copy the kernel page tables,
@@ -624,12 +594,13 @@ extern "C" fn ap_trap_handler(frame: *mut usize) -> *const usize {
         match f[F_A7] {
             SYS_PRINT => {
                 // Lock the UART: other harts and the console may print too.
-                SMP_LOCK.lock();
-                let s = unsafe { core::slice::from_raw_parts(f[F_A0] as *const u8, f[F_A1]) };
-                for &b in s {
-                    Uart.putc(b);
+                {
+                    let _held = SMP_LOCK.lock();
+                    let s = unsafe { core::slice::from_raw_parts(f[F_A0] as *const u8, f[F_A1]) };
+                    for &b in s {
+                        Uart.putc(b);
+                    }
                 }
-                SMP_LOCK.unlock();
                 f[F_A0] = 0;
             }
             SYS_EXIT => {
@@ -781,13 +752,14 @@ extern "C" fn hart_main(hartid: usize) -> ! {
         // would clobber each other and the total would come up short.
         let mut m = 0;
         while m < SMP_LOCK_WORK {
-            SMP_LOCK.lock();
-            unsafe {
-                let p = core::ptr::addr_of_mut!(SMP_GUARDED);
-                let v = read_volatile(p);
-                write_volatile(p, v + 1);
+            {
+                let _held = SMP_LOCK.lock();
+                unsafe {
+                    let p = core::ptr::addr_of_mut!(SMP_GUARDED);
+                    let v = read_volatile(p);
+                    write_volatile(p, v + 1);
+                }
             }
-            SMP_LOCK.unlock();
             m += 1;
         }
         // Release: the boot hart's Acquire-load of this establishes that our
@@ -879,13 +851,14 @@ pub(crate) fn smp_round() -> SmpRound {
     // The boot hart contends on the lock alongside the secondaries.
     let mut m = 0;
     while m < SMP_LOCK_WORK {
-        SMP_LOCK.lock();
-        unsafe {
-            let p = core::ptr::addr_of_mut!(SMP_GUARDED);
-            let v = read_volatile(p);
-            write_volatile(p, v + 1);
+        {
+            let _held = SMP_LOCK.lock();
+            unsafe {
+                let p = core::ptr::addr_of_mut!(SMP_GUARDED);
+                let v = read_volatile(p);
+                write_volatile(p, v + 1);
+            }
         }
-        SMP_LOCK.unlock();
         m += 1;
     }
 
