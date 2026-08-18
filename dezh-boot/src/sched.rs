@@ -398,7 +398,12 @@ extern "C" fn utrap_handler(frame_ptr: *mut usize) -> *const usize {
     let frame = unsafe { core::slice::from_raw_parts_mut(frame_ptr, 32) };
 
     unsafe {
-        let cur = *CURRENT.get(); // snapshot before any reschedule (avoids &static_mut)
+        // Snapshot before any reschedule (avoids &static_mut), and under the
+        // lock because another hart may be choosing the next task right now.
+        let cur = {
+            let _held = SCHED_LOCK.lock();
+            *CURRENT.get()
+        };
         if interrupt {
             // Supervisor timer = preemption: the running task's full frame is
             // already saved, so round-robin to the next ready task. A task that
@@ -428,20 +433,33 @@ extern "C" fn utrap_handler(frame_ptr: *mut usize) -> *const usize {
                 "  [kernel] task {} DENIED: faulted on {stval:#x} (outside its grant) -- killing",
                 cur
             );
-            (*TSTATE.get())[cur] = TaskState::Done;
-            (*TEXIT.get())[cur] = SYS_DENIED;
+            {
+                let _held = SCHED_LOCK.lock();
+                (*TSTATE.get())[cur] = TaskState::Done;
+                (*TEXIT.get())[cur] = SYS_DENIED;
+            }
             return schedule_or_return();
         }
 
         if code == 8 {
             frame[F_SEPC] += 4; // resume after the ecall
-            let caps = (*TCAPS.get())[cur];
+            // One short section for the two things every arm needs. Read
+            // together so an arm cannot act on this task's capabilities while
+            // believing it is a different task.
+            let caps = {
+                let _held = SCHED_LOCK.lock();
+                (*TCAPS.get())[cur]
+            };
 
             // Pol: a Linux-personality task speaks the Linux syscall ABI. We
             // translate each Linux syscall into a capability-checked Dezh action;
             // anything we do not support returns ENOSYS, just like the user-space
             // Linux personality spike (D014).
-            if (*TPERS.get())[cur] == PERS_LINUX {
+            let personality = {
+                let _held = SCHED_LOCK.lock();
+                (*TPERS.get())[cur]
+            };
+            if personality == PERS_LINUX {
                 match frame[F_A7] {
                     LINUX_WRITE => {
                         let fd = frame[F_A0];
@@ -468,8 +486,11 @@ extern "C" fn utrap_handler(frame_ptr: *mut usize) -> *const usize {
                     }
                     LINUX_EXIT | LINUX_EXIT_GROUP => {
                         kprintln!("  [pol/linux] app exit (code {})", frame[F_A0]);
-                        (*TSTATE.get())[cur] = TaskState::Done;
-                        (*TEXIT.get())[cur] = frame[F_A0];
+                        {
+                            let _held = SCHED_LOCK.lock();
+                            (*TSTATE.get())[cur] = TaskState::Done;
+                            (*TEXIT.get())[cur] = frame[F_A0];
+                        }
                         return schedule_or_return();
                     }
                     other => {
@@ -482,13 +503,22 @@ extern "C" fn utrap_handler(frame_ptr: *mut usize) -> *const usize {
 
             match frame[F_A7] {
                 SYS_YIELD => {
-                    (*TSTATE.get())[cur] = TaskState::Ready;
+                    {
+                        let _held = SCHED_LOCK.lock();
+                        (*TSTATE.get())[cur] = TaskState::Ready;
+                    }
                     return schedule_or_return();
                 }
                 SYS_EXIT => {
                     kprintln!("  [kernel] task {} exited (code {})", cur, frame[F_A0]);
-                    (*TSTATE.get())[cur] = TaskState::Done;
-                    (*TEXIT.get())[cur] = frame[F_A0];
+                    {
+                        // State and exit code together: a supervisor that saw
+                        // Done and then read a stale code would report the wrong
+                        // reason a service died.
+                        let _held = SCHED_LOCK.lock();
+                        (*TSTATE.get())[cur] = TaskState::Done;
+                        (*TEXIT.get())[cur] = frame[F_A0];
+                    }
                     return schedule_or_return();
                 }
                 SYS_PRINT => {
@@ -536,13 +566,24 @@ extern "C" fn utrap_handler(frame_ptr: *mut usize) -> *const usize {
                     // msg_send(to=a0, ptr=a1, len=a2, grant_caps=a3)
                     if caps & TASK_IPC == 0 {
                         kprintln!("  [kernel] DENIED send: task {cur} holds no IPC capability");
-                        (*IPC_STATS.get()).denied_sends += 1;
+                        {
+                            let _held = SCHED_LOCK.lock();
+                            (*IPC_STATS.get()).denied_sends += 1;
+                        }
                         frame[F_A0] = SYS_DENIED;
                         return frame_ptr;
                     }
                     let to = frame[F_A0];
                     let len = frame[F_A2].min(64);
                     let requested = frame[F_A3];
+                    // The whole of a send is one decision, and every step of it
+                    // depends on the one before still being true. Between the
+                    // liveness check and the enqueue the receiver could exit;
+                    // between the depth check and the write another sender could
+                    // take the last slot; between the enqueue and the wake the
+                    // receiver could park, and then a message sits in a mailbox
+                    // with nobody coming for it. So: one section, not five.
+                    let _held = SCHED_LOCK.lock();
                     if to >= MAX_TASKS
                         || (*TSTATE.get())[to] == TaskState::Unused
                         || (*TSTATE.get())[to] == TaskState::Done
@@ -581,6 +622,9 @@ extern "C" fn utrap_handler(frame_ptr: *mut usize) -> *const usize {
                         (*TSTATE.get())[to] = TaskState::Ready;
                     }
                     frame[F_A0] = 0;
+                    // Every exit from this arm resumes the caller, so the guard
+                    // drops here rather than needing to be released before a
+                    // reschedule.
                     return frame_ptr;
                 }
                 SYS_RECV => {
@@ -591,14 +635,24 @@ extern "C" fn utrap_handler(frame_ptr: *mut usize) -> *const usize {
                         frame[F_A0] = SYS_DENIED;
                         return frame_ptr;
                     }
-                    if recv_message_into(cur, frame) {
+                    // The drain and the park are one decision: a sender that
+                    // enqueued between them would find this task already
+                    // Blocked with a message waiting and no one to wake it.
+                    let got = {
+                        let _held = SCHED_LOCK.lock();
+                        if recv_message_into(cur, frame) {
+                            true
+                        } else {
+                            // Re-run the ecall when we are scheduled again.
+                            frame[F_SEPC] -= 4;
+                            (*TSTATE.get())[cur] = TaskState::Blocked;
+                            false
+                        }
+                    };
+                    if got {
                         return frame_ptr;
-                    } else {
-                        // Re-run the ecall when we are scheduled again.
-                        frame[F_SEPC] -= 4;
-                        (*TSTATE.get())[cur] = TaskState::Blocked;
-                        return schedule_or_return();
                     }
+                    return schedule_or_return();
                 }
                 SYS_RECV_TIMEOUT => {
                     if caps & TASK_IPC == 0 {
@@ -608,43 +662,69 @@ extern "C" fn utrap_handler(frame_ptr: *mut usize) -> *const usize {
                         frame[F_A0] = SYS_DENIED;
                         return frame_ptr;
                     }
-                    if recv_message_into(cur, frame) {
-                        return frame_ptr;
-                    }
+                    // Same decision as `SYS_RECV`, with a deadline: drain, or
+                    // arm the timeout and park. Splitting it would let a sender
+                    // enqueue into a mailbox this task is about to stop watching.
                     let timeout = frame[F_A2] as u64;
-                    if timeout == 0 {
-                        frame[F_A0] = IPC_STATUS_TIMEOUT;
-                        frame[F_A1] = usize::MAX;
-                        frame[F_A2] = typed_word(
-                            IPC_SERVICE_SYSTEM,
-                            IPC_OP_TIMEOUT,
-                            0,
-                            IPC_STATUS_TIMEOUT,
-                            0,
-                        );
-                        (*IPC_STATS.get()).timeouts += 1;
+                    let parked = {
+                        let _held = SCHED_LOCK.lock();
+                        if recv_message_into(cur, frame) {
+                            false
+                        } else if timeout == 0 {
+                            frame[F_A0] = IPC_STATUS_TIMEOUT;
+                            frame[F_A1] = usize::MAX;
+                            frame[F_A2] = typed_word(
+                                IPC_SERVICE_SYSTEM,
+                                IPC_OP_TIMEOUT,
+                                0,
+                                IPC_STATUS_TIMEOUT,
+                                0,
+                            );
+                            (*IPC_STATS.get()).timeouts += 1;
+                            false
+                        } else {
+                            (*TRECV_WAITING.get())[cur] = true;
+                            (*TRECV_PTR.get())[cur] = frame[F_A0];
+                            (*TRECV_LEN.get())[cur] = frame[F_A1];
+                            (*TRECV_DEADLINE.get())[cur] =
+                                TICKS.load(Ordering::Relaxed).saturating_add(timeout);
+                            frame[F_SEPC] -= 4;
+                            (*TSTATE.get())[cur] = TaskState::Blocked;
+                            true
+                        }
+                    };
+                    if !parked {
                         return frame_ptr;
                     }
-                    (*TRECV_WAITING.get())[cur] = true;
-                    (*TRECV_PTR.get())[cur] = frame[F_A0];
-                    (*TRECV_LEN.get())[cur] = frame[F_A1];
-                    (*TRECV_DEADLINE.get())[cur] = TICKS.load(Ordering::Relaxed).saturating_add(timeout);
-                    frame[F_SEPC] -= 4;
-                    (*TSTATE.get())[cur] = TaskState::Blocked;
                     return schedule_or_return();
                 }
                 SYS_IRQ_WAIT => {
                     // Restartable: park the task and rewind past the ecall, so on
                     // wake it re-runs, sees the advanced count, and returns.
+                    //
+                    // The comparison MUST be inside the same section as the park.
+                    // This is the lost-wakeup shape: read the count, decide to
+                    // sleep, and have `wake_irq_waiters` run in the gap - it
+                    // finds nothing parked, the task then parks, and nothing
+                    // will ever wake it. One hart cannot hit it because the trap
+                    // runs with interrupts masked; a second hart can.
                     let prev = frame[F_A0];
-                    let now = EXT_IRQS.load(Ordering::Relaxed) as usize;
-                    if now != prev {
-                        frame[F_A0] = now;
+                    let parked = {
+                        let _held = SCHED_LOCK.lock();
+                        let now = EXT_IRQS.load(Ordering::Relaxed) as usize;
+                        if now != prev {
+                            frame[F_A0] = now;
+                            false
+                        } else {
+                            (*TIRQ_WAITING.get())[cur] = true;
+                            frame[F_SEPC] -= 4;
+                            (*TSTATE.get())[cur] = TaskState::Blocked;
+                            true
+                        }
+                    };
+                    if !parked {
                         return frame_ptr;
                     }
-                    (*TIRQ_WAITING.get())[cur] = true;
-                    frame[F_SEPC] -= 4;
-                    (*TSTATE.get())[cur] = TaskState::Blocked;
                     return schedule_or_return();
                 }
                 _ => {
