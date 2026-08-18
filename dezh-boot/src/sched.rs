@@ -889,6 +889,10 @@ pub(crate) fn run_processes(specs: &[ProcessSpec]) {
 pub(crate) fn run_scheduler_from(first: usize) {
     unsafe {
         *CURRENT.get() = first;
+        // The third dispatch entry, and the one that was missed: this is the
+        // path a Pol process takes. Every `run_first` call site has to stamp,
+        // because none of them go through `schedule_or_return`.
+        (*FRAMES.get())[first][F_HART] = current_hart();
         asm!("csrw stvec, {}", in(reg) utrap as *const () as usize);
         sbi_set_timer(rdtime() + QUANTUM);
         asm!("csrw satp, {}", in(reg) (*TSATP.get())[first]);
