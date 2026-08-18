@@ -617,9 +617,36 @@ Two shapes, and the obvious one is wrong:
   to be atomic together is the design question, and it is answerable — the
   syscall paths that matter are IPC send/receive and the capability checks.
 
-This is where W13 stops being mechanical, and it is worth doing deliberately
-rather than fast, because W14 threads object-capabilities through the same
-table.
+**Step 3b — done.** The atomic unit is one syscall's table work. `SYS_SEND`,
+`SYS_RECV`/`_TIMEOUT` and `SYS_IRQ_WAIT` each take one section; the rest are
+short reads. `SYS_PRINT` turned out to touch no table at all, so the argument
+against a coarse lock was aimed at the wrong line. Guard placement is checked by
+a script that walks brace depth, because the failure mode is a hang.
+
+**Step 3c — the trap-path merge, and the crux.** Two routes, both real:
+
+- *The boot hart becomes per-hart.* `ktrap_stack` and `KCTX` are singletons and
+  a second hart entering `utrap` clobbers both. Fixing it means widening the
+  saved frame past its 32 slots (index 31 is `sepc`, all are used) so each
+  dispatch can record the running hart's stack and context, then changing
+  `utrap`, `run_first`, `enter_user` and `restore_kernel_ctx`. High risk: it
+  edits the proven trap path.
+- *The AP adopts the real handler.* `smp` already has per-hart trap state
+  (`ApCtx` via `sscratch`) and its own kernel context, but `ap_trap_handler` is
+  74 lines serving two syscalls against `utrap_handler`'s 348. Lower risk,
+  because the boot path is untouched.
+
+Both meet the same wall: `restore_kernel_ctx` is wired to one saved context, so
+no hart but the boot hart can return from `schedule_or_return`. Choosing the
+right context per hart starts with a hart being able to ask which it is — and
+until now the boot hart was the one that could not, because `_start` never set
+`tp`. It does now (`smp::current_hart`), verified by a boot-time check against
+the id SBI passes, with a negative control: remove the register write and `tp`
+reads as garbage and the kernel refuses to continue.
+
+`current_hart` is kernel-context only. Inside a U-mode trap the task owns every
+register including `tp`, which is why that path finds its state through
+`sscratch`.
 
 ##### W14 — Object-capabilities as the live substrate (P4)
 

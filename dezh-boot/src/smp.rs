@@ -55,6 +55,24 @@ const IDLE_TICK: u64 = 10_000;
 // firmware until `sbi_hart_start`; only the boot hart ever enters `_start`, so the
 // boot path has no concurrent-entry race to guard.
 pub(crate) const MAX_HARTS: usize = 8;
+
+/// Which hart is executing this, asked from **kernel context only**.
+///
+/// `tp` carries the hart id: `_hart_start` sets it for a secondary and `_start`
+/// now sets it for the boot hart, so every hart answers the same way. Before
+/// that the boot hart was the one that could not, which blocked every route to
+/// running a console task somewhere other than there - `restore_kernel_ctx` is
+/// still wired to a single saved context, and choosing the right one per hart
+/// starts with being able to ask.
+///
+/// NOT usable inside a U-mode trap. A task owns every integer register and will
+/// have clobbered `tp` by the time it traps; that path finds its per-hart state
+/// through `sscratch` instead, which is what `ApCtx` exists for.
+pub(crate) fn current_hart() -> usize {
+    let id: usize;
+    unsafe { asm!("mv {}, tp", out(reg) id) };
+    id
+}
 const HART_STACK: usize = 8 * 1024;
 // Atomic increments each secondary hammers onto ONE shared counter per round. The
 // contention is the point: a coherent total proves the harts share memory and the

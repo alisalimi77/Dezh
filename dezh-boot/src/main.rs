@@ -185,6 +185,15 @@ _start:
     j       0b
 1:
     la      sp, __stack_top
+    # Per-hart identity, the same one `_hart_start` gives a secondary. SBI hands
+    # the boot hart's id in a0 and `kmain` still reads it from there, so this
+    # only adds the register - it changes nothing about how the id is obtained.
+    #
+    # It matters because the boot hart was the one hart that did NOT have it,
+    # and every route to running a console task on a second hart needs to ask
+    # "which hart am I?" from kernel context. `tp` is unusable inside a U-mode
+    # trap (the task owns it), but in kernel context it is exactly this.
+    mv      tp, a0
     call    kmain
 2:
     wfi
