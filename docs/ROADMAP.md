@@ -677,10 +677,28 @@ space halts the kernel. The guard costs nothing today, because only the boot
 hart dispatches — it is there so the piece that changes that cannot land
 quietly wrong.
 
+`CURRENT` is per-hart now too, and it was the last singleton in the dispatch
+path. It carries two jobs — whose syscall `utrap_handler` is serving, and where
+`pick_next` resumes its round-robin — and one cell for both across two harts
+would charge a syscall to the wrong task's capability set. That is an authority
+bug, not a lost tick, which is why it moves before anything starts dispatching.
+Reads and writes go through one accessor pair so the hart index cannot be
+dropped at one of the seven sites.
+
+Indexing by `tp` is now bounded, once, where the boot hart's identity is already
+checked: three tables (`KCTX`, `ktrap_stack`, `CURRENT`) are indexed by it with
+no check at the use site, and two of those indexings are in assembly where a
+check is not available. Negative control: with `MAX_HARTS` temporarily at 2, the
+runs QEMU lands on harts 2 and 3 print the FATAL and halt while harts 0 and 1
+boot normally — the guard fires exactly at the boundary and nowhere else.
+
 So the last piece is: let a secondary pull from the console task table, limited
 to tasks with their own address space, and then make a daemon migrate under
 load. Everything under it is in place — identity in both contexts, per-hart
-context and stack, the table private and locked, syscalls atomic per call.
+context, stack and current task, the table private and locked, syscalls atomic
+per call. What it still needs is a rule that two harts cannot pick the *same*
+task: `pick_next` returns any `Ready` slot, and a task stays `Ready` while it
+runs, so today's answer would be "both of them".
 
 ##### W14 — Object-capabilities as the live substrate (P4)
 

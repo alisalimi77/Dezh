@@ -29,7 +29,7 @@ use crate::abi::{
 use crate::arch::finisher::{shutdown, FINISH_FAIL};
 use crate::arch::timer::{rdtime, sbi_set_timer, QUANTUM, TICKS, TIMER_DELTA};
 use crate::mm::global::Global;
-use crate::smp::{current_hart, BOOT_HART};
+use crate::smp::{current_hart, BOOT_HART, MAX_HARTS};
 use crate::sync::TicketLock;
 use crate::proc::loader::{build_address_space, kernel_satp, proc_satp, USER_STACK_TOP};
 use crate::{kprintln, plic_handle, reclaim_resources, restore_kernel_ctx, run_first, trap_entry, utrap, Uart, TASK_IPC, TASK_PRINT, TASK_TIME};
@@ -130,7 +130,27 @@ static TPERS: Global<[u8; MAX_TASKS]> = Global::new([0; MAX_TASKS]);
 // each task's address space (satp)
 static TSATP: Global<[usize; MAX_TASKS]> = Global::new([0; MAX_TASKS]);
 static TRES: Global<[TaskResources; MAX_TASKS]> = Global::new([EMPTY_TASK_RESOURCES; MAX_TASKS]);
-static CURRENT: Global<usize> = Global::new(0);
+/// The task each hart is running.
+///
+/// Per-hart because "the task that is running" is not one fact about the
+/// kernel, it is one fact per hart: `utrap_handler` reads it to know whose
+/// syscall it is serving, and `pick_next` reads it as the round-robin cursor.
+/// One cell for both, with two harts in the scheduler, means a syscall charged
+/// to the wrong task's capabilities - an authority bug, not a lost tick.
+///
+/// Indexed by `current_hart()`, like `KCTX` and `ktrap_stack`. The index is
+/// bounded once, at boot, where `tp` is checked against the id SBI passes.
+static CURRENT: Global<[usize; MAX_HARTS]> = Global::new([0; MAX_HARTS]);
+
+/// The running task on the calling hart. Every read and write of it goes
+/// through this pair, so the hart index cannot be dropped at one site.
+unsafe fn current_task() -> usize {
+    (*CURRENT.get())[current_hart()]
+}
+
+unsafe fn set_current_task(i: usize) {
+    (*CURRENT.get())[current_hart()] = i;
+}
 
 fn clear_mailbox(i: usize) {
     unsafe {
@@ -312,7 +332,7 @@ fn frame_ptr(i: usize) -> *mut usize {
 unsafe fn pick_next() -> Option<usize> {
     expire_recv_timeouts();
     for off in 0..MAX_TASKS {
-        let i = (*CURRENT.get() + 1 + off) % MAX_TASKS;
+        let i = (current_task() + 1 + off) % MAX_TASKS;
         if (*TSTATE.get())[i] == TaskState::Ready {
             return Some(i);
         }
@@ -407,7 +427,7 @@ unsafe fn schedule_or_return() -> *const usize {
                     );
                     shutdown(FINISH_FAIL);
                 }
-                *CURRENT.get() = i;
+                set_current_task(i);
                 // Stamp the running hart into the frame before the task resumes,
                 // so `utrap` can restore kernel identity on the way back in.
                 (*FRAMES.get())[i][F_HART] = current_hart();
@@ -457,7 +477,7 @@ extern "C" fn utrap_handler(frame_ptr: *mut usize) -> *const usize {
         // lock because another hart may be choosing the next task right now.
         let cur = {
             let _held = SCHED_LOCK.lock();
-            *CURRENT.get()
+            current_task()
         };
         if interrupt {
             // Supervisor timer = preemption: the running task's full frame is
@@ -821,7 +841,7 @@ pub(crate) fn run_tasks(specs: &[(usize, usize, u8)]) {
             (*TRES.get())[i].kind = TaskKind::LegacyBakedTask;
             (*TSTATE.get())[i] = TaskState::Ready;
         }
-        *CURRENT.get() = 0;
+        set_current_task(0);
         // First dispatch of the run does not go through `schedule_or_return`,
         // so it stamps the hart itself.
         (*FRAMES.get())[0][F_HART] = current_hart();
@@ -884,7 +904,7 @@ pub(crate) fn run_processes(specs: &[ProcessSpec]) {
         if launched == 0 {
             return;
         }
-        *CURRENT.get() = first_ready;
+        set_current_task(first_ready);
         (*FRAMES.get())[first_ready][F_HART] = current_hart();
         asm!("csrw stvec, {}", in(reg) utrap as *const () as usize);
         sbi_set_timer(rdtime() + QUANTUM);
@@ -908,7 +928,7 @@ pub(crate) fn run_processes(specs: &[ProcessSpec]) {
 
 pub(crate) fn run_scheduler_from(first: usize) {
     unsafe {
-        *CURRENT.get() = first;
+        set_current_task(first);
         // The third dispatch entry, and the one that was missed: this is the
         // path a Pol process takes. Every `run_first` call site has to stamp,
         // because none of them go through `schedule_or_return`.
