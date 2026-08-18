@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/assets/dezh-readme-banner.svg" alt="Dezh OS capability-secure architecture banner" width="100%">
+  <img src="docs/assets/dezh-readme-banner.svg" alt="Dezh OS: an agent runs under one intent, the kernel grants only requested-intersect-ceiling, every effect lands on the Sand ledger, and Sfar rolls a mission back or refuses with a reason" width="100%">
 </p>
 
 <p align="center">
@@ -12,8 +12,8 @@
 </p>
 
 <p align="center">
-  <strong>Intent-native, capability-secure OS prototype</strong><br>
-  User-space drivers · Typed IPC · Rollbackable storage · Transactional apps · Reboot-safe QEMU demos
+  <strong>Intent-native, effect-accountable OS prototype</strong><br>
+  Every effect bound to an intent · recorded on a ledger · reversed by mission, or refused with a reason
 </p>
 
 <p align="center">
@@ -36,6 +36,13 @@ isolated U-mode processes, starts a long-lived user-space `virtio-block`
 driver, exercises typed IPC, installs SDK-built `.dzp` packages onto a real
 disk image, and validates package update/rollback/recovery across reboot.
 
+On top of that sits the part that is not standard microkernel work: an agent
+acts under **one intent**, the authority it gets is `requested ∩ ceiling`, every
+effect it causes lands on a **ledger** with its actor, intent, derived
+capability and reversibility — and a whole **mission** can be rolled back, with
+the effects that genuinely cannot be undone refused by name rather than quietly
+skipped.
+
 Dezh is not production-ready. It is an executable OS prototype prepared for
 architectural and security-model review.
 
@@ -48,7 +55,8 @@ architectural and security-model review.
 | Authority | Capability-gated syscalls, IPC, storage namespaces, and device grants |
 | Driver model | `virtio-block` runs as a U-mode service with explicit MMIO/DMA grants |
 | Device I/O | Interrupt-driven: PLIC-routed virtio **and UART** IRQs, drivers sleep on the device, scheduler idles with `wfi`, and console input arrives through a receive ring rather than a poll |
-| SMP | SBI HSM bring-up, ticket spinlock, one shared run queue — U-mode tasks scheduled symmetrically, each in its own address space |
+| SMP | SBI HSM bring-up, one ticket spinlock, one shared run queue: 4 U-mode tasks ran across 3 harts, each exactly once, 3 live at the same instant, 0 faults — and an intruder task page-faults on its own hart without touching its concurrent neighbour |
+| Kernel concurrency (in flight) | The task table is private and lock-guarded, each syscall is one critical section, and the trap context, trap stack and running task are per-hart with a run claim so two harts cannot enter one frame. The console scheduler still dispatches from the boot hart only — [W13](docs/ROADMAP.md#w13--one-scheduler-across-all-harts-p3) is the merge, and says what is left |
 | Network | Bidirectional edge: per-destination egress capability, plus ARP resolution and a real ICMP echo exchange |
 | External effects | `marz-effect` drives a real external system and ledgers the outcome that comes back, with the undo recorded on the effect. The host gateway performing it is **outside the TCB** — Dezh proves authorization, egress, ledgering and compensation, not the gateway's honesty |
 | Information flow | Both axes: secrecy blocks write-down/exfiltration, integrity blocks unvalidated ingress becoming trusted state |
@@ -56,26 +64,69 @@ architectural and security-model review.
 | Persistence | Cairn v1 commit log with rollbackable refs and per-app namespaces |
 | Apps | `.dzp` packages with manifest-scoped caps and transactional lifecycle |
 | Package signing | Ed25519 `DZSP` envelope binding the *authority* a package requests; the grant is attenuated to the publisher's ceiling (`granted = requested ∩ ceiling`) |
+| x86_64 runtime | Not a smoke target: 256-vector IDT, a Local APIC timer measured against the PIT and armed at 100 Hz, a preemptive scheduler, per-task `cr3`, ring 3 with one DPL3 gate, a faulting CPL3 task killed alone, and syscalls whose grant is `requested ∩ ceiling` via the shared `dezh_core::mcap`. No disk, drivers or ledger yet — the [cross-ISA ledger](docs/ROADMAP.md#cross-isa-status-and-where-the-two-kernels-actually-diverge) states every gap |
+| Adversary | `redteam` runs five escapes — cross-namespace read, raw MMIO write, capability forgery, out-of-intent write, CPU monopolization — and each is stopped at a **named** boundary with the console still alive |
 | Review release | [`v0.5-review`](https://github.com/alisalimi77/Dezh/releases/tag/v0.5-review) with a bootable x86_64 ISO, kernels, `.dzp` package, transcript, docs, checksums |
 
 ## Review Snapshot
 
+Verbatim from the CI smoke run (`tools/ci/qemu_smoke.py riscv64`), not a mockup.
+Three things that are hard to get from a container or a microVM:
+
+**An adversary is stopped at a boundary that has a name.**
+
 ```text
-dezh> services
-VirtioBlock state=Running task=0 restarts=0
-
-dezh> ipc-typed-demo
-[typed-ipc] PASS: OK=OK, BAD_REQUEST=BAD_REQUEST, TIMEOUT=TIMEOUT, DENIED=DENIED
-
-dezh> app-run lab
-Dezh Lab :: installable app system probe
-[lab-ui] PASS: scheduler, IPC, installer launch, and UI path cooperated
-
-dezh> cairn-demo
-[cairn-demo] rollback one step restores the previous commit
-[cairn] DENIED: ns=note requires capability CAIRN_NS_0
-[cairn-demo] PASS
+dezh> redteam
+[redteam] adversary loose: a malicious agent attempts five escapes; each must hit a NAMED boundary and the system must survive
+[redteam] escape 1 STOPPED at boundary: storage-service capability check (kernel-attested caps) -- console survived
+[redteam] escape 2 STOPPED at boundary: hardware memory boundary (Sv39 paging, MMIO mapped U=0) -- console survived
+[redteam] escape 3 STOPPED at boundary: kernel syscall capability check (no ambient authority to forge/amplify) -- console survived
+[redteam] escape 4 STOPPED at boundary: intent-derivation ceiling (derived cap <= Ahd) + kernel hostcall check -- console survived
+[redteam] escape 5 STOPPED at boundary: preemptive scheduler (timer interrupt forces a context switch) -- console survived
+[redteam] PASS: all five escapes were stopped at named boundaries; the adversary was contained and the console is still alive
 ```
+
+**A whole agent mission is rolled back — and the part that cannot be undone is
+refused out loud, not silently skipped.**
+
+```text
+dezh> sfar-demo
+[sfar-demo] 1/4 mission Ahd#4: one irreversible external send + two reversible writes
+[sfar-demo] 2/4 rollback FORECAST before touching anything
+  [sfar] plan: reversible=2 compensatable=0 irreversible=1 unknown=0 confidence=partial (some effects cannot be undone)
+[sfar-demo] 3/4 roll the mission back: retract reversible, refuse irreversible
+    [sfar] REFUSED at ns=agent slot=10: irreversible effect already happened in the outside world; cannot be undone
+  [sfar] mission Ahd#4 rolled back: reversible effects retracted=2 compensations performed=0 refused_irreversible=1 refused_compensatable=0
+[sfar-demo] PASS: whole-mission rollback undid the reversible writes and refused the irreversible send with an explanation
+[sfar-demo] Dezh does not over-promise rollback: unknown/irreversible effects are never silently 'undone'
+```
+
+**Parallelism costs no isolation: several U-mode tasks on several harts, and a
+task that reaches across is killed on its own hart.**
+
+```text
+dezh> smp-sched
+[smp-sched] task -> hart placement: t0=hart0, t1=hart2, t2=hart1, t3=hart1
+[smp-sched] 4 tasks ran on 3 harts, each exactly once, 0 faults; peak 3 U-mode tasks live at the same time
+[smp-sched] verdict -> SCHED-OK - one queue, many harts, several U-mode tasks executing simultaneously
+
+dezh> smp-isolate
+[smp-isolate] worker on hart 0: ran cleanly
+[smp-isolate] intruder on hart 2: page-faulted on the cross-task write, killed on its own hart
+[smp-isolate] verdict -> ISOLATION-OK - concurrent tasks on different harts cannot reach each other's memory
+```
+
+Every effect above is on the ledger with its actor, intent, derived capability
+and reversibility:
+
+```text
+dezh> sand-log agent
+  [sand] effect ledger ns=agent (newest first): actor -> intent -> derived cap -> effect
+    slot=9 gen=3 actor=task1 intent=Ahd#3 derived=print,cairn-read,cairn-write reversibility=reversible status=committed hash=0x215bcff0b48e83e3
+    slot=5 gen=2 actor=task1 intent=direct derived=print,cairn-read,cairn-write reversibility=reversible status=committed hash=0x215bcff0b48e83e3
+```
+
+Full transcript: [docs/transcripts/riscv64.md](docs/transcripts/riscv64.md).
 
 ## Why Dezh Exists
 
@@ -168,7 +219,11 @@ flowchart LR
 - **SMP**: secondary harts brought up over SBI HSM, a fair ticket spinlock, and a
   shared run queue from which every hart pulls — U-mode tasks are scheduled
   symmetrically, several running at the same instant, each in its **own address
-  space** so parallelism costs no isolation.
+  space** so parallelism costs no isolation. Honest scope: that is the secondary
+  harts' own queue. The **console** scheduler — the one behind every other demo
+  on this page — still dispatches from the boot hart alone; merging the two is
+  [W13](docs/ROADMAP.md#w13--one-scheduler-across-all-harts-p3), in progress, and
+  the roadmap names what is left.
 - **A network edge that works in both directions**: guarded per-destination
   egress, plus a receive path doing ARP resolution and a real ICMP echo exchange.
 - **Information flow on both axes**: secrecy stops a secret being written down or
@@ -456,7 +511,7 @@ High-level layout:
 | --- | --- |
 | `dezh-boot/` | RISC-V bare-metal kernel, console, services, package store, demo apps |
 | `dezh-boot/virtio-blk/` | User-space virtio-block daemon ELF |
-| `dezh-boot-x86/` | x86_64 smoke target |
+| `dezh-boot-x86/` | x86_64 kernel: IDT, APIC timer, preemptive scheduler, ring 3, per-task `cr3`, capability-checked syscalls |
 | `dezh-core/` | Shared `.dzp`, base64, and Dezh-IR support |
 | `dezh-kernel/` | Boot contract and kernel plan validation |
 | `spikes/` | Superseded Step 1..9 host prototypes; nothing shipping depends on them |
