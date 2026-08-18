@@ -858,11 +858,51 @@ invert the predicate so the boot hart is the one refused a baked task, and
 `ipc-typed-demo` never reaches `PING -> 0` — the filter is what chooses, not
 decoration next to the choice.
 
+**The merge was attempted, and it has a defect. Here is exactly what is known.**
+A `secondary_serve` was written — pick under the lock honouring claims and the
+address-space filter, install `stvec = utrap`, SUM, the task's satp and this
+hart's own timer, `run_first`, and undo all of it on the way back — plus a
+`CONSOLE_SMP_ON` switch (off by default, because W13's acceptance requires every
+existing demo to be unchanged) and an `smp-console` demo. It is **not** in the
+tree, because it hangs. What was measured before backing it out:
+
+- With no prior demo, it works, five runs out of five: three loaded processes,
+  three different harts, clean exit, `MERGED-OK`. A console task really does run
+  on a secondary through `utrap` — all 348 lines of it — not the AP path's
+  74-line handler.
+- After any demo that has run a **U-mode task on a secondary via the AP path**
+  (`smp-task`, `smp-sched`, sometimes `smp-preempt`), the next `smp-console`
+  wedges. `smp-demo`, which runs no U-mode task, does not poison it.
+- The hang is in the boot hart's `run_processes`, between installing the trap
+  vector and returning — the first task never prints.
+- Replacing the U-mode entry with a pick-and-release, so a secondary claims a
+  task and never `sret`s, is clean in every case. **The defect is in a secondary
+  entering U-mode on the console trap path, not in the pick.**
+- Not the secondary's timer: the hang survives with `sie.STIE` left clear.
+- Not the UART lock: the hang survives with the macros not taking it.
+- Not `run_processes` itself: after `smp-task`, the existing `procs` command —
+  the same entry with the switch off — is fine.
+
+The leading suspicion, unproven, is per-hart CSR state the AP path leaves behind
+and `secondary_serve` does not reset — `sscratch` is the one both trap paths use
+for different structures, and `frame_restore` only sets it at the very end of
+`run_first`. A trap taken in the window between `csrw stvec, utrap` and that
+store would enter `utrap` with the AP path's `sscratch` and save a console task's
+registers into an `ApCtx`. Proving or refuting that is the next step's first job.
+
 So the last piece is: let a secondary pull from the console task table, limited
 to tasks with their own address space, and then make a daemon migrate under
 load. Everything under it is in place — identity in both contexts, per-hart
 context, stack and current task, the table private and locked on every path
-including entry, the run claim enforced, syscalls atomic per call.
+including entry, the run claim enforced, syscalls atomic per call — and the
+entry itself is written and known to work from a cold console. What is left is
+one defect with a bounded search space, not a design question.
+
+Migration needs one more thing the demo made obvious: a hart keeps its claim
+across preemption, and with as many harts as runnable tasks it re-picks its own.
+A task moves hart only after it **blocks** and is woken, so the daemon — which
+blocks on `sys_irq_wait` — is the case that shows it, and the loop tasks never
+will.
 
 ##### W14 — Object-capabilities as the live substrate (P4)
 
