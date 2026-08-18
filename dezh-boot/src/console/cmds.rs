@@ -11,7 +11,7 @@ use crate::apps::{app_calc_is_active, app_install, app_run, app_vault_is_active}
 use crate::audit::record_event;
 use crate::mm::frames::FRAME_FREE;
 use crate::proc::loader::ProcessSpec;
-use crate::sched::TEXIT;
+use crate::sched::foreground_exit_code;
 use crate::sched::run_foreground_processes;
 use crate::vblk::run_registered_virtio_client;
 use crate::console::print_memstat;
@@ -86,7 +86,7 @@ pub(crate) fn calc_command(plan: &KernelPlan, arg: &str) {
     run_foreground_processes(&[
         ProcessSpec::new(CALC_ELF, TASK_PRINT | TASK_IPC, CALC_ROLE_EVAL).args(op, a, b),
     ]);
-    if unsafe { (*TEXIT.get())[FIRST_FOREGROUND_TASK] } == 0 {
+    if foreground_exit_code() == 0 {
         if let Some(result) = calc_eval(op, a, b) {
             let expr = format!("{} {} {} = {}", a_s, op_s, b_s, result);
             run_registered_virtio_client(plan, BLK_REQ_CALC_SET, &expr);

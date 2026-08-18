@@ -15,12 +15,12 @@
 
 use crate::proc::loader::ProcessSpec;
 use crate::dev::virtio::{MARZ_DMA, VIRTIO_DEVICE_ID_NET, find_virtio_mmio, marz_dma_pa};
-use crate::sched::{TEXIT, run_foreground_processes};
+use crate::sched::{foreground_exit_code, run_foreground_processes};
 use crate::audit::record_event;
 use crate::mm::global::Global;
 use crate::ocap::device::DEV_OBJ_NET;
 use crate::pkg;
-use crate::{cairn_req_intent, dev_authority_live, difc_ingress, kprintln, BLK_REQ_CAIRN_COMMIT, FIRST_FOREGROUND_TASK, run_registered_virtio_client_ns, task_ns_cap, KernelPlan, MARZ_ELF, NS_SECRET_VAULT, OP_TAINT, SAND_REV_COMPENSATABLE, SAND_REV_IRREVERSIBLE, TASK_DEVICE_VIRTIO_NET, TASK_PRINT};
+use crate::{cairn_req_intent, dev_authority_live, difc_ingress, kprintln, BLK_REQ_CAIRN_COMMIT, run_registered_virtio_client_ns, task_ns_cap, KernelPlan, MARZ_ELF, NS_SECRET_VAULT, OP_TAINT, SAND_REV_COMPENSATABLE, SAND_REV_IRREVERSIBLE, TASK_DEVICE_VIRTIO_NET, TASK_PRINT};
 
 struct MarzDest {
     name: &'static str,
@@ -278,7 +278,7 @@ pub(crate) fn marz_effect(plan: &KernelPlan, arg: &str, ahd: u16) {
     )
     .args(marz_dma_pa(), marz_dest_packed(dest), len)
     .virtio_net()]);
-    let st = unsafe { (*TEXIT.get())[FIRST_FOREGROUND_TASK] };
+    let st = foreground_exit_code();
     if st != 0 {
         kprintln!("[marz-effect] no outcome observed (daemon status={st}); NOT recording an effect");
         record_event("kernel", "marz.effect", dest.name, "no-reply");
@@ -409,7 +409,7 @@ pub(crate) fn marz_send_to(plan: &KernelPlan, arg: &str, ahd: u16) {
     )
     .args(marz_dma_pa(), marz_dest_packed(dest), 0)
     .virtio_net()]);
-    let st = unsafe { (*TEXIT.get())[FIRST_FOREGROUND_TASK] };
+    let st = foreground_exit_code();
     record_event(
         "kernel",
         "marz.send",
@@ -471,7 +471,7 @@ pub(crate) fn run_marz_ping(arg: &str) {
     )
     .args(marz_dma_pa(), marz_dest_packed(dest), 0)
     .virtio_net()]);
-    let st = unsafe { (*TEXIT.get())[FIRST_FOREGROUND_TASK] };
+    let st = foreground_exit_code();
     record_event(
         "kernel",
         "marz.ping",

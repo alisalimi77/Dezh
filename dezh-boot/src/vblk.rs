@@ -12,10 +12,10 @@
 
 use crate::proc::loader::ProcessSpec;
 use crate::dev::virtio::{VIRTIO_DATA_OFF, VIRTIO_DMA, VIRTIO_INPUT_OFF};
-use crate::sched::{TEXIT, run_foreground_processes};
+use crate::sched::{foreground_exit_code, run_foreground_processes};
 use crate::abi::{BLK_OP_CLIENT_DEMO, BLK_OP_CLIENT_REQ, BLK_OP_NO_GRANT_PROBE};
 use crate::service::{ensure_virtio_block_service, refresh_virtio_service_state};
-use crate::{kprintln, SYS_DENIED, KernelPlan, VIRTIO_BLK_ELF, FIRST_FOREGROUND_TASK, TASK_BLOCK_READ, TASK_BLOCK_WRITE, TASK_IPC, TASK_PRINT};
+use crate::{kprintln, SYS_DENIED, KernelPlan, VIRTIO_BLK_ELF, TASK_BLOCK_READ, TASK_BLOCK_WRITE, TASK_IPC, TASK_PRINT};
 
 pub(crate) fn virtio_dma_pa() -> usize {
     VIRTIO_DMA.get() as usize
@@ -108,7 +108,7 @@ pub(crate) fn run_virtio_client_ns_raw(
             .virtio_dma(),
     ]);
     refresh_virtio_service_state();
-    unsafe { (*TEXIT.get())[FIRST_FOREGROUND_TASK] }
+    foreground_exit_code()
 }
 
 pub(crate) fn run_registered_virtio_client_status(plan: &KernelPlan, req: usize, input: &str) -> usize {
@@ -127,7 +127,7 @@ pub(crate) fn run_registered_virtio_client_status(plan: &KernelPlan, req: usize,
             .virtio_dma(),
     ]);
     refresh_virtio_service_state();
-    unsafe { (*TEXIT.get())[FIRST_FOREGROUND_TASK] }
+    foreground_exit_code()
 }
 
 pub(crate) fn run_registered_virtio_sector_status(
@@ -150,7 +150,7 @@ pub(crate) fn run_registered_virtio_sector_status(
             .virtio_dma(),
     ]);
     refresh_virtio_service_state();
-    unsafe { (*TEXIT.get())[FIRST_FOREGROUND_TASK] }
+    foreground_exit_code()
 }
 
 pub(crate) fn run_virtio_blk_daemon_demo(plan: &KernelPlan) {

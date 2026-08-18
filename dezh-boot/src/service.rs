@@ -18,10 +18,10 @@
 use core::sync::atomic::Ordering;
 
 use crate::proc::loader::{ProcessSpec, TaskKind};
-use crate::sched::{MAX_TASKS, TEXIT, TSTATE, TaskState, reclaim_task_resources, run_foreground_processes, run_scheduler_from, spawn_process_at};
+use crate::sched::{MAX_TASKS, TaskState, foreground_exit_code, reclaim_task_resources, run_foreground_processes, run_scheduler_from, spawn_process_at, task_exit_code, task_is_live, task_state};
 use crate::abi::{
     BLK_OP_CLIENT_REQ, BLK_OP_DAEMON, BLK_REQ_FAULT_DEMO, BLK_REQ_STOP,
-    FIRST_FOREGROUND_TASK, VIRTIO_SERVICE_TASK,
+    VIRTIO_SERVICE_TASK,
 };
 use crate::audit::record_event;
 use crate::arch::timer::TICKS;
@@ -159,18 +159,18 @@ pub(crate) fn refresh_virtio_service_state() {
         unsafe {
             let task = (*SERVICES.get())[i].task;
             if task < MAX_TASKS {
-                if (*TSTATE.get())[task] == TaskState::Blocked || (*TSTATE.get())[task] == TaskState::Ready {
+                if task_is_live(task) {
                     (*SERVICES.get())[i].state = ServiceState::Running;
                     (*SERVICES.get())[i].fault = "";
-                } else if (*TSTATE.get())[task] == TaskState::Done && (*TEXIT.get())[task] == 0 {
+                } else if task_state(task) == TaskState::Done && task_exit_code(task) == 0 {
                     (*SERVICES.get())[i].state = ServiceState::Stopped;
                     (*SERVICES.get())[i].fault = "manual stop";
-                    (*SERVICES.get())[i].last_exit = (*TEXIT.get())[task];
+                    (*SERVICES.get())[i].last_exit = task_exit_code(task);
                     reclaim_task_resources(task);
-                } else if (*TSTATE.get())[task] == TaskState::Done {
+                } else if task_state(task) == TaskState::Done {
                     (*SERVICES.get())[i].state = ServiceState::Faulted;
                     (*SERVICES.get())[i].fault = "driver exited or faulted";
-                    (*SERVICES.get())[i].last_exit = (*TEXIT.get())[task];
+                    (*SERVICES.get())[i].last_exit = task_exit_code(task);
                     reclaim_task_resources(task);
                 }
             }
@@ -184,7 +184,7 @@ pub(crate) fn ensure_virtio_block_service(_plan: &KernelPlan) -> Option<usize> {
         let task = (*SERVICES.get())[idx].task;
         if (*SERVICES.get())[idx].state == ServiceState::Running
             && task < MAX_TASKS
-            && ((*TSTATE.get())[task] == TaskState::Blocked || (*TSTATE.get())[task] == TaskState::Ready)
+            && task_is_live(task)
         {
             return Some(task);
         }
@@ -324,7 +324,7 @@ pub(crate) fn svc_stop_virtio(_plan: &KernelPlan) {
             .args(daemon, 0, BLK_REQ_STOP)
             .virtio_dma(),
     ]);
-    let st = unsafe { (*TEXIT.get())[FIRST_FOREGROUND_TASK] };
+    let st = foreground_exit_code();
     refresh_virtio_service_state();
     unsafe {
         kprintln!(

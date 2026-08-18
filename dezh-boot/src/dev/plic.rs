@@ -15,8 +15,8 @@ use core::ptr::{read_volatile, write_volatile};
 use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 use crate::dev::virtio::{VIRTIO_BLK_MMIO_PA, VIRTIO_MMIO_COUNT, VIRTIO_MMIO_STRIDE};
-use crate::sched::{MAX_TASKS, TIRQ_WAITING, TSTATE};
-use crate::{kprintln, TaskState};
+use crate::sched::wake_irq_waiters;
+use crate::kprintln;
 
 //
 // QEMU `virt` layout: hart h has PLIC context 2h (M-mode) and 2h+1 (S-mode);
@@ -99,18 +99,9 @@ pub(crate) fn plic_handle() -> u32 {
         }
         write_volatile(claim as *mut u32, irq);
         EXT_IRQS.fetch_add(1, Ordering::Relaxed);
-        // Anyone sleeping on a device becomes runnable again.
-        let mut i = 0usize;
-        while i < MAX_TASKS {
-            if (*TIRQ_WAITING.get())[i] {
-                (*TIRQ_WAITING.get())[i] = false;
-                if (*TSTATE.get())[i] == TaskState::Blocked {
-                    (*TSTATE.get())[i] = TaskState::Ready;
-                }
-                IRQ_WAKEUPS.fetch_add(1, Ordering::Relaxed);
-            }
-            i += 1;
-        }
+        // Anyone sleeping on a device becomes runnable again. The walk itself
+        // lives in `sched`, which owns the table it writes.
+        IRQ_WAKEUPS.fetch_add(wake_irq_waiters(), Ordering::Relaxed);
         irq
     }
 }

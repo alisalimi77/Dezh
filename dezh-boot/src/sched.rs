@@ -49,7 +49,7 @@ pub(crate) enum TaskState {
     Done,
 }
 
-pub(crate) static TEXIT: Global<[usize; MAX_TASKS]> = Global::new([0; MAX_TASKS]);
+static TEXIT: Global<[usize; MAX_TASKS]> = Global::new([0; MAX_TASKS]);
 
 #[derive(Clone, Copy)]
 struct IpcStats {
@@ -119,14 +119,14 @@ static TRECV_PTR: Global<[usize; MAX_TASKS]> = Global::new([0; MAX_TASKS]);
 static TRECV_LEN: Global<[usize; MAX_TASKS]> = Global::new([0; MAX_TASKS]);
 
 static FRAMES: Global<[[usize; 32]; MAX_TASKS]> = Global::new([[0; 32]; MAX_TASKS]);
-pub(crate) static TSTATE: Global<[TaskState; MAX_TASKS]> = Global::new([TaskState::Unused; MAX_TASKS]);
+static TSTATE: Global<[TaskState; MAX_TASKS]> = Global::new([TaskState::Unused; MAX_TASKS]);
 /// Tasks parked until a device interrupt arrives (see `SYS_IRQ_WAIT`).
-pub(crate) static TIRQ_WAITING: Global<[bool; MAX_TASKS]> = Global::new([false; MAX_TASKS]);
-pub(crate) static TCAPS: Global<[usize; MAX_TASKS]> = Global::new([0; MAX_TASKS]);
+static TIRQ_WAITING: Global<[bool; MAX_TASKS]> = Global::new([false; MAX_TASKS]);
+static TCAPS: Global<[usize; MAX_TASKS]> = Global::new([0; MAX_TASKS]);
 static TPERS: Global<[u8; MAX_TASKS]> = Global::new([0; MAX_TASKS]);
 // each task's address space (satp)
 static TSATP: Global<[usize; MAX_TASKS]> = Global::new([0; MAX_TASKS]);
-pub(crate) static TRES: Global<[TaskResources; MAX_TASKS]> = Global::new([EMPTY_TASK_RESOURCES; MAX_TASKS]);
+static TRES: Global<[TaskResources; MAX_TASKS]> = Global::new([EMPTY_TASK_RESOURCES; MAX_TASKS]);
 static CURRENT: Global<usize> = Global::new(0);
 
 fn clear_mailbox(i: usize) {
@@ -806,6 +806,89 @@ pub(crate) fn run_foreground_processes(specs: &[ProcessSpec]) {
     }
     run_scheduler_from(first_ready);
     reclaim_finished_foreground_tasks();
+}
+
+// --- The task table's public surface. ----------------------------------------
+//
+// Six modules used to reach into `TSTATE`, `TEXIT`, `TCAPS`, `TRES` and
+// `TIRQ_WAITING` directly, twenty-five sites in all. That was harmless while one
+// hart reached them and is the blocker for W13 step 2: a lock cannot be put
+// around state that half the kernel pokes at from outside.
+//
+// So the tables are private now and this is the whole of what the rest of the
+// kernel may ask. The point is not tidiness - it is that the compiler, not a
+// convention, decides whether a new call site can skip the lock these are about
+// to acquire. Adding the lock becomes a change inside this file.
+//
+// `wake_irq_waiters` is the one that mattered most: it moves a *mutation* that
+// ran in interrupt context, in `plic_handle`, back into the module that owns the
+// state it mutates.
+
+/// A task's row, for reporting. Read as one call so a caller cannot print a
+/// half-updated mixture of two tasks' fields.
+#[derive(Clone, Copy)]
+pub(crate) struct TaskRow {
+    pub(crate) state: TaskState,
+    pub(crate) kind: TaskKind,
+    pub(crate) caps: usize,
+    pub(crate) exit: usize,
+}
+
+pub(crate) fn task_row(slot: usize) -> TaskRow {
+    unsafe {
+        TaskRow {
+            state: (*TSTATE.get())[slot],
+            kind: (*TRES.get())[slot].kind,
+            caps: (*TCAPS.get())[slot],
+            exit: (*TEXIT.get())[slot],
+        }
+    }
+}
+
+pub(crate) fn task_state(slot: usize) -> TaskState {
+    unsafe { (*TSTATE.get())[slot] }
+}
+
+pub(crate) fn task_exit_code(slot: usize) -> usize {
+    unsafe { (*TEXIT.get())[slot] }
+}
+
+/// Is this task alive in the sense a supervisor cares about - runnable, or
+/// parked waiting for something?
+pub(crate) fn task_is_live(slot: usize) -> bool {
+    matches!(task_state(slot), TaskState::Blocked | TaskState::Ready)
+}
+
+/// The exit code of the foreground task, which is how every synchronous console
+/// verb - block I/O, Marz, the package paths - reads its result back.
+pub(crate) fn foreground_exit_code() -> usize {
+    unsafe { (*TEXIT.get())[FIRST_FOREGROUND_TASK] }
+}
+
+/// A device reported completion: make every task parked on one runnable again.
+/// Returns how many were woken.
+///
+/// Called from `plic_handle`, in interrupt context. It lives here because it
+/// writes the task table, and because when that table goes under a lock this is
+/// the call that has to take it - from a context that cannot be allowed to
+/// block on a lock this hart already holds. `sync::TicketLock` masks for exactly
+/// that reason.
+pub(crate) fn wake_irq_waiters() -> u64 {
+    let mut woken = 0u64;
+    unsafe {
+        let mut i = 0usize;
+        while i < MAX_TASKS {
+            if (*TIRQ_WAITING.get())[i] {
+                (*TIRQ_WAITING.get())[i] = false;
+                if (*TSTATE.get())[i] == TaskState::Blocked {
+                    (*TSTATE.get())[i] = TaskState::Ready;
+                }
+                woken += 1;
+            }
+            i += 1;
+        }
+    }
+    woken
 }
 
 pub(crate) fn print_ipcstat() {

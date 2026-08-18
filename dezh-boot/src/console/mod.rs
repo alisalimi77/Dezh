@@ -234,18 +234,19 @@ pub(crate) fn task_state_name(state: TaskState) -> &'static str {
 
 pub(crate) fn print_tasks() {
     refresh_virtio_service_state();
-    unsafe {
+    {
         kprintln!("tasks:");
         let mut i = 0usize;
         while i < MAX_TASKS {
+            let row = task_row(i);
             kprintln!(
                 "  task{} state={:<7} kind={:<10} frames={:<3} caps={:#x} exit={} service={}",
                 i,
-                task_state_name((*TSTATE.get())[i]),
-                task_kind_name((*TRES.get())[i].kind),
+                task_state_name(row.state),
+                task_kind_name(row.kind),
                 task_owned_frames(i),
-                (*TCAPS.get())[i],
-                (*TEXIT.get())[i],
+                row.caps,
+                row.exit,
                 service_for_task(i)
             );
             i += 1;
