@@ -1,0 +1,69 @@
+# TEMPORARY. Delete once the GHCR publish is restored.
+#
+# The release job's `docker push` to GHCR has been refused with
+# `denied: permission_denied: write_package` since v0.3-review, while the
+# package itself is alive and anonymously pullable (v0.1-review, v0.2-review,
+# latest). So the question is narrow: does THIS repository's `GITHUB_TOKEN` get
+# push authority on that package, or not?
+#
+# It has to be `GITHUB_TOKEN`, because that is the credential that was refused.
+# A personal access token would succeed and prove nothing.
+#
+# It deliberately pushes no image. Asking the registry for a push-scoped token
+# and opening a blob upload session answers the same question and leaves no tag
+# behind on a public package.
+name: GHCR probe
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ask GHCR for push authority on the package
+        env:
+          IMAGE: ${{ github.repository_owner }}/dezh-review-env
+          ACTOR: ${{ github.actor }}
+          TOKEN: ${{ github.token }}
+        run: |
+          set -u
+          echo "package: $IMAGE"
+
+          # 1. The registry token exchange. Its `access` claim is the answer:
+          #    if push is not granted here, `docker push` cannot succeed.
+          resp=$(curl -s -u "$ACTOR:$TOKEN" \
+            "https://ghcr.io/token?scope=repository:${IMAGE}:pull,push&service=ghcr.io")
+          jwt=$(printf '%s' "$resp" | python3 -c 'import sys,json;print(json.load(sys.stdin).get("token",""))')
+          if [ -z "$jwt" ]; then
+            echo "RESULT: no token issued at all"
+            printf '%s\n' "$resp"
+            exit 1
+          fi
+
+          payload=$(printf '%s' "$jwt" | cut -d. -f2)
+          pad=$(( ${#payload} % 4 )); [ $pad -ne 0 ] && payload="${payload}$(printf '=%.0s' $(seq $((4-pad))))"
+          actions=$(printf '%s' "$payload" | tr '_-' '/+' | base64 -d 2>/dev/null \
+            | python3 -c 'import sys,json;d=json.load(sys.stdin);print(",".join(a for e in d.get("access",[]) for a in e.get("actions",[])) or "(none)")')
+          echo "granted actions: $actions"
+
+          # 2. Exercise it. A blob upload session is the first thing `docker
+          #    push` does, and it is what returns the denial. 202 means we may
+          #    write; 403 is the failure we are chasing. Nothing is committed,
+          #    so no tag or version appears.
+          code=$(curl -s -o /tmp/body -w '%{http_code}' -X POST \
+            -H "Authorization: Bearer $jwt" \
+            "https://ghcr.io/v2/${IMAGE}/blobs/uploads/")
+          echo "blob upload session: HTTP $code"
+          cat /tmp/body 2>/dev/null || true
+          echo
+
+          case "$actions:$code" in
+            *push*:202) echo "RESULT: PUSH AUTHORISED - restore the publish steps in release.yml" ;;
+            *push*:*)   echo "RESULT: token granted push but the registry refused the upload ($code)" ; exit 1 ;;
+            *)          echo "RESULT: STILL DENIED - the package's Actions access does not include this repository" ; exit 1 ;;
+          esac
