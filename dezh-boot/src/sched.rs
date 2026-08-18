@@ -524,18 +524,16 @@ extern "C" fn utrap_handler(frame_ptr: *mut usize) -> *const usize {
     let frame = unsafe { core::slice::from_raw_parts_mut(frame_ptr, FRAME_SLOTS) };
 
     unsafe {
-        // `utrap` restored the kernel's `tp` from the frame's hart stamp. Check
-        // it, because everything per-hart from here on trusts it and a wrong
-        // answer would send this hart at another hart's state - a corruption,
-        // not a crash. Only the boot hart runs console tasks today, so that is
-        // the expected answer; when a secondary starts dispatching, this becomes
-        // "a hart that is actually online".
-        if current_hart() != BOOT_HART.load(Ordering::Relaxed) {
+        // `utrap` restored the kernel's `tp` from the frame's hart stamp, and
+        // everything per-hart below trusts it. Bound it before it indexes
+        // anything: `CURRENT` is the next line's subscript, and a `tp` past the
+        // end of it would read whatever sits after the array and call it a
+        // claim.
+        if current_hart() >= MAX_HARTS {
             kprintln!(
                 "
-[dezh-boot] FATAL: trap on hart {} but only hart {} dispatches tasks -- halting",
-                current_hart(),
-                BOOT_HART.load(Ordering::Relaxed)
+[dezh-boot] FATAL: trap with tp={}, beyond MAX_HARTS={MAX_HARTS} -- halting",
+                current_hart()
             );
             shutdown(FINISH_FAIL);
         }
@@ -545,10 +543,20 @@ extern "C" fn utrap_handler(frame_ptr: *mut usize) -> *const usize {
             let _held = SCHED_LOCK.lock();
             current_task()
         };
-        // A trap from U-mode means this hart is running a task, so its claim
-        // must be standing. If it is not, the claim was dropped while the task
-        // was live and another hart is free to enter the same frame - checked
-        // because `cur` is about to index every table below it.
+        // The identity check, and it names the invariant rather than a hart.
+        //
+        // It used to read `current_hart() != BOOT_HART`, which was true only
+        // because the boot hart was the only dispatcher; a secondary joining
+        // would have had to weaken it. The property that actually has to hold is
+        // that this hart holds a claim: a trap from U-mode means it is running a
+        // task, so `CURRENT[hart]` must name that task. A restored `tp` pointing
+        // at some other hart fails this for free - that hart's claim is either
+        // `NO_TASK` or a task this frame is not - and it keeps holding when a
+        // second hart starts dispatching, with no set of "allowed" harts to
+        // maintain alongside the claim it would duplicate.
+        //
+        // Also load-bearing on its own: if the claim were dropped while the task
+        // was live, another hart would be free to enter this same frame.
         if cur == NO_TASK {
             kprintln!(
                 "

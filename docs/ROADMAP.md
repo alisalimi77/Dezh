@@ -831,6 +831,23 @@ skipped for baked tasks, and `ipc-typed-demo` never reaches `PING -> 0` — the
 baked tasks fault on stacks that are no longer mapped for U-mode. The call is
 load-bearing exactly where it was kept.
 
+**The trap guard now names the invariant, not the boot hart.** It read
+`current_hart() != BOOT_HART`, which was true only because the boot hart was the
+only dispatcher — a secondary joining would have had to weaken the check that
+exists to catch exactly that hart being wrong. The property that has to hold is
+that the trapping hart *holds a claim*: a trap from U-mode means it is running a
+task, so `CURRENT[hart]` must name that task. A restored `tp` pointing at another
+hart fails that for free, since that hart's claim is either `NO_TASK` or some
+other task, and the check keeps holding once a second hart dispatches — with no
+list of permitted harts to maintain beside the claim it would duplicate. `tp` is
+bounded against `MAX_HARTS` first, because it is the subscript.
+
+Negative control, the same one that proved the stamp: delete the `ld tp, 256(sp)`
+that restores kernel identity in `utrap`, and the runs QEMU lands on harts 1 and 3
+print `FATAL: trap on hart 0 which holds no task` and halt, while runs on hart 0
+pass — there the wrong answer and the right one coincide. The guard fires exactly
+when the identity is actually wrong.
+
 So the last piece is: let a secondary pull from the console task table, limited
 to tasks with their own address space, and then make a daemon migrate under
 load. Everything under it is in place — identity in both contexts, per-hart
