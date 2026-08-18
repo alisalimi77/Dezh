@@ -791,14 +791,32 @@ banner and then never prints `PING -> 0`, because the server task can no longer
 be chosen. Every leg before it is unaffected. Remove the claim and the same run
 is green.
 
+The run entries are closed too, which was the gap named here a commit ago. They
+built the table and took the first claim unlocked, and step 2's note said why:
+the ticket lock is not reentrant and `reclaim_task_resources` is called both
+from outside this module and from within it. So it splits — a public wrapper
+that locks, a `_locked` inner for callers that already hold it — and the four
+entries now hold the lock across their table setup and their first claim, and
+drop it before `run_first`, which never returns to them.
+
+`build_address_space` stays outside on purpose. It loads an ELF and walks page
+tables, and this lock masks the hart's interrupts, so a section that long would
+hold off every device interrupt for the length of a program load. It touches the
+frame allocator, not the table, so the unit stays one task's row at a time — the
+same unit step 3b chose for syscalls.
+
+Getting guard placement wrong hangs the hart instead of crashing it, and CI would
+show only a QEMU timeout. So it is checked rather than reviewed:
+`tools/ci/check_sched_lock.py` walks brace depth, computes which functions take
+the lock transitively, and fails if any call inside a guard reaches one. Negative
+control: a `task_state()` call planted inside the `run_tasks` guard is reported
+by file and line, naming both the callee and the guard it sits in.
+
 So the last piece is: let a secondary pull from the console task table, limited
 to tasks with their own address space, and then make a daemon migrate under
 load. Everything under it is in place — identity in both contexts, per-hart
-context, stack and current task, the table private and locked, the run claim
-enforced, syscalls atomic per call. The known gap is the three run entries
-(`run_tasks`, `run_processes`, `run_scheduler_from`): they build the task table
-and take the first claim without the lock, which is sound only while the boot
-hart is the only way in. Whoever lets a secondary in has to close that first.
+context, stack and current task, the table private and locked on every path
+including entry, the run claim enforced, syscalls atomic per call.
 
 ##### W14 — Object-capabilities as the live substrate (P4)
 

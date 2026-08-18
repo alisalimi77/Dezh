@@ -142,6 +142,11 @@ jobs:
         working-directory: dezh-boot
         run: cargo clippy --locked -- -D warnings
 
+      # A re-entrant take of the scheduler lock hangs the hart rather than
+      # failing, so QEMU would report a bare timeout. Catch it before the boot.
+      - name: Check the scheduler lock is never taken re-entrantly
+        run: python3 tools/ci/check_sched_lock.py
+
       - name: Build RISC-V kernel
         working-directory: dezh-boot
         run: cargo build --locked

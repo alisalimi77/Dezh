@@ -233,7 +233,18 @@ pub(crate) fn task_kind_name(kind: TaskKind) -> &'static str {
     }
 }
 
+/// Free a task's frames and clear its row. Takes the lock, for callers outside
+/// this module.
 pub(crate) fn reclaim_task_resources(slot: usize) {
+    let _held = SCHED_LOCK.lock();
+    reclaim_task_resources_locked(slot);
+}
+
+/// The same, for a caller that already holds `SCHED_LOCK`. This split is what
+/// lets the run entries below hold the lock across their whole table setup: the
+/// ticket lock is not reentrant, so without a `_locked` inner a hart would wait
+/// on a lock it already holds, with the release on the far side of the wait.
+fn reclaim_task_resources_locked(slot: usize) {
     unsafe {
         if slot >= MAX_TASKS || (*TRES.get())[slot].count == 0 {
             (*TSATP.get())[slot] = 0;
@@ -284,11 +295,12 @@ pub(crate) fn process_owned_frames() -> usize {
 }
 
 fn reclaim_finished_foreground_tasks() {
+    let _held = SCHED_LOCK.lock();
     unsafe {
         let mut i = FIRST_FOREGROUND_TASK;
         while i < MAX_TASKS {
             if (*TSTATE.get())[i] == TaskState::Done {
-                reclaim_task_resources(i);
+                reclaim_task_resources_locked(i);
             }
             i += 1;
         }
@@ -875,9 +887,14 @@ pub(crate) fn run_tasks(specs: &[(usize, usize, u8)]) {
         // the tables are `Global<T>` now, and the iterator rewrite would need a
         // reference into `(*TSTATE.get())` - exactly the aliasing `Global` is
         // here to prevent. Indexing through the raw pointer never makes one.
+        // One section for the whole setup and the first claim. Everything in it
+        // is table work on baked tasks - no ELF load, no page-table build - so
+        // it is short, and it has to be atomic: a hart that saw this table
+        // half-built would pick a task whose frame is not written yet.
+        let _held = SCHED_LOCK.lock();
         #[allow(clippy::needless_range_loop)]
         for i in 0..MAX_TASKS {
-            reclaim_task_resources(i);
+            reclaim_task_resources_locked(i);
             (*TSTATE.get())[i] = TaskState::Unused;
             clear_mailbox(i);
         }
@@ -898,7 +915,12 @@ pub(crate) fn run_tasks(specs: &[(usize, usize, u8)]) {
         // so it stamps the hart itself.
         (*FRAMES.get())[0][F_HART] = current_hart();
         set_active_task_mem(0); // expose only task 0's stack region to start
-                                // Switch to the multitasking trap path and arm the preemption timer.
+        // The claim is taken; drop the lock before entering U-mode, because
+        // `run_first` does not return here - it longjmps back through
+        // `restore_kernel_ctx`, so a guard still alive at this point would never
+        // be dropped and the lock would be held for the rest of the boot.
+        drop(_held);
+        // Switch to the multitasking trap path and arm the preemption timer.
         asm!("csrw stvec, {}", in(reg) utrap as *const () as usize);
         sbi_set_timer(rdtime() + QUANTUM);
         run_first(frame_ptr(0) as *const usize);
@@ -918,23 +940,30 @@ pub(crate) fn run_processes(specs: &[ProcessSpec]) {
     unsafe {
         // A loaded process must not see any baked-task stack region.
         set_active_task_mem(usize::MAX);
-        // Index form is still deliberate, for a different reason than before:
-        // the tables are `Global<T>` now, and the iterator rewrite would need a
-        // reference into `(*TSTATE.get())` - exactly the aliasing `Global` is
-        // here to prevent. Indexing through the raw pointer never makes one.
-        #[allow(clippy::needless_range_loop)]
-        for i in 0..MAX_TASKS {
-            reclaim_task_resources(i);
-            (*TSTATE.get())[i] = TaskState::Unused;
-            clear_mailbox(i);
+        {
+            // Index form is still deliberate, for a different reason than before:
+            // the tables are `Global<T>` now, and the iterator rewrite would need a
+            // reference into `(*TSTATE.get())` - exactly the aliasing `Global` is
+            // here to prevent. Indexing through the raw pointer never makes one.
+            let _held = SCHED_LOCK.lock();
+            #[allow(clippy::needless_range_loop)]
+            for i in 0..MAX_TASKS {
+                reclaim_task_resources_locked(i);
+                (*TSTATE.get())[i] = TaskState::Unused;
+                clear_mailbox(i);
+            }
         }
         let mut launched = 0usize;
         let mut first_ready = usize::MAX;
         for (i, spec) in specs.iter().take(n).enumerate() {
+            // The load stays outside the lock - see `spawn_process_at`. One
+            // section per task after it, which is the same unit step 3b chose
+            // for syscalls: a whole task's row appears at once or not at all.
             let Some(build) = build_address_space(spec, TaskKind::Foreground) else {
                 kprintln!("  [kernel] process launch failed: out of frames");
                 continue;
             };
+            let _held = SCHED_LOCK.lock();
             let f = &mut (*FRAMES.get())[i];
             *f = [0; FRAME_SLOTS];
             f[F_SEPC] = build.entry;
@@ -956,11 +985,19 @@ pub(crate) fn run_processes(specs: &[ProcessSpec]) {
         if launched == 0 {
             return;
         }
-        set_current_task(first_ready);
-        (*FRAMES.get())[first_ready][F_HART] = current_hart();
+        // The claim and the address space it names, together - the same pairing
+        // `schedule_or_return` makes, and for the same reason: a satp installed
+        // for a task this hart no longer owns is a task running in someone
+        // else's memory. Released before `run_first`, which never returns here.
+        let entry_satp = {
+            let _held = SCHED_LOCK.lock();
+            set_current_task(first_ready);
+            (*FRAMES.get())[first_ready][F_HART] = current_hart();
+            (*TSATP.get())[first_ready]
+        };
         asm!("csrw stvec, {}", in(reg) utrap as *const () as usize);
         sbi_set_timer(rdtime() + QUANTUM);
-        asm!("csrw satp, {}", in(reg) (*TSATP.get())[first_ready]); // enter the first process's address space
+        asm!("csrw satp, {}", in(reg) entry_satp); // enter the first process's address space
         asm!("sfence.vma");
         run_first(frame_ptr(first_ready) as *const usize);
         // Back in the kernel address space once every process has exited.
@@ -968,10 +1005,11 @@ pub(crate) fn run_processes(specs: &[ProcessSpec]) {
         asm!("sfence.vma");
         asm!("csrw stvec, {}", in(reg) trap_entry as *const () as usize);
         sbi_set_timer(rdtime() + TIMER_DELTA);
+        let _held = SCHED_LOCK.lock();
         let mut i = 0usize;
         while i < MAX_TASKS {
             if (*TSTATE.get())[i] == TaskState::Done {
-                reclaim_task_resources(i);
+                reclaim_task_resources_locked(i);
             }
             i += 1;
         }
@@ -980,14 +1018,18 @@ pub(crate) fn run_processes(specs: &[ProcessSpec]) {
 
 pub(crate) fn run_scheduler_from(first: usize) {
     unsafe {
-        set_current_task(first);
-        // The third dispatch entry, and the one that was missed: this is the
-        // path a Pol process takes. Every `run_first` call site has to stamp,
-        // because none of them go through `schedule_or_return`.
-        (*FRAMES.get())[first][F_HART] = current_hart();
+        let entry_satp = {
+            let _held = SCHED_LOCK.lock();
+            set_current_task(first);
+            // The third dispatch entry, and the one that was missed: this is the
+            // path a Pol process takes. Every `run_first` call site has to stamp,
+            // because none of them go through `schedule_or_return`.
+            (*FRAMES.get())[first][F_HART] = current_hart();
+            (*TSATP.get())[first]
+        };
         asm!("csrw stvec, {}", in(reg) utrap as *const () as usize);
         sbi_set_timer(rdtime() + QUANTUM);
-        asm!("csrw satp, {}", in(reg) (*TSATP.get())[first]);
+        asm!("csrw satp, {}", in(reg) entry_satp);
         asm!("sfence.vma");
         run_first(frame_ptr(first) as *const usize);
         asm!("csrw satp, {}", in(reg) kernel_satp());
@@ -998,9 +1040,16 @@ pub(crate) fn run_scheduler_from(first: usize) {
 }
 
 pub(crate) fn spawn_process_at(slot: usize, spec: &ProcessSpec, kind: TaskKind) -> bool {
+    // Outside the lock on purpose: `build_address_space` loads an ELF and walks
+    // page tables, and the lock masks this hart's interrupts. A section that
+    // long would hold off every device interrupt on the hart for the length of a
+    // program load. It touches the frame allocator, not the task table, so the
+    // table stays consistent without it.
+    reclaim_task_resources(slot);
+    let build = build_address_space(spec, kind);
+    let _held = SCHED_LOCK.lock();
     unsafe {
-        reclaim_task_resources(slot);
-        let Some(build) = build_address_space(spec, kind) else {
+        let Some(build) = build else {
             kprintln!("  [kernel] process launch failed: out of frames");
             (*TSTATE.get())[slot] = TaskState::Unused;
             clear_mailbox(slot);
@@ -1026,10 +1075,11 @@ pub(crate) fn spawn_process_at(slot: usize, spec: &ProcessSpec, kind: TaskKind) 
 }
 
 fn clear_foreground_tasks() {
+    let _held = SCHED_LOCK.lock();
     unsafe {
         let mut i = FIRST_FOREGROUND_TASK;
         while i < MAX_TASKS {
-            reclaim_task_resources(i);
+            reclaim_task_resources_locked(i);
             (*TSTATE.get())[i] = TaskState::Unused;
             clear_mailbox(i);
             (*TCAPS.get())[i] = 0;
@@ -1089,31 +1139,37 @@ pub(crate) struct TaskRow {
 
 /// Guards the task table.
 ///
-/// **What it covers today, exactly:** the functions below, which are the whole
-/// of what other modules may call, plus `wake_irq_waiters`, which is the only
-/// write to the table from interrupt context. Nothing else. The scheduler's own
-/// internals — `utrap_handler`, `schedule_or_return`, `run_processes` and the
-/// helpers under them — are still boot-hart-only and still unlocked.
+/// **What it covers now:** every write to the table, and every read that has to
+/// be consistent with one. That includes the scheduler's own internals —
+/// `utrap_handler` and `schedule_or_return` in scopes rather than across their
+/// whole bodies, and the four run entries across their table setup and their
+/// first claim. `wake_irq_waiters` is in it too, and is the only write from
+/// interrupt context, which is why the lock masks.
 ///
-/// That is a boundary, not an oversight, and it is drawn where it is because of
-/// one loop:
+/// Step 2 drew the boundary at the public surface and said why the internals
+/// were left out: one loop,
 ///
 /// ```text
 /// schedule_or_return -> idle_until_device -> plic_handle -> wake_irq_waiters
 /// ```
 ///
-/// A ticket lock is not reentrant, and this one masks interrupts, so wrapping
-/// the scheduler internals in it would have the hart wait on a lock it already
-/// holds, with the only path to releasing it running inside the wait. Making the
-/// internals safe needs them restructured — a `_locked` inner for every function
-/// that is called both from outside and from within, `reclaim_task_resources`
-/// first with its seven internal callers — and that restructuring is step 3's
-/// job, done together with letting a second hart in.
+/// A ticket lock is not reentrant, so a guard held across that path would have
+/// the hart wait on a lock only it can release, with the release inside the
+/// wait. Step 3a answered it for the scheduler entry by taking the lock in
+/// scopes around the sleep instead of across it. The run entries needed the
+/// other half of the restructuring step 2 named: a `_locked` inner for the one
+/// function called both from outside and from within,
+/// `reclaim_task_resources`.
 ///
-/// Until then no second hart calls any of it, so the unlocked internals are
-/// still correct for the same reason they always were. What this buys now is
-/// that the reachable surface is closed and the interrupt-context write is
-/// serialised, so step 3 extends a lock inward rather than inventing one.
+/// **What is deliberately outside it.** `build_address_space` — it loads an ELF
+/// and walks page tables, and the lock masks this hart's interrupts, so a
+/// section that long would hold off every device interrupt for the length of a
+/// program load. It touches the frame allocator, not the table.
+///
+/// The failure mode of getting this wrong is a hang, not a crash, so guard
+/// placement is checked by `tools/ci/check_sched_lock.py` rather than by
+/// reading: it walks brace depth and fails the build if any call inside a guard
+/// reaches a function that takes the lock again.
 static SCHED_LOCK: TicketLock = TicketLock::new();
 
 // Raw table reads. Callers already hold `SCHED_LOCK`; these exist so the public
