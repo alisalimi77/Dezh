@@ -360,11 +360,30 @@ unsafe fn pick_next() -> Option<usize> {
     let start = if cur == NO_TASK { 0 } else { cur + 1 };
     for off in 0..MAX_TASKS {
         let i = (start + off) % MAX_TASKS;
-        if (*TSTATE.get())[i] == TaskState::Ready && !claimed_elsewhere(i) {
+        if (*TSTATE.get())[i] == TaskState::Ready && !claimed_elsewhere(i) && runnable_here(i) {
             return Some(i);
         }
     }
     None
+}
+
+/// May the calling hart run task `i`?
+///
+/// Only the boot hart may run a task that shares the kernel address space.
+/// `set_active_task_mem` flips `PTE_U` in the one L1 that the kernel root and
+/// every process root both point at, so which baked stack is reachable from
+/// U-mode is a single global answer. Two harts running two such tasks would
+/// race it, last writer winning, and the loser's task would fault on its own
+/// stack - a corruption, not a crash. A loaded process carries its own mapping
+/// and is free of it, which is why `smp` builds one satp per AP slot.
+///
+/// This is the same rule `schedule_or_return` has halted on since the
+/// constraint was written down; the difference is that a secondary now *skips*
+/// such a task and looks at the next one, instead of the kernel stopping. The
+/// halt stays there as a backstop: it catches a task reaching dispatch by some
+/// path that did not come through here.
+unsafe fn runnable_here(i: usize) -> bool {
+    current_hart() == BOOT_HART.load(Ordering::Relaxed) || (*TSATP.get())[i] != kernel_satp()
 }
 
 /// Is another hart running task `i` right now?
@@ -451,16 +470,12 @@ unsafe fn schedule_or_return() -> *const usize {
         let _held = SCHED_LOCK.lock();
         match pick_next() {
             Some(i) => {
-                // A task without its own address space can only run on the boot
-                // hart, and this is where that gets enforced rather than assumed.
-                //
-                // `set_active_task_mem` flips `PTE_U` in the SHARED kernel page
-                // table so exactly one task's stack is reachable from U-mode.
-                // That is one global view: two harts running two such tasks
-                // would race, the last writer would win, and the loser's task
-                // would fault on its own stack - a corruption, not a crash.
-                // Tasks with a private `satp` carry their own mapping and are
-                // free of it, which is why `smp` builds one per AP slot.
+                // The backstop for `runnable_here`, which is where the rule is
+                // now enforced. `pick_next` cannot return such a task to a
+                // secondary any more, so reaching this means a task arrived at
+                // dispatch by a path that did not go through the filter - and
+                // the consequence is a corruption rather than a crash, so it
+                // halts instead of correcting itself.
                 if current_hart() != BOOT_HART.load(Ordering::Relaxed)
                     && (*TSATP.get())[i] == kernel_satp()
                 {

@@ -848,6 +848,16 @@ print `FATAL: trap on hart 0 which holds no task` and halt, while runs on hart 0
 pass — there the wrong answer and the right one coincide. The guard fires exactly
 when the identity is actually wrong.
 
+**The address-space rule became a filter instead of a halt.** It had been a
+guard in `schedule_or_return` that stops the kernel when a secondary picks a task
+sharing the kernel address space — right for a rule nothing was meant to reach,
+useless for a secondary that has to keep going. `pick_next` now skips such a task
+and looks at the next one, and the halt stays as a backstop for a task arriving at
+dispatch by some path that did not come through the filter. Negative control:
+invert the predicate so the boot hart is the one refused a baked task, and
+`ipc-typed-demo` never reaches `PING -> 0` — the filter is what chooses, not
+decoration next to the choice.
+
 So the last piece is: let a secondary pull from the console task table, limited
 to tasks with their own address space, and then make a daemon migrate under
 load. Everything under it is in place — identity in both contexts, per-hart
