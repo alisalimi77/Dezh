@@ -15,8 +15,8 @@ use core::ptr::{read_volatile, write_volatile};
 use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 use crate::dev::virtio::{VIRTIO_BLK_MMIO_PA, VIRTIO_MMIO_COUNT, VIRTIO_MMIO_STRIDE};
-use crate::sched::{MAX_TASKS, TIRQ_WAITING, TSTATE};
-use crate::{kprintln, TaskState};
+use crate::sched::wake_irq_waiters;
+use crate::kprintln;
 
 //
 // QEMU `virt` layout: hart h has PLIC context 2h (M-mode) and 2h+1 (S-mode);
@@ -35,6 +35,10 @@ pub(crate) const PLIC_CONTEXT_STRIDE: usize = 0x1000;
 /// read by plic_handle. Defaults to context 1 (hart 0) until init runs.
 pub(crate) static PLIC_S_CLAIM: AtomicUsize = AtomicUsize::new(PLIC_CONTEXT_BASE + 0x1000 + 4);
 pub(crate) const VIRTIO_IRQ_BASE: u32 = 1;
+/// UART0 on the QEMU `virt` board. It went unrouted for as long as only the
+/// virtio slots were enabled here, which is why the console had to poll for
+/// input and lost whatever arrived while it was busy - see `dev::uart`.
+pub(crate) const UART_IRQ: u32 = 10;
 pub(crate) const SEIE: usize = 1 << 9;
 pub(crate) const VR_INTERRUPT_STATUS: usize = 0x060;
 pub(crate) const VR_INTERRUPT_ACK: usize = 0x064;
@@ -60,7 +64,9 @@ pub(crate) fn plic_init(boot_hart: usize) {
             write_volatile((PLIC_BASE + irq as usize * 4) as *mut u32, 1);
             irq += 1;
         }
-        let mask: u32 = ((1u32 << VIRTIO_MMIO_COUNT) - 1) << VIRTIO_IRQ_BASE;
+        write_volatile((PLIC_BASE + UART_IRQ as usize * 4) as *mut u32, 1);
+        let mask: u32 =
+            (((1u32 << VIRTIO_MMIO_COUNT) - 1) << VIRTIO_IRQ_BASE) | (1u32 << UART_IRQ);
         write_volatile(enable as *mut u32, mask);
         write_volatile(threshold as *mut u32, 0);
         asm!("csrs sie, {}", in(reg) SEIE);
@@ -77,6 +83,12 @@ pub(crate) fn plic_handle() -> u32 {
         if irq == 0 {
             return 0;
         }
+        if irq == UART_IRQ {
+            // Emptying the receiver is what deasserts the UART's line, so this
+            // is the ACK as much as the read, and it has to happen before the
+            // `claim` write below or the PLIC re-raises immediately.
+            crate::dev::uart::rx_drain();
+        }
         if irq >= VIRTIO_IRQ_BASE && irq < VIRTIO_IRQ_BASE + VIRTIO_MMIO_COUNT as u32 {
             let slot = (irq - VIRTIO_IRQ_BASE) as usize;
             let base = VIRTIO_BLK_MMIO_PA + slot * VIRTIO_MMIO_STRIDE;
@@ -87,18 +99,9 @@ pub(crate) fn plic_handle() -> u32 {
         }
         write_volatile(claim as *mut u32, irq);
         EXT_IRQS.fetch_add(1, Ordering::Relaxed);
-        // Anyone sleeping on a device becomes runnable again.
-        let mut i = 0usize;
-        while i < MAX_TASKS {
-            if (*TIRQ_WAITING.get())[i] {
-                (*TIRQ_WAITING.get())[i] = false;
-                if (*TSTATE.get())[i] == TaskState::Blocked {
-                    (*TSTATE.get())[i] = TaskState::Ready;
-                }
-                IRQ_WAKEUPS.fetch_add(1, Ordering::Relaxed);
-            }
-            i += 1;
-        }
+        // Anyone sleeping on a device becomes runnable again. The walk itself
+        // lives in `sched`, which owns the table it writes.
+        IRQ_WAKEUPS.fetch_add(wake_irq_waiters(), Ordering::Relaxed);
         irq
     }
 }
@@ -113,8 +116,21 @@ pub(crate) fn irq_stat() {
         IRQ_WAKEUPS.load(Ordering::Relaxed)
     );
     kprintln!(
-        "  source: PLIC S-mode context of the boot hart (claim @ {:#x}); virtio slots raise IRQ 1..8",
-        PLIC_S_CLAIM.load(Ordering::Relaxed)
+        "  source: PLIC S-mode context of the boot hart (claim @ {:#x}); virtio slots raise IRQ 1..8, UART0 raises IRQ {}",
+        PLIC_S_CLAIM.load(Ordering::Relaxed),
+        UART_IRQ
     );
     kprintln!("  before this, every device wait was a busy-loop; devices can now report completion");
+    kprintln!(
+        "  console input dropped by a full receive ring = {} (non-zero means input outran the console by more than 256 bytes)",
+        crate::dev::uart::RX_OVERRUNS.load(Ordering::Relaxed)
+    );
+    kprintln!(
+        "  console input dropped by the UART itself (LSR.OE) = {} (non-zero means the receiver was not read in time)",
+        crate::dev::uart::RX_HW_OVERRUNS.load(Ordering::Relaxed)
+    );
+    kprintln!(
+        "  console input bytes received = {} (short of what was sent, with both drop counts zero, means the bytes never reached the device)",
+        crate::dev::uart::RX_BYTES.load(Ordering::Relaxed)
+    );
 }

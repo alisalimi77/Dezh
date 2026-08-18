@@ -29,6 +29,7 @@ use crate::abi::{
 use crate::arch::finisher::{shutdown, FINISH_FAIL};
 use crate::arch::timer::{rdtime, sbi_set_timer, QUANTUM, TICKS, TIMER_DELTA};
 use crate::mm::global::Global;
+use crate::sync::TicketLock;
 use crate::proc::loader::{build_address_space, kernel_satp, proc_satp, USER_STACK_TOP};
 use crate::{kprintln, plic_handle, reclaim_resources, restore_kernel_ctx, run_first, trap_entry, utrap, Uart, TASK_IPC, TASK_PRINT, TASK_TIME};
 // Every one of these is used as a MATCH PATTERN below. A const that is not in
@@ -49,7 +50,7 @@ pub(crate) enum TaskState {
     Done,
 }
 
-pub(crate) static TEXIT: Global<[usize; MAX_TASKS]> = Global::new([0; MAX_TASKS]);
+static TEXIT: Global<[usize; MAX_TASKS]> = Global::new([0; MAX_TASKS]);
 
 #[derive(Clone, Copy)]
 struct IpcStats {
@@ -119,14 +120,14 @@ static TRECV_PTR: Global<[usize; MAX_TASKS]> = Global::new([0; MAX_TASKS]);
 static TRECV_LEN: Global<[usize; MAX_TASKS]> = Global::new([0; MAX_TASKS]);
 
 static FRAMES: Global<[[usize; 32]; MAX_TASKS]> = Global::new([[0; 32]; MAX_TASKS]);
-pub(crate) static TSTATE: Global<[TaskState; MAX_TASKS]> = Global::new([TaskState::Unused; MAX_TASKS]);
+static TSTATE: Global<[TaskState; MAX_TASKS]> = Global::new([TaskState::Unused; MAX_TASKS]);
 /// Tasks parked until a device interrupt arrives (see `SYS_IRQ_WAIT`).
-pub(crate) static TIRQ_WAITING: Global<[bool; MAX_TASKS]> = Global::new([false; MAX_TASKS]);
-pub(crate) static TCAPS: Global<[usize; MAX_TASKS]> = Global::new([0; MAX_TASKS]);
+static TIRQ_WAITING: Global<[bool; MAX_TASKS]> = Global::new([false; MAX_TASKS]);
+static TCAPS: Global<[usize; MAX_TASKS]> = Global::new([0; MAX_TASKS]);
 static TPERS: Global<[u8; MAX_TASKS]> = Global::new([0; MAX_TASKS]);
 // each task's address space (satp)
 static TSATP: Global<[usize; MAX_TASKS]> = Global::new([0; MAX_TASKS]);
-pub(crate) static TRES: Global<[TaskResources; MAX_TASKS]> = Global::new([EMPTY_TASK_RESOURCES; MAX_TASKS]);
+static TRES: Global<[TaskResources; MAX_TASKS]> = Global::new([EMPTY_TASK_RESOURCES; MAX_TASKS]);
 static CURRENT: Global<usize> = Global::new(0);
 
 fn clear_mailbox(i: usize) {
@@ -806,6 +807,132 @@ pub(crate) fn run_foreground_processes(specs: &[ProcessSpec]) {
     }
     run_scheduler_from(first_ready);
     reclaim_finished_foreground_tasks();
+}
+
+// --- The task table's public surface. ----------------------------------------
+//
+// Six modules used to reach into `TSTATE`, `TEXIT`, `TCAPS`, `TRES` and
+// `TIRQ_WAITING` directly, twenty-five sites in all. That was harmless while one
+// hart reached them and is the blocker for W13 step 2: a lock cannot be put
+// around state that half the kernel pokes at from outside.
+//
+// So the tables are private now and this is the whole of what the rest of the
+// kernel may ask. The point is not tidiness - it is that the compiler, not a
+// convention, decides whether a new call site can skip the lock these are about
+// to acquire. Adding the lock becomes a change inside this file.
+//
+// `wake_irq_waiters` is the one that mattered most: it moves a *mutation* that
+// ran in interrupt context, in `plic_handle`, back into the module that owns the
+// state it mutates.
+
+/// A task's row, for reporting. Read as one call so a caller cannot print a
+/// half-updated mixture of two tasks' fields.
+#[derive(Clone, Copy)]
+pub(crate) struct TaskRow {
+    pub(crate) state: TaskState,
+    pub(crate) kind: TaskKind,
+    pub(crate) caps: usize,
+    pub(crate) exit: usize,
+}
+
+/// Guards the task table.
+///
+/// **What it covers today, exactly:** the functions below, which are the whole
+/// of what other modules may call, plus `wake_irq_waiters`, which is the only
+/// write to the table from interrupt context. Nothing else. The scheduler's own
+/// internals — `utrap_handler`, `schedule_or_return`, `run_processes` and the
+/// helpers under them — are still boot-hart-only and still unlocked.
+///
+/// That is a boundary, not an oversight, and it is drawn where it is because of
+/// one loop:
+///
+/// ```text
+/// schedule_or_return -> idle_until_device -> plic_handle -> wake_irq_waiters
+/// ```
+///
+/// A ticket lock is not reentrant, and this one masks interrupts, so wrapping
+/// the scheduler internals in it would have the hart wait on a lock it already
+/// holds, with the only path to releasing it running inside the wait. Making the
+/// internals safe needs them restructured — a `_locked` inner for every function
+/// that is called both from outside and from within, `reclaim_task_resources`
+/// first with its seven internal callers — and that restructuring is step 3's
+/// job, done together with letting a second hart in.
+///
+/// Until then no second hart calls any of it, so the unlocked internals are
+/// still correct for the same reason they always were. What this buys now is
+/// that the reachable surface is closed and the interrupt-context write is
+/// serialised, so step 3 extends a lock inward rather than inventing one.
+static SCHED_LOCK: TicketLock = TicketLock::new();
+
+// Raw table reads. Callers already hold `SCHED_LOCK`; these exist so the public
+// wrappers do not take it twice.
+fn state_of(slot: usize) -> TaskState {
+    unsafe { (*TSTATE.get())[slot] }
+}
+
+fn exit_of(slot: usize) -> usize {
+    unsafe { (*TEXIT.get())[slot] }
+}
+
+pub(crate) fn task_row(slot: usize) -> TaskRow {
+    let _held = SCHED_LOCK.lock();
+    unsafe {
+        TaskRow {
+            state: state_of(slot),
+            kind: (*TRES.get())[slot].kind,
+            caps: (*TCAPS.get())[slot],
+            exit: exit_of(slot),
+        }
+    }
+}
+
+pub(crate) fn task_state(slot: usize) -> TaskState {
+    let _held = SCHED_LOCK.lock();
+    state_of(slot)
+}
+
+pub(crate) fn task_exit_code(slot: usize) -> usize {
+    let _held = SCHED_LOCK.lock();
+    exit_of(slot)
+}
+
+/// Is this task alive in the sense a supervisor cares about - runnable, or
+/// parked waiting for something?
+pub(crate) fn task_is_live(slot: usize) -> bool {
+    let _held = SCHED_LOCK.lock();
+    matches!(state_of(slot), TaskState::Blocked | TaskState::Ready)
+}
+
+/// The exit code of the foreground task, which is how every synchronous console
+/// verb - block I/O, Marz, the package paths - reads its result back.
+pub(crate) fn foreground_exit_code() -> usize {
+    let _held = SCHED_LOCK.lock();
+    exit_of(FIRST_FOREGROUND_TASK)
+}
+
+/// A device reported completion: make every task parked on one runnable again.
+/// Returns how many were woken.
+///
+/// Called from `plic_handle`, in interrupt context, which is why the lock has to
+/// mask: without that, the console could hold it, take a device interrupt on the
+/// same hart, and wait here forever for itself.
+pub(crate) fn wake_irq_waiters() -> u64 {
+    let _held = SCHED_LOCK.lock();
+    let mut woken = 0u64;
+    unsafe {
+        let mut i = 0usize;
+        while i < MAX_TASKS {
+            if (*TIRQ_WAITING.get())[i] {
+                (*TIRQ_WAITING.get())[i] = false;
+                if (*TSTATE.get())[i] == TaskState::Blocked {
+                    (*TSTATE.get())[i] = TaskState::Ready;
+                }
+                woken += 1;
+            }
+            i += 1;
+        }
+    }
+    woken
 }
 
 pub(crate) fn print_ipcstat() {

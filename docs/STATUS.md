@@ -14,6 +14,10 @@ true today, so a reviewer never has to guess.
 | F3 — multi-ISA | The same Dezh-IR bytecode runs on the RISC-V and x86_64 kernels; the bytes are pinned byte-identical by a test; x86 runs it as a real `.dzp` package. |
 | F4 — Pol (Linux personality) | A real, unmodified static Linux/RISC-V ELF runs under a capability-gated Linux syscall shim; the same bytes also run on real riscv64 Linux. |
 | x86_64 boot | Boots via QEMU `-kernel` (PVH) and from a GRUB Multiboot2 ISO in QEMU **and VirtualBox**; a 32-vector exception IDT reports faults instead of triple-faulting. |
+| x86_64 returnable interrupts | A 256-vector IDT: exceptions still end in a reported halt, while vectors 32..255 save every general-purpose register, dispatch, restore, and `iretq`. A Local APIC timer is armed at 100 Hz from a rate **measured** against PIT channel 2 (~999 MHz APIC bus under QEMU, printed as counted). Proof is a work loop that keeps summing 1..=1000 across the ticks with no round corrupted, and a tick count that freezes when the timer is masked while that loop runs on. No device IRQs on x86 yet. |
+| x86_64 preemption | The same entry path can decline to resume what it interrupted: the dispatcher is handed the interrupted `rsp` and its return value is loaded back into `rsp`, so a saved 22-qword frame *is* a task. Three kernel tasks containing no yield of any kind are round-robined with the boot task, one tick per turn, each still checking its arithmetic; asserted in CI by **turns granted** (9/8/8 in both debug and release) rather than work completed, since only the interrupt handler can grant a turn. |
+| x86_64 isolation | Per-task address spaces (own `cr3`, kernel entries shared and USER-free) and real ring 3: a GDT with user descriptors, a TSS whose `rsp0` follows the running task, and exactly one DPL3 IDT gate (`0x80`) as the way in. Two CPL3 tasks run programs copied into pages of their own — a kernel Rust function is unreachable from ring 3 by construction, since `.text` is mapped but never USER. One of them reads an address it was not given: it is **killed alone**, with `cr2`/`rip`/error reported, while its neighbour keeps making syscalls and exits normally. Asserted in CI, including the `cs` the CPU saved (`0x23`), which a task cannot forge. Still missing: nothing frees a dead task's pages, one CPU. |
+| x86_64 derived authority | An x86 task's syscalls are capability-checked, and the capability is **derived from an intent ceiling**, not held by default: `granted = requested ∩ ceiling`, computed by `dezh_core::mcap` — the same function the RISC-V kernel calls and the one its exhaustive test pins, not a second implementation. Two CPL3 tasks run byte-identical code from a byte-identical manifest under different ceilings; the narrow one is refused `print` **that its own manifest requested**, by name (`DENIED: task 7 holds no PRINT capability`), and reports back which of the two calls it was allowed. A refusal is a return value, not a fault. Honest scope: there is no `Ahd` token, no `Sand` ledger and no mission on x86 — the ceiling is a number the boot code passes in, so this is the derivation rule and the denial, not the accounting built on them. |
 | Drivers out of kernel | virtio-block is a U-mode daemon holding an explicit MMIO + DMA grant; clients reach it only over typed IPC. **Caveat (not buried):** without an IOMMU this gives fault isolation + least privilege of the driver *process*, not memory safety against a malicious driver that programs the device to DMA anywhere. The IOMMU is core to this story, not future polish. |
 | W8 — intent → effect runtime | An agent runs under one **intent** (`Ahd`); its derived capability is provably ⊆ the intent. Every effect is a ledger record (`Sand`) carrying `actor → intent → derived cap → reversibility`. A whole **mission** (`Sfar`) is rolled back honestly: reversible effects retracted, compensatable effects undone by a **recorded** compensating action, irreversible effects **refused with a reason** — and rollback needs authority over every namespace the mission touched. A five-escape adversary (`redteam`) is stopped at five named boundaries; `why-denied` names the boundary of the last denial; `Tbar` renders the `actor → intent → effect` provenance graph. The `overnight` flagship runs the whole story. |
 | W12 — an effect that really leaves | Until W12 every effect Dezh could attribute lived inside Dezh's own storage, so the ledger was checked against itself. `marz-effect` now drives a real external system: the request is authorized (NIC capability live, egress authority held for that named destination, DIFC export rule allows it), ARP-resolved, sent on the wire, and the **outcome comes back** and is ledgered — as `compensatable`, with the undo recorded *on* the effect, so `sfar-plan` can name the compensating action instead of promising one. The reply **lowers operator integrity**, because bytes off the wire are attacker-chosen. `tools/ci/effect_test.py` is the acceptance and it does **not** believe Dezh's transcript: all twelve checks read the external system's own state, including that a revoked NIC capability leaves it untouched. **Boundary:** the host gateway is *not* in Dezh's TCB — a compromised gateway can lie about what it did, and Dezh proves only the parts it owns. |
@@ -45,9 +49,15 @@ true today, so a reviewer never has to guess.
 
 - **VM targets only.** No real-hardware port; no real device drivers beyond
   virtio under QEMU/VirtualBox.
-- **x86 kernel is thin.** Exception IDT exists, but there is no returnable
-  interrupt path yet — no timer, no device IRQs, no scheduler on x86. The rich
-  interactive surface (console, scheduler, IPC, Cairn, Pol) is RISC-V only.
+- **x86 kernel is thin, but no longer trusting.** It has a returnable interrupt
+  path, preemption, per-task address spaces, ring 3, a fault that kills only the
+  task that caused it, and capability-checked syscalls whose grants are derived
+  from an intent ceiling — all asserted in CI on both boot paths. What it does
+  not have: device IRQs, storage, an SDK or install path, and — the honest gap —
+  no `Ahd` token, no `Sand` effect ledger and no mission on x86, so authority is
+  *derived* there but effects are not yet *accounted for*. Nothing frees a dead
+  task's pages. The rich interactive surface (console, IPC, Cairn, Pol) and the
+  whole intent-to-effect ledger remain RISC-V only.
 - **Pol is a small syscall subset.** `write`, `exit`/`exit_group` are serviced;
   everything else returns a clean `-ENOSYS`. No threads, no dynamic linking, no
   file system. It proves the mechanism, not broad Linux compatibility.
@@ -77,12 +87,17 @@ true today, so a reviewer never has to guess.
   is still single-hart.** Secondary harts come up via SBI HSM, the kernel has a fair
   spinlock, several harts drain one shared queue, and real U-mode tasks are
   scheduled symmetrically across harts with per-task address spaces keeping them
-  isolated (`smp-sched`, `smp-isolate`). What is **not** done: tasks on secondary
-  harts run to completion — **no preemption or migration there** (no timer armed on
-  a secondary yet) — and the *console's* scheduler with its task table, IPC
+  isolated (`smp-sched`, `smp-isolate`). A secondary hart now also arms **its own
+  timer** while a U-mode task runs there, so such a task is interrupted and
+  resumed instead of owning the hart until it exits — `smp-preempt` reports the
+  tick count for the specific hart that ran the task, and refuses to claim
+  success if the task landed on the boot hart, which has preempted since W9.
+  What is **not** done: that interrupt only resumes the task, it does not yet
+  pick a *different* one, so there is still **no migration** and no scheduling
+  decision on a secondary. The *console's* scheduler with its task table, IPC
   mailboxes and frame allocator is still single-threaded on the boot hart and not
   under the lock, so daemons and console tasks are not yet dispatchable on any hart.
-  Merging the two into one lock-protected scheduler is **W13** (see
+  Merging the two into one lock-protected scheduler is the rest of **W13** (see
   [ROADMAP.md](ROADMAP.md)).
 - No production installer, no side-channel hardening, no formal verification.
 - **The live capabilities are a per-task bitmask; the object-capability
@@ -128,6 +143,23 @@ true today, so a reviewer never has to guess.
   and revocation status, which this bullet used to deny and the list above
   grants, see that entry — leases and `intent-revoke` are real, in-flight
   clawback is not. See [Threat model](SECURITY_MODEL.md#threat-model).
+- **Console input is reliable but not perfect.** UART0 is routed through the
+  PLIC and both the interrupt handler and `getc` drain the FIFO into a ring, so
+  a pasted line no longer depends on the console happening to be inside `getc`.
+  Pasting 64-character lines: 9/10 at `-smp 1`, 8/9 at `-smp 2`, 10/10 at
+  `-smp 4`, 8/9 at `-smp 8`. What is **gone** is the collapse with hart count —
+  the same test was 2/8 at `-smp 4` and 0/3 at `-smp 8`, where most lines never
+  arrived at all. That was never a race: idle secondary harts spun, and on an
+  emulated host every vCPU shares one budget, so they took it from the hart
+  draining the UART. They now sleep.
+  What remains is **not a Dezh defect**, and `irq-stat` is now the instrument
+  that says so: it reports bytes received alongside both drop counts. Six runs
+  sending 204 bytes gave 204/202/200/188 received with **zero** drops at every
+  layer, and the shortfall matched the echoed line's shortfall exactly each time
+  (64/62/60/48). The guest is never handed those bytes, always on the first line
+  after boot, so no change inside Dezh can recover them. Treat single-run paste
+  results on a host pipe as noise — the same configuration measured 0/10 and
+  10/10 minutes apart. See issue #19.
 - **In-kernel U-mode task caveat (RISC-V).** Some baked demo tasks share the
   kernel binary and must avoid non-inlined calls; real apps use the separate-ELF
   and `.dzp` loader paths, which do not have this constraint.

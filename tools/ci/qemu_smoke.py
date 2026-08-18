@@ -718,6 +718,21 @@ def run_riscv64(qemu: str, kernel: Path) -> None:
                     "a U-mode task ran to completion on a hart other than the boot hart",
                 ],
             ),
+            # A secondary hart's OWN timer interrupts a U-mode task running there.
+            # Until W13 step 1 no timer was armed on a secondary, so a task that
+            # did not exit owned that hart outright - the boot hart's timer is a
+            # different hart's timer and cannot preempt it. PREEMPT-OK is only
+            # printed when the task landed off the boot hart AND that hart's tick
+            # count moved, so a regression that stops arming the timer fails here
+            # rather than passing quietly on the boot hart's own preemption.
+            (
+                "smp-preempt",
+                [
+                    "a U-mode task on a secondary hart that never yields",
+                    "finished - and it was interrupted on the way",
+                    "-> PREEMPT-OK",
+                ],
+            ),
             # Symmetric scheduling: one task queue, every hart pulling from it,
             # several U-mode tasks executing at the same instant on different harts.
             (
@@ -890,12 +905,65 @@ def run_x86_64(qemu: str, kernel: Path, iso: Path | None = None) -> None:
         session.wait_for("Dezh x86_64")
         session.wait_for("long mode reached. 64-bit kernel running.")
         session.wait_for("IDT installed: 32 CPU-exception vectors")
+        session.wait_for("plus 224 interrupt vectors on a path that saves state and returns")
+        session.wait_for("Legacy 8259 PICs remapped to 0x20..0x2F and fully masked")
         session.wait_for("Dezh .dzp agent package (sum 1..=5 with a loop) on x86_64:")
         session.wait_for(".dzp verified: kind=dezh-ir, name=agent-sum")
         session.wait_for("[ir] => 15")
         session.wait_for("[ir] DENIED: agent holds no PRINT capability")
+        # W16.1: a hardware timer interrupt that returns. The exception
+        # assertions further down still end in halt — this path is the other
+        # kind, where the interrupted work has to carry on afterwards.
+        session.wait_for("[timer] Local APIC enabled, id=")
+        # The rate is measured against the PIT, never assumed, so the count
+        # itself is not asserted — only that a measurement was taken.
+        session.wait_for("LAPIC counts in 10 ms at divide-16 (APIC bus ")
+        session.wait_for("[timer] armed: vector 0x30, periodic, 100 Hz")
+        session.wait_for("ticks; the work loop completed ")
+        session.wait_for(
+            "[timer] interrupts returned: work resumed after every tick, checksum OK"
+        )
+        # Masking the timer stops the ticks while the same loop keeps running:
+        # what rules out the ticks having come from some other source.
+        session.wait_for("[timer] masked: tick count frozen at ")
+        # W16.2: the same interrupt path declining to resume what it interrupted.
+        # Turn counts are asserted and round counts are not: a turn can only be
+        # granted by the interrupt handler, while rounds only say how fast the
+        # host is.
+        session.wait_for("[sched] 3 tasks spawned, round-robin with the boot task")
+        session.wait_for("[sched] first turns went to task 1 2 3 0 1 2 3 0")
+        for task in (1, 2, 3):
+            session.wait_for(f"[sched] task {task}: ")
+            session.wait_for("checksum OK")
+        session.wait_for("[sched] preemption works: every task was stopped and resumed")
+        session.wait_for("[sched] each task read its own page through its own cr3")
+        # W16.3: containment. Two CPL3 tasks, each in its own address space; one
+        # reaches for an address it was never given. The privilege is asserted
+        # from the `cs` the CPU saved (0x23 = ring 3), which a task cannot forge.
+        session.wait_for("[user] task 4 (")
+        session.wait_for("nothing else marked USER")
+        session.wait_for("[trap] task 5 faulted at CPL3: page-fault touching 0x0000000000000000")
+        session.wait_for("[trap] killing the task; the machine keeps running")
+        session.wait_for("[user] calls arrived from CPL 3 (cs=0x0000000000000023)")
+        session.wait_for("[user] task 5: 1 syscalls, then killed by the kernel (1 task killed, id 5)")
+        session.wait_for(
+            "[user] containment: the faulting task died, its neighbour ran on and finished"
+        )
+        # W16.4: authority on x86 is derived from an intent, not ambient. Two
+        # CPL3 tasks, byte-identical code and manifest, different ceilings —
+        # `granted = requested & ceiling`, computed by the same `dezh_core::mcap`
+        # the RISC-V kernel uses.
+        session.wait_for("[cap] manifest requests print uptime")
+        session.wait_for("[cap] task 6 intent ceiling print uptime -> granted print uptime")
+        session.wait_for("[cap] task 7 intent ceiling uptime -> granted uptime")
+        session.wait_for("[cap] task 6 printed 42")
+        session.wait_for("[cap] DENIED: task 7 holds no PRINT capability")
+        session.wait_for(
+            "[cap] authority is derived, not ambient: identical code, one refusal"
+        )
         # M2: the IDT catches a deliberately-raised breakpoint instead of
-        # triple-faulting the machine.
+        # triple-faulting the machine. The exception path still halts for a
+        # kernel-mode fault; only a CPL3 fault costs just the task.
         session.wait_for("[trap] CPU exception 3 (breakpoint)")
         session.wait_for("[trap] halting")
     finally:

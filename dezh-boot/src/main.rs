@@ -43,6 +43,7 @@ mod pkg;
 mod proc;
 mod sched;
 mod smp;
+mod sync;
 mod utasks;
 
 
@@ -52,7 +53,7 @@ use crate::dev::virtio::{VIRTIO_BLK_MMIO_PA, VIRTIO_DEVICE_ID_NET, VIRTIO_MMIO_S
 use mm::paging::stack_base;
 
 use sched::{
-    print_ipcstat, run_tasks, TaskState, PERS_NATIVE,
+    print_ipcstat, run_tasks, PERS_NATIVE,
 };
 mod service;
 mod vblk;

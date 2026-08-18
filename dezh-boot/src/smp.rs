@@ -27,6 +27,21 @@ use crate::{SYS_EXIT, SYS_PRINT};
 use crate::{
     _hart_start, kprintln, sys_exit, sys_print, Uart, SYS_DENIED,
 };
+use crate::arch::timer::{rdtime, sbi_set_timer, QUANTUM, STIE};
+use crate::sync::TicketLock;
+
+/// `scause` code for a supervisor timer interrupt, with the interrupt bit
+/// already stripped by the caller.
+const SCAUSE_TIMER: usize = 5;
+
+/// How long an idle secondary hart sleeps before re-checking for work.
+///
+/// Deliberately shorter than `QUANTUM`: this is a wake-up latency the SMP
+/// rounds pay, not a scheduling slice. At the 10 MHz `rdtime` of the `virt`
+/// board it is about a millisecond, which is invisible next to the bounded spin
+/// the boot hart already allows a round, and far cheaper than the alternative -
+/// a hart spinning here costs the console real throughput on an emulated host.
+const IDLE_TICK: u64 = 10_000;
 
 //
 // Honest scope. The boot hart runs the OS: the scheduler and every kernel data
@@ -265,6 +280,11 @@ pub(crate) static SMP_GEN: AtomicU64 = AtomicU64::new(0); // round counter the b
 pub(crate) static SMP_COUNTER: AtomicU64 = AtomicU64::new(0); // the shared target of the parallel work
 pub(crate) static HART_RAN: [AtomicBool; MAX_HARTS] = [const { AtomicBool::new(false) }; MAX_HARTS];
 pub(crate) static HART_ROUNDS: [AtomicU64; MAX_HARTS] = [const { AtomicU64::new(0) }; MAX_HARTS];
+/// Supervisor timer interrupts each hart has taken while a U-mode task ran on
+/// it. Per hart rather than one counter, because the claim being made is that a
+/// secondary is interrupted by *its own* timer - a single total could be
+/// satisfied entirely by the boot hart, which has had a timer since W9.
+pub(crate) static HART_TICKS: [AtomicU64; MAX_HARTS] = [const { AtomicU64::new(0) }; MAX_HARTS];
 
 /// A fair ticket spinlock. This is the load-bearing primitive for symmetric
 /// scheduling: a run queue shared by more than one hart cannot exist without
@@ -273,31 +293,6 @@ pub(crate) static HART_ROUNDS: [AtomicU64; MAX_HARTS] = [const { AtomicU64::new(
 /// gives FIFO fairness — no hart starves under contention, unlike a bare
 /// test-and-set. `lock` publishes with Acquire and `unlock` with Release, so an
 /// ordinary read-modify-write inside the critical section is correct.
-struct TicketLock {
-    next: AtomicU32,
-    serving: AtomicU32,
-}
-impl TicketLock {
-    const fn new() -> Self {
-        Self {
-            next: AtomicU32::new(0),
-            serving: AtomicU32::new(0),
-        }
-    }
-    fn lock(&self) {
-        let ticket = self.next.fetch_add(1, Ordering::Relaxed);
-        while self.serving.load(Ordering::Acquire) != ticket {
-            core::hint::spin_loop();
-        }
-    }
-    fn unlock(&self) {
-        // Only the holder calls this and each unlock advances the queue by one,
-        // so a store is enough — no read-modify-write needed.
-        self.serving
-            .store(self.serving.load(Ordering::Relaxed) + 1, Ordering::Release);
-    }
-}
-
 static SMP_LOCK: TicketLock = TicketLock::new();
 /// A deliberately NON-atomic counter, mutated only under `SMP_LOCK`. Atomics
 /// (as in `SMP_COUNTER`) prove coherent shared memory but cannot prove a lock
@@ -337,18 +332,17 @@ pub(crate) static JOB_HART: [AtomicU32; NJOBS] = [const { AtomicU32::new(u32::MA
 pub(crate) static JOBS_DONE: AtomicU64 = AtomicU64::new(0);
 
 pub(crate) fn runq_push(id: u32) {
-    SMP_RUNQ_LOCK.lock();
+    let _held = SMP_RUNQ_LOCK.lock();
     unsafe {
         let q = &mut *core::ptr::addr_of_mut!(RUNQ);
         q.buf[q.tail % RUNQ_CAP] = id;
         q.tail += 1;
     }
-    SMP_RUNQ_LOCK.unlock();
 }
 
 pub(crate) fn runq_pop() -> Option<u32> {
-    SMP_RUNQ_LOCK.lock();
-    let r = unsafe {
+    let _held = SMP_RUNQ_LOCK.lock();
+    unsafe {
         let q = &mut *core::ptr::addr_of_mut!(RUNQ);
         if q.head == q.tail {
             None
@@ -357,9 +351,7 @@ pub(crate) fn runq_pop() -> Option<u32> {
             q.head += 1;
             Some(v)
         }
-    };
-    SMP_RUNQ_LOCK.unlock();
-    r
+    }
 }
 
 /// Pop and "run" jobs until the queue is empty. Called concurrently by every hart.
@@ -442,18 +434,17 @@ pub(crate) static AP_LIVE: AtomicU64 = AtomicU64::new(0);
 pub(crate) static AP_LIVE_MAX: AtomicU64 = AtomicU64::new(0);
 
 pub(crate) fn ap_q_push(slot: u32) {
-    AP_Q_LOCK.lock();
+    let _held = AP_Q_LOCK.lock();
     unsafe {
         let q = &mut *core::ptr::addr_of_mut!(AP_Q);
         q.buf[q.tail % RUNQ_CAP] = slot;
         q.tail += 1;
     }
-    AP_Q_LOCK.unlock();
 }
 
 pub(crate) fn ap_q_pop() -> Option<u32> {
-    AP_Q_LOCK.lock();
-    let r = unsafe {
+    let _held = AP_Q_LOCK.lock();
+    unsafe {
         let q = &mut *core::ptr::addr_of_mut!(AP_Q);
         if q.head == q.tail {
             None
@@ -462,9 +453,7 @@ pub(crate) fn ap_q_pop() -> Option<u32> {
             q.head += 1;
             Some(v)
         }
-    };
-    AP_Q_LOCK.unlock();
-    r
+    }
 }
 
 /// Build a private address space for one task slot: copy the kernel page tables,
@@ -519,6 +508,31 @@ pub(crate) extern "C" fn ap_worker_task(slot: usize) -> ! {
     sys_exit(slot)
 }
 
+/// A U-mode task that never yields, long enough to outrun a scheduling quantum.
+///
+/// `ap_worker_task` spins too, but only far enough to show a syscall being
+/// serviced off the boot hart - whether it crosses a quantum depends on how fast
+/// the host emulates, which is not something to assert on. This one is sized so
+/// that it cannot finish inside one, so "the hart's timer fired" is a claim
+/// about the kernel rather than about the host's speed.
+#[link_section = ".user.text"]
+#[no_mangle]
+pub(crate) extern "C" fn ap_spin_task(slot: usize) -> ! {
+    sys_print(b"  [ap-spin] a U-mode task on a secondary hart that never yields\n");
+    let mut i = 0usize;
+    while i < AP_SPIN_ITERS {
+        unsafe { asm!("nop") };
+        i += 1;
+    }
+    sys_print(b"  [ap-spin] finished - and it was interrupted on the way\n");
+    sys_exit(slot)
+}
+
+/// Chosen by measurement, not by feel: at 10 MHz `rdtime` a `QUANTUM` of 50,000
+/// is ~5 ms, and this many iterations takes comfortably longer than that under
+/// QEMU TCG, which is the slowest thing CI runs on.
+pub(crate) const AP_SPIN_ITERS: usize = 40_000_000;
+
 /// A U-mode task that reaches into ANOTHER task's stack (address in `a1`). With
 /// per-task address spaces that page is not mapped U here, so it must fault.
 #[link_section = ".user.text"]
@@ -547,7 +561,31 @@ extern "C" fn ap_trap_handler(frame: *mut usize) -> *const usize {
     let f = unsafe { &mut *(frame as *mut [usize; 32]) };
 
     if interrupt {
-        // The AP enables no interrupts while running a task; ignore and resume.
+        // Supervisor timer. Until now the AP ran with interrupts masked, so a
+        // U-mode task on a secondary held that hart until it exited: no timer
+        // was armed there and nothing could take the CPU back. The hart now
+        // arms its own timer before entering U-mode, so this arrives on the
+        // hart the task is running on, is serviced there, and the task resumes.
+        //
+        // Resuming rather than switching is the whole of the change: this hart
+        // still runs one task to completion. What it no longer does is run it
+        // *uninterruptibly*. Choosing a different task here is the next step,
+        // and it needs the console's task table under a lock first.
+        if code == SCAUSE_TIMER {
+            // Which hart this is, without reading `tp` - the task owns `tp` and
+            // the trap path is required not to touch it. `ap_execute` recorded
+            // the hart in `AP_SLOT_HART` before entering U-mode, and `slot`
+            // reached us through `sscratch`, so the answer is already here.
+            if slot < AP_SLOTS {
+                let hid = AP_SLOT_HART[slot].load(Ordering::Relaxed) as usize;
+                if hid < MAX_HARTS {
+                    HART_TICKS[hid].fetch_add(1, Ordering::Relaxed);
+                }
+            }
+            sbi_set_timer(rdtime() + QUANTUM);
+            return frame;
+        }
+        // Anything else: the AP enables no other interrupt source.
         return frame;
     }
     if code == 8 {
@@ -556,12 +594,13 @@ extern "C" fn ap_trap_handler(frame: *mut usize) -> *const usize {
         match f[F_A7] {
             SYS_PRINT => {
                 // Lock the UART: other harts and the console may print too.
-                SMP_LOCK.lock();
-                let s = unsafe { core::slice::from_raw_parts(f[F_A0] as *const u8, f[F_A1]) };
-                for &b in s {
-                    Uart.putc(b);
+                {
+                    let _held = SMP_LOCK.lock();
+                    let s = unsafe { core::slice::from_raw_parts(f[F_A0] as *const u8, f[F_A1]) };
+                    for &b in s {
+                        Uart.putc(b);
+                    }
                 }
-                SMP_LOCK.unlock();
                 f[F_A0] = 0;
             }
             SYS_EXIT => {
@@ -612,9 +651,23 @@ unsafe fn ap_execute(hartid: usize, slot: usize) {
     asm!("csrw stvec, {}", in(reg) utrap_ap as *const () as usize);
     asm!("csrs sstatus, {}", in(reg) 1usize << 18); // SUM: S-mode may read the task's U pages
 
+    // Arm this hart's own timer for the duration of the task. Before this the
+    // secondary ran U-mode with `sie.STIE` clear, so nothing could take the CPU
+    // back from a task that did not exit - the boot hart's timer is a different
+    // hart's timer and cannot preempt this one. `sstatus.SIE` is left alone:
+    // U-mode traps are taken regardless of it, and setting it would also expose
+    // the hart's kernel-mode stretches here, which is not what this step claims.
+    sbi_set_timer(rdtime() + QUANTUM);
+    asm!("csrs sie, {}", in(reg) STIE);
+
     let fp = core::ptr::addr_of!(ctx.frame) as *const usize;
     let kp = core::ptr::addr_of!(ctx.kctx) as *const usize;
     ap_run(fp, kp); // returns (via ap_return) when the task exits or faults
+
+    // Disarm before leaving U-mode behind: the hart's compute and queue rounds
+    // run in S-mode with no trap vector installed, so a timer arriving there
+    // would have nowhere to go.
+    asm!("csrc sie, {}", in(reg) STIE);
 
     // Back to bare mode so the hart's compute/queue rounds are unaffected.
     asm!("csrw stvec, {}", in(reg) 0usize);
@@ -646,14 +699,40 @@ extern "C" fn hart_main(hartid: usize) -> ! {
 
     let mut served = SMP_GEN.load(Ordering::Acquire);
     loop {
-        // Wait for the boot hart to open a new round. spin_loop (not wfi) so a
-        // TCG round-robin host keeps making progress and we wake promptly. While
-        // waiting, also pick up a U-mode task the boot hart posted to this hart.
+        // Wait for the boot hart to open a new round, and pick up any U-mode
+        // task posted here while waiting.
+        //
+        // This used to spin unconditionally, on the reasoning that a TCG
+        // round-robin host keeps making progress that way and the hart wakes
+        // promptly. Both halves are true and the cost was not being counted: on
+        // TCG every vCPU shares one host budget, so harts spinning here take it
+        // from the hart running the console — which is the hart draining the
+        // UART. Pasting a 64-character line lands 8/10 intact at `-smp 1`, 2/8
+        // at `-smp 4`, and 0/3 at `-smp 8`, where most lines never arrive at
+        // all. That is issue #19, and it was never a race: it is starvation.
         while SMP_GEN.load(Ordering::Acquire) == served {
             if AP_SCHED_ON.load(Ordering::Acquire) {
+                // A U-mode scheduling window is open, so the boot hart may post
+                // work at any moment and the demos measure how much overlap it
+                // gets. Stay hot here; the window is short and bounded.
                 unsafe { ap_schedule(hartid) };
+                core::hint::spin_loop();
+                continue;
             }
-            core::hint::spin_loop();
+            // Nothing to do. Sleep instead of burning the shared budget.
+            //
+            // `sie.STIE` is set so the timer is *locally* enabled, which is what
+            // makes `wfi` resume; `sstatus.SIE` stays clear so no trap is taken
+            // when it does. That distinction is load-bearing: this loop runs in
+            // S-mode with `stvec` at zero, so an actual trap here would jump to
+            // address zero. The spec grants exactly this - `wfi` resumes for a
+            // locally enabled interrupt regardless of the global enable.
+            unsafe {
+                sbi_set_timer(rdtime() + IDLE_TICK);
+                asm!("csrs sie, {}", in(reg) STIE);
+                asm!("wfi");
+                asm!("csrc sie, {}", in(reg) STIE);
+            }
         }
         served = SMP_GEN.load(Ordering::Acquire);
 
@@ -673,13 +752,14 @@ extern "C" fn hart_main(hartid: usize) -> ! {
         // would clobber each other and the total would come up short.
         let mut m = 0;
         while m < SMP_LOCK_WORK {
-            SMP_LOCK.lock();
-            unsafe {
-                let p = core::ptr::addr_of_mut!(SMP_GUARDED);
-                let v = read_volatile(p);
-                write_volatile(p, v + 1);
+            {
+                let _held = SMP_LOCK.lock();
+                unsafe {
+                    let p = core::ptr::addr_of_mut!(SMP_GUARDED);
+                    let v = read_volatile(p);
+                    write_volatile(p, v + 1);
+                }
             }
-            SMP_LOCK.unlock();
             m += 1;
         }
         // Release: the boot hart's Acquire-load of this establishes that our
@@ -771,13 +851,14 @@ pub(crate) fn smp_round() -> SmpRound {
     // The boot hart contends on the lock alongside the secondaries.
     let mut m = 0;
     while m < SMP_LOCK_WORK {
-        SMP_LOCK.lock();
-        unsafe {
-            let p = core::ptr::addr_of_mut!(SMP_GUARDED);
-            let v = read_volatile(p);
-            write_volatile(p, v + 1);
+        {
+            let _held = SMP_LOCK.lock();
+            unsafe {
+                let p = core::ptr::addr_of_mut!(SMP_GUARDED);
+                let v = read_volatile(p);
+                write_volatile(p, v + 1);
+            }
         }
-        SMP_LOCK.unlock();
         m += 1;
     }
 

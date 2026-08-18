@@ -337,10 +337,18 @@ below) and to COM1 serial.
 
 ![Dezh x86_64 booting in VirtualBox](assets/dezh-x86-virtualbox.png)
 
-The boot also installs a 32-vector exception IDT and, at the end, deliberately
-raises a breakpoint to prove faults are **caught and reported** (not a silent
-triple-fault reset). A returnable interrupt path (timer / device IRQs) is still
-future work — see [ROADMAP.md](ROADMAP.md).
+The boot also installs a 256-vector IDT and exercises both kinds of trap. The
+first 32 vectors are CPU exceptions, and the boot deliberately raises a
+breakpoint at the end to prove faults are **caught and reported** (not a silent
+triple-fault reset) before halting. The rest are interrupts, which must not
+halt: a Local APIC timer is armed at 100 Hz from a rate measured against the
+PIT, and the kernel keeps a work loop running through the ticks to show the
+interrupted work resumes intact. The boot then preempts three kernel tasks that
+never yield; runs two ring-3 tasks in separate address spaces, one of which
+touches memory it was not given and is killed while the other finishes; and
+finally runs two more whose code and manifest are identical but whose intents are
+not, so one of them is refused a capability by name. Device IRQs, storage and an
+effect ledger on x86 are still future work — see [ROADMAP.md](ROADMAP.md).
 
 ### x86_64 in QEMU (same ISO)
 

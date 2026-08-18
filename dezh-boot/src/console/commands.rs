@@ -330,6 +330,13 @@ pub(crate) const COMMANDS: &[CommandSpec] = &[
         help: "SMP: dispatch a real U-mode task onto a secondary hart while the boot hart stays on the console",
     },
     CommandSpec {
+        name: "smp-preempt",
+        cap: cap::INSPECT,
+        cap_name: "INSPECT",
+        group: "Inspect",
+        help: "SMP: a secondary hart's OWN timer interrupts a U-mode task running there, and the task resumes",
+    },
+    CommandSpec {
         name: "smp-sched",
         cap: cap::INSPECT,
         cap_name: "INSPECT",
