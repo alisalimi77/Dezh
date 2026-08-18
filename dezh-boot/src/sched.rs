@@ -140,7 +140,18 @@ static TRES: Global<[TaskResources; MAX_TASKS]> = Global::new([EMPTY_TASK_RESOUR
 ///
 /// Indexed by `current_hart()`, like `KCTX` and `ktrap_stack`. The index is
 /// bounded once, at boot, where `tp` is checked against the id SBI passes.
-static CURRENT: Global<[usize; MAX_HARTS]> = Global::new([0; MAX_HARTS]);
+///
+/// `NO_TASK` means this hart is not in the scheduler at all - it is on the
+/// console, or it has just left through `restore_kernel_ctx`. That distinction
+/// is what turns this table into the run claim as well: an entry that is not
+/// `NO_TASK` is a hart asserting it owns that task, and `pick_next` honours it.
+/// Keeping the claim and the running task in one cell is deliberate; two tables
+/// could disagree, and the disagreement would be two harts on one register
+/// frame.
+static CURRENT: Global<[usize; MAX_HARTS]> = Global::new([NO_TASK; MAX_HARTS]);
+
+/// No task on this hart. Not a valid index: `MAX_TASKS` is far below it.
+const NO_TASK: usize = usize::MAX;
 
 /// The running task on the calling hart. Every read and write of it goes
 /// through this pair, so the hart index cannot be dropped at one site.
@@ -331,13 +342,34 @@ fn frame_ptr(i: usize) -> *mut usize {
 
 unsafe fn pick_next() -> Option<usize> {
     expire_recv_timeouts();
+    // Resume after the task this hart ran last, or at 0 if it is arriving from
+    // the console with nothing to resume after.
+    let cur = current_task();
+    let start = if cur == NO_TASK { 0 } else { cur + 1 };
     for off in 0..MAX_TASKS {
-        let i = (current_task() + 1 + off) % MAX_TASKS;
-        if (*TSTATE.get())[i] == TaskState::Ready {
+        let i = (start + off) % MAX_TASKS;
+        if (*TSTATE.get())[i] == TaskState::Ready && !claimed_elsewhere(i) {
             return Some(i);
         }
     }
     None
+}
+
+/// Is another hart running task `i` right now?
+///
+/// A task stays `Ready` while it runs - `Ready` means runnable, not idle - so
+/// without this two harts would both find the same slot and enter it, and the
+/// second would resume from a register frame the first is still saving into.
+/// The claim is read here and written only in `schedule_or_return` and the run
+/// entries, always under `SCHED_LOCK`, so a claim cannot be granted twice.
+///
+/// Linear in `MAX_HARTS` per candidate, which is 8. The alternative - a
+/// `Running` state - would have to be understood by all eleven places that
+/// write `TaskState`, and every one of them would have to get the
+/// Ready/Running distinction right for a property none of them are about.
+unsafe fn claimed_elsewhere(i: usize) -> bool {
+    let me = current_hart();
+    (0..MAX_HARTS).any(|h| h != me && (*CURRENT.get())[h] == i)
 }
 
 /// Pick the next Ready task and return its frame, or longjmp back to the console
@@ -438,7 +470,15 @@ unsafe fn schedule_or_return() -> *const usize {
                 asm!("sfence.vma");
                 Some(frame_ptr(i) as *const usize)
             }
-            None => None,
+            None => {
+                // Leaving the scheduler: drop the claim here, inside the same
+                // section that reads claims, rather than on the far side of the
+                // longjmp - which never returns, so there is no far side.
+                // A hart that kept its claim would fence off a perfectly
+                // runnable task for the rest of the boot.
+                set_current_task(NO_TASK);
+                None
+            }
         }
     };
     match next {
@@ -479,6 +519,18 @@ extern "C" fn utrap_handler(frame_ptr: *mut usize) -> *const usize {
             let _held = SCHED_LOCK.lock();
             current_task()
         };
+        // A trap from U-mode means this hart is running a task, so its claim
+        // must be standing. If it is not, the claim was dropped while the task
+        // was live and another hart is free to enter the same frame - checked
+        // because `cur` is about to index every table below it.
+        if cur == NO_TASK {
+            kprintln!(
+                "
+[dezh-boot] FATAL: trap on hart {} which holds no task -- halting",
+                current_hart()
+            );
+            shutdown(FINISH_FAIL);
+        }
         if interrupt {
             // Supervisor timer = preemption: the running task's full frame is
             // already saved, so round-robin to the next ready task. A task that

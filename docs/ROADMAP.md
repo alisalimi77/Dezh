@@ -692,13 +692,32 @@ check is not available. Negative control: with `MAX_HARTS` temporarily at 2, the
 runs QEMU lands on harts 2 and 3 print the FATAL and halt while harts 0 and 1
 boot normally — the guard fires exactly at the boundary and nowhere else.
 
+And two harts can no longer pick the same task. `Ready` means runnable, not
+idle — a task stays `Ready` for the whole time it runs — so `pick_next` would
+have handed the same slot to both, and the second hart would have resumed from a
+register frame the first was still saving into. The claim is the `CURRENT` entry
+itself rather than a `Running` state or a second table: one cell cannot disagree
+with itself, and a `Running` state would have to be got right by all eleven
+places that write `TaskState`, none of which are about this. `NO_TASK` is the
+other half — a hart on the console holds no claim, and the claim is dropped
+inside the same locked section that reads claims, on the way out through
+`restore_kernel_ctx`, because that path never returns.
+
+Negative control, and this one does exercise the case the mechanism exists for:
+a phantom claim on task 1, planted at run entry as if a second hart held it,
+makes task 1 undispatchable — `ipc-typed-demo` reaches the console, prints its
+banner and then never prints `PING -> 0`, because the server task can no longer
+be chosen. Every leg before it is unaffected. Remove the claim and the same run
+is green.
+
 So the last piece is: let a secondary pull from the console task table, limited
 to tasks with their own address space, and then make a daemon migrate under
 load. Everything under it is in place — identity in both contexts, per-hart
-context, stack and current task, the table private and locked, syscalls atomic
-per call. What it still needs is a rule that two harts cannot pick the *same*
-task: `pick_next` returns any `Ready` slot, and a task stays `Ready` while it
-runs, so today's answer would be "both of them".
+context, stack and current task, the table private and locked, the run claim
+enforced, syscalls atomic per call. The known gap is the three run entries
+(`run_tasks`, `run_processes`, `run_scheduler_from`): they build the task table
+and take the first claim without the lock, which is sound only while the boot
+hart is the only way in. Whoever lets a secondary in has to close that first.
 
 ##### W14 — Object-capabilities as the live substrate (P4)
 
