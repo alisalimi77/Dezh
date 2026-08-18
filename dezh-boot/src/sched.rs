@@ -319,13 +319,25 @@ unsafe fn any_irq_waiting() -> bool {
 unsafe fn idle_until_device() {
     const IDLE_LIMIT: u64 = 50_000_000;
     let mut spins = 0u64;
-    while pick_next().is_none() && any_irq_waiting() {
+    loop {
+        // The test reads the task table, so it takes the lock - and gives it
+        // back before sleeping. `plic_handle` below takes the same lock through
+        // `wake_irq_waiters`, so holding it across the wait would leave this
+        // hart waiting for a lock only it can release, with the release on the
+        // far side of the wait.
+        let idle = {
+            let _held = SCHED_LOCK.lock();
+            pick_next().is_none() && any_irq_waiting()
+        };
+        if !idle {
+            return;
+        }
         asm!("wfi");
         plic_handle();
         spins += 1;
         if spins > IDLE_LIMIT {
             // A device that never reports back must not wedge the machine.
-            break;
+            return;
         }
     }
 }
@@ -335,19 +347,44 @@ unsafe fn schedule_or_return() -> *const usize {
     // wait for it instead of abandoning the run. This is what makes blocking on
     // I/O possible at all - without it the kernel returns from the task loop and
     // orphans the sleeping driver.
-    if pick_next().is_none() && any_irq_waiting() {
+    //
+    // The lock is taken twice on purpose rather than held across the middle.
+    // `idle_until_device` sleeps and services the PLIC, which reaches
+    // `wake_irq_waiters` and this same lock; a hart holding it there would be
+    // waiting for itself. Re-deciding after the wait is not a cost, it is the
+    // point - the wait exists precisely because the answer was expected to
+    // change.
+    let should_idle = {
+        let _held = SCHED_LOCK.lock();
+        pick_next().is_none() && any_irq_waiting()
+    };
+    if should_idle {
         idle_until_device();
     }
-    match pick_next() {
-        Some(i) => {
-            *CURRENT.get() = i;
-            set_active_task_mem(i); // give the new task its private stack, hide others
-                                    // Switch to the task's address space (own satp for a loaded process,
-                                    // the shared kernel satp for a baked task).
-            asm!("csrw satp, {}", in(reg) (*TSATP.get())[i]);
-            asm!("sfence.vma");
-            frame_ptr(i) as *const usize
+
+    // The address-space switch belongs inside the critical section with the
+    // choice that produced it: picking task `i` and then having another hart
+    // change `TSATP[i]` before the write would install a page table for a task
+    // this hart is no longer about to run.
+    let next = {
+        let _held = SCHED_LOCK.lock();
+        match pick_next() {
+            Some(i) => {
+                *CURRENT.get() = i;
+                set_active_task_mem(i); // give the new task its private stack, hide others
+                                        // Switch to the task's address space (own satp for a loaded
+                                        // process, the shared kernel satp for a baked task).
+                asm!("csrw satp, {}", in(reg) (*TSATP.get())[i]);
+                asm!("sfence.vma");
+                Some(frame_ptr(i) as *const usize)
+            }
+            None => None,
         }
+    };
+    match next {
+        Some(f) => f,
+        // Outside the lock: this longjmps back to the console and never returns,
+        // so a guard here would never be dropped.
         None => restore_kernel_ctx(),
     }
 }
