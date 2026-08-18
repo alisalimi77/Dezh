@@ -4,10 +4,11 @@
 //! depends on it, and `kprint!`/`kprintln!` are the one thing every other
 //! module needs before it can say anything at all.
 
-use core::arch::asm;
 use core::fmt::{self, Write};
 use core::ptr::{read_volatile, write_volatile};
 use core::sync::atomic::{AtomicU32, AtomicU8, AtomicUsize, Ordering};
+
+use crate::sync::TicketLock;
 
 pub(crate) const UART_BASE: *mut u8 = 0x1000_0000 as *mut u8;
 const UART_RBR: usize = 0;
@@ -30,8 +31,6 @@ const LSR_OVERRUN: u8 = 0x02;
 /// LSR bit 5: Transmit Holding Register Empty - the previous byte has left and
 /// `THR` may be written again.
 const LSR_TX_EMPTY: u8 = 0x20;
-/// `sstatus.SIE`, the supervisor interrupt enable.
-const SSTATUS_SIE: usize = 1 << 1;
 
 /// The receive ring, and why the console has one.
 ///
@@ -146,51 +145,13 @@ impl Uart {
 /// forever.
 static RX_LOCK: TicketLock = TicketLock::new();
 
-struct TicketLock {
-    next: AtomicU32,
-    serving: AtomicU32,
-}
-
-impl TicketLock {
-    const fn new() -> Self {
-        Self {
-            next: AtomicU32::new(0),
-            serving: AtomicU32::new(0),
-        }
-    }
-    fn lock(&self) {
-        let ticket = self.next.fetch_add(1, Ordering::Relaxed);
-        while self.serving.load(Ordering::Acquire) != ticket {
-            core::hint::spin_loop();
-        }
-    }
-    fn unlock(&self) {
-        self.serving
-            .store(self.serving.load(Ordering::Relaxed) + 1, Ordering::Release);
-    }
-}
-
-/// Clear `sstatus.SIE` and report whether it had been set.
-fn irq_off() -> bool {
-    let prev: usize;
-    unsafe { asm!("csrrci {}, sstatus, 2", out(reg) prev) };
-    prev & SSTATUS_SIE != 0
-}
-
-fn irq_restore(was_on: bool) {
-    if was_on {
-        unsafe { asm!("csrsi sstatus, 2") };
-    }
-}
-
 /// Empty the hardware FIFO into the ring.
 ///
 /// Called from the external-interrupt handler and from `getc`. It must take
 /// *everything* available: the 16550 holds its interrupt line asserted while any
 /// byte remains, so leaving one behind means the interrupt re-fires at once.
 pub(crate) fn rx_drain() {
-    let was_on = irq_off();
-    RX_LOCK.lock();
+    let _held = RX_LOCK.lock();
     loop {
         let lsr = unsafe { read_volatile(UART_BASE.add(UART_LSR)) };
         if lsr & LSR_OVERRUN != 0 {
@@ -212,8 +173,6 @@ pub(crate) fn rx_drain() {
         RX_BUF[head & RX_MASK].store(byte, Ordering::Relaxed);
         RX_HEAD.store(head.wrapping_add(1), Ordering::Release);
     }
-    RX_LOCK.unlock();
-    irq_restore(was_on);
 }
 
 fn rx_pop() -> Option<u8> {

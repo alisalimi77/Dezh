@@ -43,6 +43,7 @@ mod pkg;
 mod proc;
 mod sched;
 mod smp;
+mod sync;
 mod utasks;
 
 
