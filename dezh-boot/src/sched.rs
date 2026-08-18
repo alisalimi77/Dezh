@@ -29,6 +29,7 @@ use crate::abi::{
 use crate::arch::finisher::{shutdown, FINISH_FAIL};
 use crate::arch::timer::{rdtime, sbi_set_timer, QUANTUM, TICKS, TIMER_DELTA};
 use crate::mm::global::Global;
+use crate::sync::TicketLock;
 use crate::proc::loader::{build_address_space, kernel_satp, proc_satp, USER_STACK_TOP};
 use crate::{kprintln, plic_handle, reclaim_resources, restore_kernel_ctx, run_first, trap_entry, utrap, Uart, TASK_IPC, TASK_PRINT, TASK_TIME};
 // Every one of these is used as a MATCH PATTERN below. A const that is not in
@@ -834,46 +835,89 @@ pub(crate) struct TaskRow {
     pub(crate) exit: usize,
 }
 
+/// Guards the task table.
+///
+/// **What it covers today, exactly:** the functions below, which are the whole
+/// of what other modules may call, plus `wake_irq_waiters`, which is the only
+/// write to the table from interrupt context. Nothing else. The scheduler's own
+/// internals — `utrap_handler`, `schedule_or_return`, `run_processes` and the
+/// helpers under them — are still boot-hart-only and still unlocked.
+///
+/// That is a boundary, not an oversight, and it is drawn where it is because of
+/// one loop:
+///
+/// ```text
+/// schedule_or_return -> idle_until_device -> plic_handle -> wake_irq_waiters
+/// ```
+///
+/// A ticket lock is not reentrant, and this one masks interrupts, so wrapping
+/// the scheduler internals in it would have the hart wait on a lock it already
+/// holds, with the only path to releasing it running inside the wait. Making the
+/// internals safe needs them restructured — a `_locked` inner for every function
+/// that is called both from outside and from within, `reclaim_task_resources`
+/// first with its seven internal callers — and that restructuring is step 3's
+/// job, done together with letting a second hart in.
+///
+/// Until then no second hart calls any of it, so the unlocked internals are
+/// still correct for the same reason they always were. What this buys now is
+/// that the reachable surface is closed and the interrupt-context write is
+/// serialised, so step 3 extends a lock inward rather than inventing one.
+static SCHED_LOCK: TicketLock = TicketLock::new();
+
+// Raw table reads. Callers already hold `SCHED_LOCK`; these exist so the public
+// wrappers do not take it twice.
+fn state_of(slot: usize) -> TaskState {
+    unsafe { (*TSTATE.get())[slot] }
+}
+
+fn exit_of(slot: usize) -> usize {
+    unsafe { (*TEXIT.get())[slot] }
+}
+
 pub(crate) fn task_row(slot: usize) -> TaskRow {
+    let _held = SCHED_LOCK.lock();
     unsafe {
         TaskRow {
-            state: (*TSTATE.get())[slot],
+            state: state_of(slot),
             kind: (*TRES.get())[slot].kind,
             caps: (*TCAPS.get())[slot],
-            exit: (*TEXIT.get())[slot],
+            exit: exit_of(slot),
         }
     }
 }
 
 pub(crate) fn task_state(slot: usize) -> TaskState {
-    unsafe { (*TSTATE.get())[slot] }
+    let _held = SCHED_LOCK.lock();
+    state_of(slot)
 }
 
 pub(crate) fn task_exit_code(slot: usize) -> usize {
-    unsafe { (*TEXIT.get())[slot] }
+    let _held = SCHED_LOCK.lock();
+    exit_of(slot)
 }
 
 /// Is this task alive in the sense a supervisor cares about - runnable, or
 /// parked waiting for something?
 pub(crate) fn task_is_live(slot: usize) -> bool {
-    matches!(task_state(slot), TaskState::Blocked | TaskState::Ready)
+    let _held = SCHED_LOCK.lock();
+    matches!(state_of(slot), TaskState::Blocked | TaskState::Ready)
 }
 
 /// The exit code of the foreground task, which is how every synchronous console
 /// verb - block I/O, Marz, the package paths - reads its result back.
 pub(crate) fn foreground_exit_code() -> usize {
-    unsafe { (*TEXIT.get())[FIRST_FOREGROUND_TASK] }
+    let _held = SCHED_LOCK.lock();
+    exit_of(FIRST_FOREGROUND_TASK)
 }
 
 /// A device reported completion: make every task parked on one runnable again.
 /// Returns how many were woken.
 ///
-/// Called from `plic_handle`, in interrupt context. It lives here because it
-/// writes the task table, and because when that table goes under a lock this is
-/// the call that has to take it - from a context that cannot be allowed to
-/// block on a lock this hart already holds. `sync::TicketLock` masks for exactly
-/// that reason.
+/// Called from `plic_handle`, in interrupt context, which is why the lock has to
+/// mask: without that, the console could hold it, take a device interrupt on the
+/// same hart, and wait here forever for itself.
 pub(crate) fn wake_irq_waiters() -> u64 {
+    let _held = SCHED_LOCK.lock();
     let mut woken = 0u64;
     unsafe {
         let mut i = 0usize;
