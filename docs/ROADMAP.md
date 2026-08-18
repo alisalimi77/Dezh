@@ -644,9 +644,23 @@ until now the boot hart was the one that could not, because `_start` never set
 the id SBI passes, with a negative control: remove the register write and `tp`
 reads as garbage and the kernel refuses to continue.
 
-`current_hart` is kernel-context only. Inside a U-mode trap the task owns every
-register including `tp`, which is why that path finds its state through
-`sscratch`.
+`current_hart` is kernel-context only — **was**. Inside a U-mode trap the task
+owns every register including `tp`, so the handler read whatever the task left
+behind. That is now closed from the other side: the saved frame carries a slot
+33 (`F_HART`) that the dispatching hart stamps with its own id, and `utrap`
+loads it into `tp` on the way in. Both first-dispatch paths stamp it too, and
+because it is written every time a task is chosen, it survives migration by
+construction.
+
+Every trap now checks the restored identity against the hart that dispatches
+tasks and halts on a mismatch, since a wrong answer would send a hart at another
+hart's per-hart state — a corruption rather than a crash. Negative control:
+remove the load and the handler reports hart 0 while the boot hart is 2.
+
+What is left for 3c is the merge itself: `restore_kernel_ctx` still returns to
+one saved context, and `KCTX` and `ktrap_stack` are still single. Making them
+per-hart is now a mechanical indexing change rather than a chicken-and-egg,
+because the index is available in both kernel context and trap context.
 
 ##### W14 — Object-capabilities as the live substrate (P4)
 

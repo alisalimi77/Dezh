@@ -351,6 +351,12 @@ utrap:
     csrr    x5, sepc
     sd      x5, 248(sp)
     mv      a0, sp                  # a0 = &frame
+    # The task owned tp and it has just been saved. Put the KERNEL's identity
+    # back before any Rust runs: the dispatching hart stamped its own id into
+    # slot 32 of this frame, which is the only place the trap path can learn it.
+    # Without this, `current_hart()` inside the handler reads whatever the task
+    # happened to leave in tp.
+    ld      tp, 256(sp)
     la      sp, ktrap_top
     call    utrap_handler           # returns &resume_frame in a0
     j       frame_restore

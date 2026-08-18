@@ -29,6 +29,7 @@ use crate::abi::{
 use crate::arch::finisher::{shutdown, FINISH_FAIL};
 use crate::arch::timer::{rdtime, sbi_set_timer, QUANTUM, TICKS, TIMER_DELTA};
 use crate::mm::global::Global;
+use crate::smp::{current_hart, BOOT_HART};
 use crate::sync::TicketLock;
 use crate::proc::loader::{build_address_space, kernel_satp, proc_satp, USER_STACK_TOP};
 use crate::{kprintln, plic_handle, reclaim_resources, restore_kernel_ctx, run_first, trap_entry, utrap, Uart, TASK_IPC, TASK_PRINT, TASK_TIME};
@@ -119,7 +120,8 @@ static TRECV_DEADLINE: Global<[u64; MAX_TASKS]> = Global::new([0; MAX_TASKS]);
 static TRECV_PTR: Global<[usize; MAX_TASKS]> = Global::new([0; MAX_TASKS]);
 static TRECV_LEN: Global<[usize; MAX_TASKS]> = Global::new([0; MAX_TASKS]);
 
-static FRAMES: Global<[[usize; 32]; MAX_TASKS]> = Global::new([[0; 32]; MAX_TASKS]);
+static FRAMES: Global<[[usize; FRAME_SLOTS]; MAX_TASKS]> =
+    Global::new([[0; FRAME_SLOTS]; MAX_TASKS]);
 static TSTATE: Global<[TaskState; MAX_TASKS]> = Global::new([TaskState::Unused; MAX_TASKS]);
 /// Tasks parked until a device interrupt arrives (see `SYS_IRQ_WAIT`).
 static TIRQ_WAITING: Global<[bool; MAX_TASKS]> = Global::new([false; MAX_TASKS]);
@@ -287,6 +289,21 @@ const F_A4: usize = 13;
 pub(crate) const F_A7: usize = 16;
 pub(crate) const F_SP: usize = 1;
 pub(crate) const F_SEPC: usize = 31;
+/// Slot 32: the id of the hart that dispatched this task.
+///
+/// Not part of the saved register file - the frame is 0..=31 for that, index 31
+/// being `sepc`, with no room left. This is written by whichever hart is about
+/// to run the task, and read by `utrap` on the way in to put the kernel's own
+/// identity back in `tp`.
+///
+/// It has to travel in the frame because there is nowhere else the trap path can
+/// look. A U-mode task owns every integer register, so `tp` holds the task's
+/// value by the time it traps and `current_hart()` is meaningless there. Writing
+/// it at dispatch is also what makes it survive migration: the answer is set by
+/// the hart that will actually run the task, every time it is chosen.
+pub(crate) const F_HART: usize = 32;
+/// Saved register file (0..=31) plus the dispatching hart id.
+pub(crate) const FRAME_SLOTS: usize = 33;
 
 fn frame_ptr(i: usize) -> *mut usize {
     unsafe { core::ptr::addr_of_mut!((*FRAMES.get())[i]) as *mut usize }
@@ -371,6 +388,9 @@ unsafe fn schedule_or_return() -> *const usize {
         match pick_next() {
             Some(i) => {
                 *CURRENT.get() = i;
+                // Stamp the running hart into the frame before the task resumes,
+                // so `utrap` can restore kernel identity on the way back in.
+                (*FRAMES.get())[i][F_HART] = current_hart();
                 set_active_task_mem(i); // give the new task its private stack, hide others
                                         // Switch to the task's address space (own satp for a loaded
                                         // process, the shared kernel satp for a baked task).
@@ -395,9 +415,24 @@ extern "C" fn utrap_handler(frame_ptr: *mut usize) -> *const usize {
     unsafe { asm!("csrr {}, scause", out(reg) scause) };
     let interrupt = scause >> (usize::BITS - 1) == 1;
     let code = scause & (!0 >> 1);
-    let frame = unsafe { core::slice::from_raw_parts_mut(frame_ptr, 32) };
+    let frame = unsafe { core::slice::from_raw_parts_mut(frame_ptr, FRAME_SLOTS) };
 
     unsafe {
+        // `utrap` restored the kernel's `tp` from the frame's hart stamp. Check
+        // it, because everything per-hart from here on trusts it and a wrong
+        // answer would send this hart at another hart's state - a corruption,
+        // not a crash. Only the boot hart runs console tasks today, so that is
+        // the expected answer; when a secondary starts dispatching, this becomes
+        // "a hart that is actually online".
+        if current_hart() != BOOT_HART.load(Ordering::Relaxed) {
+            kprintln!(
+                "
+[dezh-boot] FATAL: trap on hart {} but only hart {} dispatches tasks -- halting",
+                current_hart(),
+                BOOT_HART.load(Ordering::Relaxed)
+            );
+            shutdown(FINISH_FAIL);
+        }
         // Snapshot before any reschedule (avoids &static_mut), and under the
         // lock because another hart may be choosing the next task right now.
         let cur = {
@@ -756,7 +791,7 @@ pub(crate) fn run_tasks(specs: &[(usize, usize, u8)]) {
         }
         for (i, &(entry, caps, pers)) in specs.iter().take(n).enumerate() {
             let f = &mut (*FRAMES.get())[i];
-            *f = [0; 32];
+            *f = [0; FRAME_SLOTS];
             f[F_SEPC] = entry;
             f[F_SP] = task_stack_top(i); // each task owns a private 2 MiB stack region
             (*TCAPS.get())[i] = caps;
@@ -767,6 +802,9 @@ pub(crate) fn run_tasks(specs: &[(usize, usize, u8)]) {
             (*TSTATE.get())[i] = TaskState::Ready;
         }
         *CURRENT.get() = 0;
+        // First dispatch of the run does not go through `schedule_or_return`,
+        // so it stamps the hart itself.
+        (*FRAMES.get())[0][F_HART] = current_hart();
         set_active_task_mem(0); // expose only task 0's stack region to start
                                 // Switch to the multitasking trap path and arm the preemption timer.
         asm!("csrw stvec, {}", in(reg) utrap as *const () as usize);
@@ -806,7 +844,7 @@ pub(crate) fn run_processes(specs: &[ProcessSpec]) {
                 continue;
             };
             let f = &mut (*FRAMES.get())[i];
-            *f = [0; 32];
+            *f = [0; FRAME_SLOTS];
             f[F_SEPC] = build.entry;
             f[F_SP] = USER_STACK_TOP; // each process has its own stack in its own space
             f[F_A0] = spec.arg0;
@@ -827,6 +865,7 @@ pub(crate) fn run_processes(specs: &[ProcessSpec]) {
             return;
         }
         *CURRENT.get() = first_ready;
+        (*FRAMES.get())[first_ready][F_HART] = current_hart();
         asm!("csrw stvec, {}", in(reg) utrap as *const () as usize);
         sbi_set_timer(rdtime() + QUANTUM);
         asm!("csrw satp, {}", in(reg) (*TSATP.get())[first_ready]); // enter the first process's address space
@@ -872,7 +911,7 @@ pub(crate) fn spawn_process_at(slot: usize, spec: &ProcessSpec, kind: TaskKind) 
             return false;
         };
         let f = &mut (*FRAMES.get())[slot];
-        *f = [0; 32];
+        *f = [0; FRAME_SLOTS];
         f[F_SEPC] = build.entry;
         f[F_SP] = USER_STACK_TOP;
         f[F_A0] = spec.arg0;
