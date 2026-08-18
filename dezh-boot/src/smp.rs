@@ -611,9 +611,12 @@ extern "C" fn ap_trap_handler(frame: *mut usize) -> *const usize {
         f[F_SEPC] += 4;
         match f[F_A7] {
             SYS_PRINT => {
-                // Lock the UART: other harts and the console may print too.
+                // The UART's own lock, not this module's. `SMP_LOCK` is the
+                // demo's mutex-proof counter lock, so it serialised AP prints
+                // against each other and against nothing else - a console task
+                // printing on another hart was never serialised against these.
                 {
-                    let _held = SMP_LOCK.lock();
+                    let _held = crate::dev::uart::tx_lock();
                     let s = unsafe { core::slice::from_raw_parts(f[F_A0] as *const u8, f[F_A1]) };
                     for &b in s {
                         Uart.putc(b);

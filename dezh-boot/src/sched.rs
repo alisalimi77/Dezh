@@ -454,7 +454,12 @@ unsafe fn schedule_or_return() -> *const usize {
     // waiting for itself. Re-deciding after the wait is not a cost, it is the
     // point - the wait exists precisely because the answer was expected to
     // change.
-    let should_idle = {
+    // Only the boot hart may idle for a device, because idling *services* the
+    // PLIC by hand and the PLIC is routed to the boot hart's S-mode context. A
+    // secondary claiming there would take an interrupt meant for another hart
+    // and acknowledge it on its behalf. A secondary with nothing to run has a
+    // better answer anyway: return, and let its caller look for other work.
+    let should_idle = current_hart() == BOOT_HART.load(Ordering::Relaxed) && {
         let _held = SCHED_LOCK.lock();
         pick_next().is_none() && any_irq_waiting()
     };
@@ -507,6 +512,7 @@ unsafe fn schedule_or_return() -> *const usize {
                 }
                 // Switch to the task's address space (own satp for a loaded
                 // process, the shared kernel satp for a baked task).
+                asm!("sfence.vma");
                 asm!("csrw satp, {}", in(reg) (*TSATP.get())[i]);
                 asm!("sfence.vma");
                 Some(frame_ptr(i) as *const usize)
@@ -606,8 +612,9 @@ extern "C" fn utrap_handler(frame_ptr: *mut usize) -> *const usize {
             let stval: usize;
             asm!("csrr {}, stval", out(reg) stval);
             kprintln!(
-                "  [kernel] task {} DENIED: faulted on {stval:#x} (outside its grant) -- killing",
-                cur
+                "  [kernel] task {} DENIED: faulted on {stval:#x} (outside its grant) on hart {} -- killing",
+                cur,
+                current_hart()
             );
             {
                 let _held = SCHED_LOCK.lock();
@@ -700,6 +707,9 @@ extern "C" fn utrap_handler(frame_ptr: *mut usize) -> *const usize {
                 SYS_PRINT => {
                     if caps & TASK_PRINT != 0 {
                         let s = core::slice::from_raw_parts(frame[F_A0] as *const u8, frame[F_A1]);
+                        // One hart's whole write, not one hart's bytes: another
+                        // hart in this same arm would otherwise shred both lines.
+                        let _tx = crate::dev::uart::tx_lock();
                         for &b in s {
                             Uart.putc(b);
                         }
@@ -991,7 +1001,6 @@ pub(crate) fn run_processes(specs: &[ProcessSpec]) {
             }
         }
         let mut launched = 0usize;
-        let mut first_ready = usize::MAX;
         for (i, spec) in specs.iter().take(n).enumerate() {
             // The load stays outside the lock - see `spawn_process_at`. One
             // section per task after it, which is the same unit step 3b chose
@@ -1014,34 +1023,47 @@ pub(crate) fn run_processes(specs: &[ProcessSpec]) {
             (*TSATP.get())[i] = proc_satp(build.root);
             (*TRES.get())[i] = build.resources;
             (*TSTATE.get())[i] = TaskState::Ready;
-            if first_ready == usize::MAX {
-                first_ready = i;
-            }
             launched += 1;
         }
         if launched == 0 {
             return;
         }
-        // The claim and the address space it names, together - the same pairing
-        // `schedule_or_return` makes, and for the same reason: a satp installed
-        // for a task this hart no longer owns is a task running in someone
-        // else's memory. Released before `run_first`, which never returns here.
-        let entry_satp = {
+        // Enter the way the scheduler continues, through `pick_next`, rather
+        // than by naming a slot. Naming one was a second way in that did not
+        // honour the claims other harts hold - and with a secondary allowed to
+        // serve this table it is a live race, not a tidiness point: the
+        // secondary can take the first task in the window between the loop
+        // above completing its row and this hart claiming it, and then two
+        // harts run one register frame.
+        //
+        // With no secondary in the table the answer is the same slot it always
+        // was: this hart holds no claim yet, so the scan starts at 0 and finds
+        // the first `Ready` task.
+        let entry = {
             let _held = SCHED_LOCK.lock();
-            set_current_task(first_ready);
-            (*FRAMES.get())[first_ready][F_HART] = current_hart();
-            (*TSATP.get())[first_ready]
+            match pick_next() {
+                Some(i) => {
+                    set_current_task(i);
+                    (*FRAMES.get())[i][F_HART] = current_hart();
+                    Some((i, (*TSATP.get())[i]))
+                }
+                // Everything launched is already claimed elsewhere. Nothing for
+                // this hart to enter; the harts holding them will finish them.
+                None => None,
+            }
         };
-        asm!("csrw stvec, {}", in(reg) utrap as *const () as usize);
-        sbi_set_timer(rdtime() + QUANTUM);
-        asm!("csrw satp, {}", in(reg) entry_satp); // enter the first process's address space
-        asm!("sfence.vma");
-        run_first(frame_ptr(first_ready) as *const usize);
-        // Back in the kernel address space once every process has exited.
-        asm!("csrw satp, {}", in(reg) kernel_satp());
-        asm!("sfence.vma");
-        asm!("csrw stvec, {}", in(reg) trap_entry as *const () as usize);
-        sbi_set_timer(rdtime() + TIMER_DELTA);
+        if let Some((first, entry_satp)) = entry {
+            asm!("csrw stvec, {}", in(reg) utrap as *const () as usize);
+            sbi_set_timer(rdtime() + QUANTUM);
+            asm!("csrw satp, {}", in(reg) entry_satp); // enter the first process's address space
+            asm!("sfence.vma");
+            run_first(frame_ptr(first) as *const usize);
+            // Back in the kernel address space once every process has exited.
+            asm!("csrw satp, {}", in(reg) kernel_satp());
+            asm!("sfence.vma");
+            asm!("csrw stvec, {}", in(reg) trap_entry as *const () as usize);
+            sbi_set_timer(rdtime() + TIMER_DELTA);
+        }
         let _held = SCHED_LOCK.lock();
         let mut i = 0usize;
         while i < MAX_TASKS {
