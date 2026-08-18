@@ -14,8 +14,15 @@
 # behind on a public package.
 name: GHCR probe
 
+# `workflow_dispatch` only works from the default branch, and `main` is the
+# public review branch - a throwaway probe does not belong on it. So it fires on
+# its own file instead: pushing this workflow to `develop` runs it, and deleting
+# it stops it.
 on:
   workflow_dispatch:
+  push:
+    branches: [develop]
+    paths: ['.github/workflows/ghcr-probe.yml']
 
 permissions:
   contents: read
