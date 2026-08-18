@@ -387,6 +387,26 @@ unsafe fn schedule_or_return() -> *const usize {
         let _held = SCHED_LOCK.lock();
         match pick_next() {
             Some(i) => {
+                // A task without its own address space can only run on the boot
+                // hart, and this is where that gets enforced rather than assumed.
+                //
+                // `set_active_task_mem` flips `PTE_U` in the SHARED kernel page
+                // table so exactly one task's stack is reachable from U-mode.
+                // That is one global view: two harts running two such tasks
+                // would race, the last writer would win, and the loser's task
+                // would fault on its own stack - a corruption, not a crash.
+                // Tasks with a private `satp` carry their own mapping and are
+                // free of it, which is why `smp` builds one per AP slot.
+                if current_hart() != BOOT_HART.load(Ordering::Relaxed)
+                    && (*TSATP.get())[i] == kernel_satp()
+                {
+                    kprintln!(
+                        "
+[dezh-boot] FATAL: hart {} picked task {i}, which shares the kernel address space -- halting",
+                        current_hart()
+                    );
+                    shutdown(FINISH_FAIL);
+                }
                 *CURRENT.get() = i;
                 // Stamp the running hart into the frame before the task resumes,
                 // so `utrap` can restore kernel identity on the way back in.

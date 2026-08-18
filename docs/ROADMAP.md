@@ -657,10 +657,30 @@ tasks and halts on a mismatch, since a wrong answer would send a hart at another
 hart's per-hart state — a corruption rather than a crash. Negative control:
 remove the load and the handler reports hart 0 while the boot hart is 2.
 
-What is left for 3c is the merge itself: `restore_kernel_ctx` still returns to
-one saved context, and `KCTX` and `ktrap_stack` are still single. Making them
-per-hart is now a mechanical indexing change rather than a chicken-and-egg,
-because the index is available in both kernel context and trap context.
+`KCTX` and `ktrap_stack` are per-hart now, indexed by `tp` in all four places
+that touch them. Verified at non-zero indices — runs landing on boot harts 1, 2
+and 3 exercise `KCTX[1..3]` — but **not** in the case the split exists for: a
+control pointing every hart back at hart 0's stack still passes, because nothing
+puts two harts in a trap at once yet.
+
+**What is left, and the constraint that shapes it.** A secondary hart cannot run
+just any task. `set_active_task_mem` flips `PTE_U` in the *shared* kernel page
+table so exactly one task's stack is reachable from U-mode — one global view. Two
+harts running two such tasks would race, the last writer would win, and the
+loser's task would fault on its own stack: corruption, not a crash. Only tasks
+with a private `satp` are free of it, which is why `smp` already builds one per
+AP slot.
+
+That is now enforced in `schedule_or_return` rather than left as a comment: a
+hart other than the boot hart picking a task that shares the kernel address
+space halts the kernel. The guard costs nothing today, because only the boot
+hart dispatches — it is there so the piece that changes that cannot land
+quietly wrong.
+
+So the last piece is: let a secondary pull from the console task table, limited
+to tasks with their own address space, and then make a daemon migrate under
+load. Everything under it is in place — identity in both contexts, per-hart
+context and stack, the table private and locked, syscalls atomic per call.
 
 ##### W14 — Object-capabilities as the live substrate (P4)
 
