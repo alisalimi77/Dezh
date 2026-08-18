@@ -475,9 +475,23 @@ unsafe fn schedule_or_return() -> *const usize {
                 // Stamp the running hart into the frame before the task resumes,
                 // so `utrap` can restore kernel identity on the way back in.
                 (*FRAMES.get())[i][F_HART] = current_hart();
-                set_active_task_mem(i); // give the new task its private stack, hide others
-                                        // Switch to the task's address space (own satp for a loaded
-                                        // process, the shared kernel satp for a baked task).
+                // Only a baked task needs this, and only a baked task can be
+                // harmed by it. Calling it for a loaded process wrote `PTE_U`
+                // onto baked stack region `i` in the L1 that every process root
+                // also points at - exposing 2 MiB of kernel RAM inside that
+                // process's address space for as long as it ran. No run mixes
+                // the two kinds, so that region held nothing and no task's data
+                // was reachable; it was slack, and it is now closed.
+                //
+                // It is also the last piece of global paging state written on
+                // every pick, which is what a second hart in this function would
+                // have raced on: one shared L1, last writer wins, and the loser's
+                // baked task faults on its own stack.
+                if (*TSATP.get())[i] == kernel_satp() {
+                    set_active_task_mem(i); // give the new task its stack, hide others
+                }
+                // Switch to the task's address space (own satp for a loaded
+                // process, the shared kernel satp for a baked task).
                 asm!("csrw satp, {}", in(reg) (*TSATP.get())[i]);
                 asm!("sfence.vma");
                 Some(frame_ptr(i) as *const usize)

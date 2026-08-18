@@ -812,6 +812,25 @@ the lock transitively, and fails if any call inside a guard reaches one. Negativ
 control: a `task_state()` call planted inside the `run_tasks` guard is reported
 by file and line, naming both the callee and the guard it sits in.
 
+**The last shared write is gone too.** `set_active_task_mem` was called on every
+pick, and it writes `PTE_U` into the one L1 that the kernel root *and* every
+process root point at. That is the state a second hart in `schedule_or_return`
+would have raced on — last writer wins, and the losing hart's baked task faults
+on its own stack. It is now called only when the picked task shares the kernel
+address space, which is the only case that needs it.
+
+The same edit closes something that was already true: calling it for a loaded
+process wrote `PTE_U` onto baked stack region `i` inside that process's address
+space, exposing 2 MiB of kernel RAM for as long as the process ran. No run mixes
+baked tasks with processes — `run_tasks` wipes every slot to baked, `run_processes`
+wipes every slot to loaded, and the daemon at slot 0 is a loaded process — so the
+region held no task's data and nothing was leaked. It was slack, and it is closed.
+
+Negative control: invert the condition, so the call is made for processes and
+skipped for baked tasks, and `ipc-typed-demo` never reaches `PING -> 0` — the
+baked tasks fault on stacks that are no longer mapped for U-mode. The call is
+load-bearing exactly where it was kept.
+
 So the last piece is: let a secondary pull from the console task table, limited
 to tasks with their own address space, and then make a daemon migrate under
 load. Everything under it is in place — identity in both contexts, per-hart
