@@ -335,7 +335,30 @@ def build_comparison() -> tuple[str, list[str]]:
 # ==========================================================================
 
 def build_banner() -> tuple[str, list[str]]:
-    W, H = 1280, 400
+    """The README banner: the rule, the effect path, and three measured results.
+
+    It used to draw Apps/Driver/Agents over a kernel over Cairn - the 2026-07
+    framing - which stops one layer short of the only thing here nothing else
+    does. The four stages below are the effect path itself, and the motion
+    follows an effect down it rather than decorating the edges.
+    """
+    W, H = 1280, 470
+
+    # The travelling pulse. Three short falls down the three connectors, in
+    # sequence, then a rest; `prefers-reduced-motion` removes it entirely rather
+    # than slowing it down, because the diagram is complete without it.
+    motion = (
+        ".pulse{fill:var(--accent);animation:fall 6s cubic-bezier(.4,0,.5,1) infinite}"
+        "@keyframes fall{0%{transform:translateY(0);opacity:0}4%{opacity:1}"
+        "22%{transform:translateY(38px);opacity:1}26%{transform:translateY(38px);opacity:0}"
+        "100%{transform:translateY(38px);opacity:0}}"
+        ".p2{animation-delay:.5s}.p3{animation-delay:1s}"
+        ".halo{fill:var(--accent);opacity:0;animation:land 6s cubic-bezier(.4,0,.5,1) infinite}"
+        "@keyframes land{0%,20%{opacity:0;r:3}24%{opacity:.55;r:9}34%{opacity:0;r:12}"
+        "100%{opacity:0;r:3}}"
+        ".h2{animation-delay:.5s}.h3{animation-delay:1s}"
+        "@media(prefers-reduced-motion:reduce){.pulse,.halo{animation:none;opacity:0}}"
+    )
 
     css = (
         f".hero{{fill:var(--fg);font:700 {FS_HERO}px {SANS}}}"
@@ -346,93 +369,106 @@ def build_banner() -> tuple[str, list[str]]:
         f".boxn{{fill:var(--fg-muted);font:400 {FS_MICRO}px {SANS}}}"
         f".card{{fill:var(--surface);stroke:var(--border);stroke-width:{STROKE_EDGE}}}"
         f".wire{{stroke:var(--border-strong);stroke-width:{STROKE_EDGE};fill:none}}"
+        f".stat{{fill:var(--fg-muted);font:400 {FS_SMALL}px {MONO}}}"
+        f".statv{{fill:var(--fg);font:700 {FS_SMALL}px {MONO}}}"
+        f".tag{{fill:var(--fg-subtle);font:600 10px {SANS};letter-spacing:.1em}}"
+        + motion
     )
 
     p = svg_open(
         W,
         H,
-        "Dezh OS -- intent-native, capability-secure operating-system prototype",
-        "Banner. Left: the Dezh OS wordmark with the project's rule -- no program "
-        "starts with ambient authority. Right: a layer diagram. Apps, the "
-        "virtio-block driver and agents run in user mode; every call crosses a "
-        "kernel that grants no ambient authority; effects land in the Cairn commit "
-        "log, which is rollbackable.",
+        "Dezh OS -- intent-native, effect-accountable operating-system prototype",
+        "Banner. Left: the Dezh OS wordmark, the project's rule that no program "
+        "starts with ambient authority, and three measured results from the QEMU "
+        "smoke run. Right: the effect path in four stages -- an agent runs under "
+        "one intent, the kernel grants only the intersection of what was requested "
+        "with the intent ceiling, every effect is recorded on the Sand ledger with "
+        "its actor, intent, derived capability and reversibility, and Sfar rolls a "
+        "whole mission back by retracting the reversible effects and refusing the "
+        "irreversible ones with a reason.",
         css,
     )
 
     p.append(f'<rect width="{W}" height="{H}" fill="var(--canvas)"/>')
 
-    # ---- left: the claim ------------------------------------------------
+    # ---- left: the claim, then the evidence -----------------------------
     x = 80
     p.append(
         f'<path d="M {x} 64 H {W - 80}" stroke="var(--border)" '
         f'stroke-width="{STROKE_HAIR}"/>'
     )
+    eyebrow = "INTENT-NATIVE · EFFECT-ACCOUNTABLE · RISC-V + x86_64"
+    fits(eyebrow, FS_MICRO, 560, "banner eyebrow", ADV_TRACKED)
+    p.append(f'<text x="{x}" y="112" class="eyebrow">{eyebrow}</text>')
+    p.append(f'<text x="{x}" y="196" class="hero">Dezh OS</text>')
     p.append(
-        f'<text x="{x}" y="112" class="eyebrow">CAPABILITY-SECURE OS PROTOTYPE '
-        f"· RISC-V · x86_64</text>"
+        f'<rect x="{x}" y="218" width="72" height="4" rx="2" fill="var(--accent)"/>'
     )
-    p.append(f'<text x="{x}" y="192" class="hero">Dezh OS</text>')
     p.append(
-        f'<rect x="{x}" y="214" width="72" height="4" rx="2" fill="var(--accent)"/>'
-    )
-    p.append(
-        f'<text x="{x}" y="264" class="lead">No program starts with ambient '
+        f'<text x="{x}" y="272" class="lead">No program starts with ambient '
         f"authority.</text>"
     )
-    p.append(
-        f'<text x="{x}" y="300" class="body">Every effect is backed by an explicit '
-        f"capability, grant or lease —</text>"
-    )
-    p.append(
-        f'<text x="{x}" y="324" class="body">and every effect stays attributable, '
-        f"and reversible where it can be.</text>"
-    )
-
-    # ---- right: the layer diagram ---------------------------------------
-    RX, RW = 700, 500
-    bw = (RW - 2 * 16) / 3
-    top_y, mid_y, bot_y = 92, 196, 284
-    bh = 60
-
-    for i, (label, note) in enumerate(
-        [("Apps", "manifest caps"), ("Driver", "virtio-block"), ("Agents", "one intent")]
+    for i, line in enumerate(
+        [
+            "Every effect is backed by an explicit capability — and every effect",
+            "stays attributable, and reversible where it honestly can be.",
+        ]
     ):
-        bx = RX + i * (bw + 16)
-        p.append(
-            f'<rect x="{bx}" y="{top_y}" width="{bw}" height="{bh}" '
-            f'rx="{RADIUS_CELL}" class="card"/>'
-        )
-        p.append(f'<text x="{bx + 14}" y="{top_y + 26}" class="boxt">{label}</text>')
-        p.append(f'<text x="{bx + 14}" y="{top_y + 45}" class="boxn">{note}</text>')
-        # wire down into the kernel
-        cx = bx + bw / 2
-        p.append(f'<path d="M {cx} {top_y + bh} V {mid_y}" class="wire"/>')
-        p.append(f'<circle cx="{cx}" cy="{mid_y}" r="3" fill="var(--accent)"/>')
+        fits(line, FS_LEAD, 560, "banner body")
+        p.append(f'<text x="{x}" y="{312 + i * 24}" class="body">{esc(line)}</text>')
 
     p.append(
-        f'<rect x="{RX}" y="{mid_y}" width="{RW}" height="{bh}" rx="{RADIUS_CELL}" '
-        f'fill="var(--accent-wash)" stroke="var(--accent)" '
-        f'stroke-width="{STROKE_EDGE}"/>'
+        f'<path d="M {x} 364 H 620" stroke="var(--border)" '
+        f'stroke-width="{STROKE_HAIR}"/>'
     )
-    p.append(f'<text x="{RX + 16}" y="{mid_y + 26}" class="boxt">Kernel</text>')
-    p.append(
-        f'<text x="{RX + 16}" y="{mid_y + 45}" class="boxn">typed IPC · '
-        f"capability check on every effect · no ambient authority</text>"
-    )
+    # Numbers, not adjectives, and every one of them from a real smoke run.
+    for i, (value, label) in enumerate(
+        [
+            ("5 / 5", "adversary escapes stopped at named boundaries"),
+            ("4 × 3", "U-mode tasks across harts, 0 faults, 3 live at once"),
+            ("2 undone, 1 refused", "whole-mission rollback, explained not erased"),
+        ]
+    ):
+        y = 390 + i * 24
+        fits(label, FS_SMALL, 380, "banner stat label", 0.62)
+        p.append(f'<text x="{x}" y="{y}" class="statv">{esc(value)}</text>')
+        p.append(f'<text x="248" y="{y}" class="stat">{esc(label)}</text>')
 
-    p.append(f'<path d="M {RX + RW / 2} {mid_y + bh} V {bot_y}" class="wire"/>')
-    p.append(f'<circle cx="{RX + RW / 2}" cy="{bot_y}" r="3" fill="var(--accent)"/>')
-
-    p.append(
-        f'<rect x="{RX}" y="{bot_y}" width="{RW}" height="{bh}" rx="{RADIUS_CELL}" '
-        f'class="card"/>'
-    )
-    p.append(f'<text x="{RX + 16}" y="{bot_y + 26}" class="boxt">Cairn</text>')
-    p.append(
-        f'<text x="{RX + 16}" y="{bot_y + 45}" class="boxn">commit log · '
-        f"per-app namespaces · rollback and compensation</text>"
-    )
+    # ---- right: the effect path -----------------------------------------
+    RX, RW, bh, gap = 700, 500, 62, 38
+    stages = [
+        ("Agent", "runs under one intent — Ahd#4", False),
+        ("Kernel", "no ambient authority · granted = requested ∩ ceiling", True),
+        ("Sand ledger", "every effect: actor → intent → derived cap → reversibility", False),
+        ("Sfar rollback", "retracts the reversible · refuses the irreversible, with a reason", False),
+    ]
+    for i, (title, note, accented) in enumerate(stages):
+        y = 76 + i * (bh + gap)
+        fits(note, FS_MICRO, RW - 32, f"banner stage {i + 1} note")
+        if accented:
+            p.append(
+                f'<rect x="{RX}" y="{y}" width="{RW}" height="{bh}" '
+                f'rx="{RADIUS_CELL}" fill="var(--accent-wash)" '
+                f'stroke="var(--accent)" stroke-width="{STROKE_EDGE}"/>'
+            )
+        else:
+            p.append(
+                f'<rect x="{RX}" y="{y}" width="{RW}" height="{bh}" '
+                f'rx="{RADIUS_CELL}" class="card"/>'
+            )
+        p.append(f'<text x="{RX + 484}" y="{y + 20}" class="tag" text-anchor="end">0{i + 1}</text>')
+        p.append(f'<text x="{RX + 16}" y="{y + 27}" class="boxt">{esc(title)}</text>')
+        p.append(f'<text x="{RX + 16}" y="{y + 46}" class="boxn">{esc(note)}</text>')
+        if i < len(stages) - 1:
+            cx = RX + RW / 2
+            top, bottom = y + bh, y + bh + gap
+            p.append(f'<path d="M {cx} {top} V {bottom}" class="wire"/>')
+            p.append(f'<circle cx="{cx}" cy="{bottom}" r="3" fill="var(--accent)"/>')
+            pc = "" if i == 0 else f" p{i + 1}"
+            hc = "" if i == 0 else f" h{i + 1}"
+            p.append(f'<circle cx="{cx}" cy="{top}" r="3.5" class="pulse{pc}"/>')
+            p.append(f'<circle cx="{cx}" cy="{bottom}" r="3" class="halo{hc}"/>')
 
     p.append(svg_close())
     return "dezh-readme-banner.svg", p
