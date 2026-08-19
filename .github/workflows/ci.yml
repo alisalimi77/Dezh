@@ -151,11 +151,24 @@ jobs:
         working-directory: dezh-boot
         run: cargo build --locked
 
+      # The transcript is kept, because the README's animated demos are drawn
+      # from it and the next step holds them to it.
       - name: Boot RISC-V kernel in QEMU
-        run: >
-          python3 tools/ci/qemu_smoke.py riscv64
-          --kernel dezh-boot/target/riscv64gc-unknown-none-elf/debug/dezh-boot
-          --qemu qemu-system-riscv64
+        run: |
+          set -o pipefail
+          python3 tools/ci/qemu_smoke.py riscv64             --kernel dezh-boot/target/riscv64gc-unknown-none-elf/debug/dezh-boot             --qemu qemu-system-riscv64 | tee smoke-riscv64.txt
+
+      # The README leads with two animated console sessions, and their whole
+      # value is that the lines are real. So they are checked twice: every line
+      # must still appear in the run above, and the committed SVG must be exactly
+      # what the generator produces - which is what stops someone improving the
+      # output by editing the picture.
+      - name: Check the demo animations still match what the kernel printed
+        run: |
+          set -e
+          python3 tools/docs/make_terminal_svg.py --scene redteam             --out docs/assets/demo-redteam.svg --verify smoke-riscv64.txt
+          python3 tools/docs/make_terminal_svg.py --scene sfar             --out docs/assets/demo-sfar.svg --verify smoke-riscv64.txt
+          git diff --exit-code -- docs/assets/demo-redteam.svg docs/assets/demo-sfar.svg
 
       - name: Run SDK package install acceptance
         run: >

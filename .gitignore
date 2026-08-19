@@ -16,3 +16,4 @@ __pycache__/
 
 # editor-local settings (not part of the project)
 .vscode/
+smoke-riscv64.txt

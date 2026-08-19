@@ -1,0 +1,37 @@
+cff-version: 1.2.0
+title: "Dezh OS"
+message: >-
+  If you refer to Dezh in academic work, please cite it using this metadata.
+  Dezh is a research prototype, not production software; the honest scope of
+  every claim is recorded in docs/STATUS.md and the threat model.
+type: software
+authors:
+  - family-names: Salimi
+    given-names: Ali
+    email: ali.salimi77@gmail.com
+repository-code: "https://github.com/alisalimi77/Dezh"
+url: "https://github.com/alisalimi77/Dezh"
+abstract: >-
+  Dezh is a bare-metal, intent-native and effect-accountable operating-system
+  prototype written in Rust for RISC-V and x86_64. No program, app, service,
+  package, driver or recovery path starts with ambient authority: every effect
+  must be backed by an explicit capability, and the authority a task receives is
+  the intersection of what it requested with the ceiling of the intent that
+  authorized it. Every effect is recorded on an on-disk ledger with its actor,
+  intent, derived capability and reversibility, and a whole agent mission can be
+  rolled back - with the effects that genuinely cannot be undone refused by name
+  rather than silently skipped.
+keywords:
+  - operating system
+  - capability-based security
+  - object capabilities
+  - information flow control
+  - effect accountability
+  - reversibility
+  - agent containment
+  - microkernel
+  - RISC-V
+  - Rust
+license: Apache-2.0
+version: "0.5-review"
+date-released: "2026-08-18"

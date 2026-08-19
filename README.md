@@ -9,6 +9,8 @@
   <a href="dezh-boot/"><img alt="RISC-V" src="https://img.shields.io/badge/arch-RISC--V-283272.svg"></a>
   <a href="dezh-boot-x86/"><img alt="x86_64" src="https://img.shields.io/badge/arch-x86__64-546e7a.svg"></a>
   <a href="Cargo.toml"><img alt="Rust" src="https://img.shields.io/badge/made%20with-Rust-b7410e.svg"></a>
+  <a href="https://alisalimi77.github.io/Dezh/"><img alt="Docs" src="https://img.shields.io/badge/docs-the%20book-0969da.svg"></a>
+  <a href="https://github.com/alisalimi77/Dezh/discussions"><img alt="Discussions" src="https://img.shields.io/badge/discussions-critique%20welcome-8250df.svg"></a>
 </p>
 
 <p align="center">
@@ -19,6 +21,7 @@
 <p align="center">
   <a href="#quick-review-path">Quick Review</a> ·
   <a href="#flagship-demos">Flagship Demos</a> ·
+  <a href="https://alisalimi77.github.io/Dezh/">Docs</a> ·
   <a href="docs/ARCHITECTURE.md">Architecture</a> ·
   <a href="docs/SECURITY_MODEL.md#enforcement-model">Security Model</a> ·
   <a href="docs/RELEASING.md#release-process">Release Process</a>
@@ -45,6 +48,23 @@ skipped.
 
 Dezh is not production-ready. It is an executable OS prototype prepared for
 architectural and security-model review.
+
+## See It Refuse Something
+
+A malicious agent tries five ways out. Each one stops at a boundary with a
+**name**, and the console is still alive at the end. This is a real session —
+the lines are checked against the CI transcript by the script that draws them.
+
+<p align="center">
+  <img src="docs/assets/demo-redteam.svg" alt="Animated replay of a Dezh console session: five adversary escapes, each stopped at a named boundary" width="880">
+</p>
+
+And when an agent's whole mission is rolled back, the effect that genuinely
+cannot be undone is refused out loud rather than silently skipped:
+
+<p align="center">
+  <img src="docs/assets/demo-sfar.svg" alt="Animated replay of a Dezh console session: a mission rollback that retracts two reversible effects and refuses one irreversible send" width="880">
+</p>
 
 ## At A Glance
 
