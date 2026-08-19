@@ -134,39 +134,56 @@ docker build -f Dockerfile.review -t dezh-review-env .
 The image is not the OS. It is the build-and-review environment: Rust targets,
 Python, and QEMU.
 
-**There is no published image, and the release no longer tries to make one.**
-The history is worth keeping, because the obvious guess about it was wrong twice.
+The release publishes it to GHCR, and it is public:
 
-The release workflow used to end by pushing `dezh-review-env` to GHCR. It got as
-far as running on two releases and was refused on both:
+```sh
+docker pull ghcr.io/alisalimi77/dezh-review-env:latest
+```
 
-| Release | Step that failed | Why |
+**The record of getting this wrong is kept below, because this page told
+reviewers the opposite for two releases and it was checkable in one command.**
+
+The publish was refused on v0.3-review and v0.4-review with
+`denied: permission_denied: write_package`, and after the second refusal the
+steps were removed rather than left turning the release red — a gate that breaks
+for reasons unrelated to the change under review is one people learn to ignore,
+and this one would have taught that to the reviewers the project is asking for
+critique from.
+
+What was written here at the same time was wrong, and wrong in the direction
+that flatters nobody: *"There is no published image"*, *"no tag of the image has
+ever existed"*, *"`docker pull` was never going to work"*. All three were false
+when written. `v0.1-review`, `v0.2-review` and `latest` were in the registry the
+whole time and anonymously pullable; a `docker pull` would have said so. README
+repeated the claim.
+
+The timeline nobody looked at:
+
+| Release | Date | GHCR |
 | --- | --- | --- |
-| v0.2-review | `Create GitHub release` | A different fault entirely; fixed afterwards by making the release job re-runnable. The GHCR steps never ran. |
-| v0.3-review | `Publish review environment image` | `denied: permission_denied: write_package` |
-| v0.4-review | `Publish review environment image` | Same denial. |
+| v0.1-review | 2026-07-04 | published |
+| v0.2-review | 2026-07-07 | published |
+| *(repository made public)* | 2026-08-03 | — |
+| v0.3-review | 2026-08-03 | `denied: permission_denied: write_package` |
+| v0.4-review | 2026-08-15 | same denial |
+| v0.5-review | 2026-08-18 | publish step had been removed |
 
-So no tag of the image has ever existed, and `docker pull` was never going to
-work — while this page listed the image under what the workflow publishes, and
-README offered it as a way in.
+The first denial and the day the repository went public are the same day. What
+broke was the package's own **Actions access** — web-UI state, not anything in
+this repository — which is why `packages: write` in the workflow and a `write`
+default workflow-token permission both checked out and neither helped.
 
-Two explanations were written down before the right one. The first was a
-*visibility* problem ("the package may need to be changed to public"), which
-cannot be it: the push is refused before there is a package to have visibility.
-The second was that all three releases failed the same way, which is also wrong —
-v0.2 never reached the registry at all.
+Two other explanations were written down before that one. The first was a
+*visibility* problem, which was never it. The second was that the push was
+refused because the package did not exist yet — also wrong, and it is the
+assumption that made the false claim above feel safe: nobody pulls an image they
+have concluded cannot exist.
 
-What has actually been ruled out: the workflow requested `packages: write`, and
-the repository's default workflow-token permission is already `write`. The
-remaining suspect is the package's own Actions access, which is changed in
-GitHub's web UI and not in this repository.
-
-The steps were removed rather than left failing. A release run that goes red for
-a reason unrelated to the release is a signal people learn to ignore, which is
-the same reasoning `rust-toolchain.toml` records for pinning the toolchain — and
-here it would have been teaching that lesson to the reviewers this project is
-asking for critique from. `.github/workflows/release.yml` carries the removed
-steps in a comment, so restoring them is a paste and not a redesign.
+Granting this repository write on the package fixed it. It was confirmed before
+restoring anything, by a probe using `GITHUB_TOKEN` — the credential that was
+refused, since a personal access token would have succeeded and proved nothing —
+opening a blob upload session against the package: `HTTP 202`, and no tag left
+behind.
 
 ### Dezh `.dzp` Packages
 

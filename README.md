@@ -388,8 +388,14 @@ python tools/ci/sdk_test.py \
   --qemu qemu-system-riscv64
 ```
 
-Release tags build the public review artifacts attached to each release. There
-is no published container image — the review environment is built locally with
+Release tags build the public review artifacts attached to each release, and
+publish the review environment image:
+
+```sh
+docker pull ghcr.io/alisalimi77/dezh-review-env:latest
+```
+
+It can also be built locally with
 `docker build -f Dockerfile.review -t dezh-review-env .`. See
 [release process](docs/RELEASING.md#release-process) and
 [the review environment](docs/RELEASING.md#the-review-environment).
