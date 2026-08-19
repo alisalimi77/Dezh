@@ -1,0 +1,36 @@
+# The docs site. `docs/` already reads as a book - fifteen documents that assume
+# an order - and until now the only way to read it was as raw files on GitHub,
+# one at a time, with no search and no way to tell where you were.
+#
+# mdBook builds it in place: `src` points at `docs/` rather than copying, so
+# there is exactly one copy of every document and a link that works on GitHub
+# works on the site.
+[book]
+title = "Dezh OS"
+authors = ["Ali Salimi"]
+description = "Intent-native, effect-accountable operating-system prototype. No program starts with ambient authority."
+language = "en"
+src = "docs"
+
+[build]
+build-dir = "dist/book"
+# The transcripts are generated, and several documents deliberately link to files
+# outside `docs/` (the kernel sources, the workflows). Neither should fail a
+# build whose job is to publish the prose.
+create-missing = false
+
+[output.html]
+default-theme = "light"
+preferred-dark-theme = "ayu"
+git-repository-url = "https://github.com/alisalimi77/Dezh"
+edit-url-template = "https://github.com/alisalimi77/Dezh/edit/main/{path}"
+site-url = "/Dezh/"
+additional-css = []
+
+[output.html.fold]
+enable = true
+level = 1
+
+[output.html.search]
+enable = true
+limit-results = 20

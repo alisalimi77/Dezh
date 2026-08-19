@@ -26,6 +26,7 @@ mod bench;
 mod cairn;
 mod console;
 
+use smp::MAX_HARTS;
 use dev::plic::{plic_handle, SCAUSE_EXTERNAL};
 use utasks::*;
 
@@ -185,6 +186,15 @@ _start:
     j       0b
 1:
     la      sp, __stack_top
+    # Per-hart identity, the same one `_hart_start` gives a secondary. SBI hands
+    # the boot hart's id in a0 and `kmain` still reads it from there, so this
+    # only adds the register - it changes nothing about how the id is obtained.
+    #
+    # It matters because the boot hart was the one hart that did NOT have it,
+    # and every route to running a console task on a second hart needs to ask
+    # "which hart am I?" from kernel context. `tp` is unusable inside a U-mode
+    # trap (the task owns it), but in kernel context it is exactly this.
+    mv      tp, a0
     call    kmain
 2:
     wfi
@@ -237,6 +247,9 @@ trap_entry:
     .globl enter_user
 enter_user:
     la      t0, KCTX
+    li      t1, {KCTX_STRIDE}
+    mul     t1, tp, t1
+    add     t0, t0, t1
     sd      ra,   0(t0)
     sd      sp,   8(t0)
     sd      s0,  16(t0)
@@ -260,7 +273,12 @@ enter_user:
     # --- restore_kernel_ctx(): longjmp back to the enter_user call site.
     .globl restore_kernel_ctx
 restore_kernel_ctx:
+    # `tp` is the kernel's again by here: `utrap` reloads it from the frame's
+    # hart stamp on the way in, so this is reachable from inside the trap.
     la      t0, KCTX
+    li      t1, {KCTX_STRIDE}
+    mul     t1, tp, t1
+    add     t0, t0, t1
     ld      ra,   0(t0)
     ld      sp,   8(t0)
     ld      s0,  16(t0)
@@ -276,7 +294,8 @@ restore_kernel_ctx:
     ld      s10, 96(t0)
     ld      s11,104(t0)
     ret
-"#
+"#,
+    KCTX_STRIDE = const KCTX_WORDS * 8,
 );
 
 unsafe extern "C" {
@@ -298,7 +317,7 @@ global_asm!(
     .align 16
     .globl ktrap_stack
 ktrap_stack:
-    .space 8192
+    .space {KTRAP_TOTAL}
     .globl ktrap_top
 ktrap_top:
 
@@ -342,7 +361,19 @@ utrap:
     csrr    x5, sepc
     sd      x5, 248(sp)
     mv      a0, sp                  # a0 = &frame
-    la      sp, ktrap_top
+    # The task owned tp and it has just been saved. Put the KERNEL's identity
+    # back before any Rust runs: the dispatching hart stamped its own id into
+    # slot 32 of this frame, which is the only place the trap path can learn it.
+    # Without this, `current_hart()` inside the handler reads whatever the task
+    # happened to leave in tp.
+    ld      tp, 256(sp)
+    # This hart's own trap stack, not the one stack there used to be. Two harts
+    # in a trap at once would otherwise scribble over each other's kernel frames.
+    la      t0, ktrap_stack
+    li      t1, {KTRAP_STK}
+    addi    t2, tp, 1
+    mul     t2, t2, t1
+    add     sp, t0, t2
     call    utrap_handler           # returns &resume_frame in a0
     j       frame_restore
 
@@ -350,6 +381,9 @@ utrap:
     .globl run_first
 run_first:                          # a0 = &first_frame
     la      t0, KCTX
+    li      t1, {KCTX_STRIDE}
+    mul     t1, tp, t1
+    add     t0, t0, t1
     sd      ra, 0(t0)
     sd      sp, 8(t0)
     sd      s0, 16(t0)
@@ -403,7 +437,10 @@ frame_restore:                      # a0 = &frame to resume
     ld      x10, 72(t0)             # a0
     ld      x5, 32(t0)              # t0 itself, last
     sret
-"#
+"#,
+    KTRAP_STK = const KTRAP_STACK_BYTES,
+    KTRAP_TOTAL = const KTRAP_STACK_BYTES * MAX_HARTS,
+    KCTX_STRIDE = const KCTX_WORDS * 8,
 );
 
 unsafe extern "C" {
@@ -411,9 +448,25 @@ unsafe extern "C" {
     fn run_first(frame: *const usize);
 }
 
-/// Saved kernel context for the U-mode round trip (ra, sp, s0..s11).
+/// Words in one hart's saved kernel context: ra, sp, s0..s11.
+const KCTX_WORDS: usize = 14;
+/// Bytes of kernel trap stack per hart.
+const KTRAP_STACK_BYTES: usize = 8192;
+
+/// Saved kernel context for the U-mode round trip, one per hart.
+///
+/// It was a single array while one hart ran tasks. A second hart entering
+/// `utrap` would have overwritten the boot hart's saved `ra`/`sp`, so the
+/// longjmp back to the console would have returned the wrong hart to the wrong
+/// place - and `ktrap_stack` had the same shape, one stack for however many
+/// harts happened to be in a trap.
+///
+/// Both are indexed by `tp` now. That is only possible because the trap path
+/// restores the kernel's `tp` from the frame's hart stamp before any of this
+/// runs; without that, `restore_kernel_ctx` - which is called from inside the
+/// handler - would have indexed with a value the task chose.
 #[no_mangle]
-static mut KCTX: [usize; 14] = [0; 14];
+static mut KCTX: [[usize; KCTX_WORDS]; MAX_HARTS] = [[0; KCTX_WORDS]; MAX_HARTS];
 
 /// Layout MUST match the push order in `trap_entry`. Most fields exist only to
 /// reserve their slot in the saved frame; only `a0`/`a7` are read here.

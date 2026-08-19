@@ -39,6 +39,11 @@ ROOT = Path(__file__).resolve().parents[2]
 # be worth more than a section inside an existing one.
 MAX_TOP_LEVEL_DOCS = 16
 
+# Not prose, and so not counted against the cap: `SUMMARY.md` is mdBook's table
+# of contents. Counting it would spend a slot meant for a document on a build
+# file, and the next real document would be refused for the wrong reason.
+NOT_DOCUMENTS = {"SUMMARY.md"}
+
 SKIP_DIRS = {".git", "target", "dist", "node_modules", "__pycache__"}
 
 LINK = re.compile(r"\[[^\]]*\]\(([^)]+)\)")
@@ -139,7 +144,7 @@ def check_links() -> list[str]:
 
 
 def check_sprawl() -> list[str]:
-    top = sorted(p.name for p in (ROOT / "docs").glob("*.md"))
+    top = sorted(p.name for p in (ROOT / "docs").glob("*.md") if p.name not in NOT_DOCUMENTS)
     if len(top) <= MAX_TOP_LEVEL_DOCS:
         return []
     return [
@@ -191,7 +196,7 @@ def main() -> int:
         for p in problems:
             print(f"  {p}")
         return 1
-    top = len(list((ROOT / "docs").glob("*.md")))
+    top = len([p for p in (ROOT / "docs").glob("*.md") if p.name not in NOT_DOCUMENTS])
     generated = len(list((ROOT / "docs" / "transcripts").glob("*.md")))
     print(
         f"documentation check passed: {len(markdown_files())} files, "

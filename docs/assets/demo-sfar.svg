@@ -1,0 +1,41 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="671" height="477" viewBox="0 0 671 477" role="img" aria-labelledby="ti de">
+<title id="ti">Dezh: rolling back a mission, refusing what cannot be undone</title>
+<desc id="de">An animated replay of a real Dezh console session. sfar-demo [sfar-demo] 1/4 mission Ahd#4: one irreversible external send             + two reversible writes [sfar-demo] 2/4 rollback FORECAST before touching anything   [sfar] plan: reversible=2 compensatable=0 irreversible=1 unknown=0          confidence=partial (some effects cannot be undone) [sfar-demo] 3/4 roll the mission back     [sfar] REFUSED at ns=agent slot=10: irreversible effect already            happened in the outside world; cannot be undone   [sfar] mission Ahd#4 rolled back: reversible effects retracted=2          compensations performed=0 refused_irreversible=1 refused_compensatable=0 [sfar-demo] PASS: whole-mission rollback undid the reversible writes             and refused the irreversible send with an explanation [sfar-demo] Dezh does not over-promise rollback: unknown/irreversible             effects are never silently &#x27;undone&#x27;</desc>
+<style>
+:root{--term:#f6f8fa;--chrome:#eaeef2;--edge:#d1d9e0;--fg:#1f2328;--dim:#59636e;--prompt:#0969da;--ok:#1a7f37;--warn:#9a6700;--bad:#cf222e;--pass:#1a7f37;--c1:#ff5f57;--c2:#febc2e;--c3:#28c840}
+@media(prefers-color-scheme:dark){:root{--term:#0d1117;--chrome:#161b22;--edge:#30363d;--fg:#e6edf3;--dim:#8b949e;--prompt:#79c0ff;--ok:#3fb950;--warn:#e3b341;--bad:#ff7b72;--pass:#3fb950}}
+.mono{font:400 13px ui-monospace,SFMono-Regular,'SF Mono',Menlo,Consolas,'Liberation Mono',monospace}
+.t-fg{fill:var(--fg)}.t-dim{fill:var(--dim)}.t-ok{fill:var(--ok)}.t-warn{fill:var(--warn)}.t-bad{fill:var(--bad)}.t-prompt{fill:var(--prompt)}
+.t-pass{fill:var(--pass);font-weight:700}
+.cap{font:400 11px ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;fill:var(--dim)}
+.d0{fill:var(--c1)}.d1{fill:var(--c2)}.d2{fill:var(--c3)}
+.line{opacity:0;animation:appear 14.36s linear infinite}
+@keyframes appear{0%{opacity:0}1%{opacity:1}96%{opacity:1}100%{opacity:0}}
+.cursor{fill:var(--prompt);opacity:0;animation:cur 14.36s linear infinite}
+@keyframes cur{0%{opacity:0}1%{opacity:1}45%{opacity:1}50%{opacity:0}55%{opacity:1}96%{opacity:1}100%{opacity:0}}
+@media(prefers-reduced-motion:reduce){.line,.cursor{animation:none;opacity:1}}
+</style>
+<rect x="0.5" y="0.5" width="670" height="476" rx="10" fill="var(--term)" stroke="var(--edge)"/>
+<path d="M0.5 38.5 H670" stroke="var(--edge)"/>
+<rect x="0.5" y="0.5" width="670" height="38" rx="10" fill="var(--chrome)"/>
+<rect x="0.5" y="28" width="670" height="10" fill="var(--chrome)"/>
+<path d="M0.5 38.5 H670" stroke="var(--edge)"/>
+<circle cx="20" cy="19" r="5.5" class="dot d0"/><circle cx="38" cy="19" r="5.5" class="dot d1"/><circle cx="56" cy="19" r="5.5" class="dot d2"/>
+<text x="645" y="23" class="cap" text-anchor="end">console session, verbatim from tools/ci/qemu_smoke.py</text>
+<text x="26" y="79" class="mono t-prompt line" style="animation-delay:0.0s">dezh&gt; <tspan class="t-fg">sfar-demo</tspan></text>
+<text x="26" y="100" class="mono t-dim line" style="animation-delay:0.62s">[sfar-demo] 1/4 mission Ahd#4: one irreversible external send</text>
+<text x="26" y="121" class="mono t-dim line" style="animation-delay:1.24s">            + two reversible writes</text>
+<text x="26" y="163" class="mono t-dim line" style="animation-delay:2.48s">[sfar-demo] 2/4 rollback FORECAST before touching anything</text>
+<text x="26" y="184" class="mono t-warn line" style="animation-delay:3.1s">  [sfar] plan: reversible=2 compensatable=0 irreversible=1 unknown=0</text>
+<text x="26" y="205" class="mono t-warn line" style="animation-delay:3.72s">         confidence=partial (some effects cannot be undone)</text>
+<text x="26" y="247" class="mono t-dim line" style="animation-delay:4.96s">[sfar-demo] 3/4 roll the mission back</text>
+<text x="26" y="268" class="mono t-bad line" style="animation-delay:5.58s">    [sfar] REFUSED at ns=agent slot=10: irreversible effect already</text>
+<text x="26" y="289" class="mono t-bad line" style="animation-delay:6.2s">           happened in the outside world; cannot be undone</text>
+<text x="26" y="310" class="mono t-ok line" style="animation-delay:6.82s">  [sfar] mission Ahd#4 rolled back: reversible effects retracted=2</text>
+<text x="26" y="331" class="mono t-ok line" style="animation-delay:7.44s">         compensations performed=0 refused_irreversible=1 refused_compensatable=0</text>
+<text x="26" y="373" class="mono t-pass line" style="animation-delay:8.68s">[sfar-demo] PASS: whole-mission rollback undid the reversible writes</text>
+<text x="26" y="394" class="mono t-pass line" style="animation-delay:9.3s">            and refused the irreversible send with an explanation</text>
+<text x="26" y="415" class="mono t-dim line" style="animation-delay:9.92s">[sfar-demo] Dezh does not over-promise rollback: unknown/irreversible</text>
+<text x="26" y="436" class="mono t-dim line" style="animation-delay:10.54s">            effects are never silently &#x27;undone&#x27;</text>
+<rect x="26" y="447" width="8" height="15" class="cursor" style="animation-delay:11.16s"/>
+</svg>

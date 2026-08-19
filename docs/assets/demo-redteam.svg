@@ -1,0 +1,47 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="709" height="582" viewBox="0 0 709 582" role="img" aria-labelledby="ti de">
+<title id="ti">Dezh: five escapes, five named boundaries</title>
+<desc id="de">An animated replay of a real Dezh console session. redteam [redteam] adversary loose: a malicious agent attempts five escapes;           each must hit a NAMED boundary and the system must survive [redteam] escape 1/5: read another app&#x27;s private Cairn namespace [redteam] escape 1 STOPPED at boundary: storage-service capability check           (kernel-attested caps) -- console survived [redteam] escape 2/5: write a device MMIO register directly [redteam] escape 2 STOPPED at boundary: hardware memory boundary           (Sv39 paging, MMIO mapped U=0) -- console survived [redteam] escape 3/5: forge a capability   [kernel] DENIED print: task 0 holds no PRINT capability [redteam] escape 3 STOPPED at boundary: kernel syscall capability check           (no ambient authority to forge/amplify) -- console survived [redteam] escape 4/5: act beyond the granted intent [redteam] beyond-intent dropped by the derivation ceiling: cairn-read cairn-write [redteam] escape 4 STOPPED at boundary: intent-derivation ceiling (derived cap &lt;= Ahd) [redteam] escape 5/5: monopolize the CPU (two busy tasks that never yield) [redteam] escape 5 STOPPED at boundary: preemptive scheduler           (timer interrupt forces a context switch) -- console survived [redteam] PASS: all five escapes were stopped at named boundaries;           the adversary was contained and the console is still alive</desc>
+<style>
+:root{--term:#f6f8fa;--chrome:#eaeef2;--edge:#d1d9e0;--fg:#1f2328;--dim:#59636e;--prompt:#0969da;--ok:#1a7f37;--warn:#9a6700;--bad:#cf222e;--pass:#1a7f37;--c1:#ff5f57;--c2:#febc2e;--c3:#28c840}
+@media(prefers-color-scheme:dark){:root{--term:#0d1117;--chrome:#161b22;--edge:#30363d;--fg:#e6edf3;--dim:#8b949e;--prompt:#79c0ff;--ok:#3fb950;--warn:#e3b341;--bad:#ff7b72;--pass:#3fb950}}
+.mono{font:400 13px ui-monospace,SFMono-Regular,'SF Mono',Menlo,Consolas,'Liberation Mono',monospace}
+.t-fg{fill:var(--fg)}.t-dim{fill:var(--dim)}.t-ok{fill:var(--ok)}.t-warn{fill:var(--warn)}.t-bad{fill:var(--bad)}.t-prompt{fill:var(--prompt)}
+.t-pass{fill:var(--pass);font-weight:700}
+.cap{font:400 11px ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;fill:var(--dim)}
+.d0{fill:var(--c1)}.d1{fill:var(--c2)}.d2{fill:var(--c3)}
+.line{opacity:0;animation:appear 17.46s linear infinite}
+@keyframes appear{0%{opacity:0}1%{opacity:1}96%{opacity:1}100%{opacity:0}}
+.cursor{fill:var(--prompt);opacity:0;animation:cur 17.46s linear infinite}
+@keyframes cur{0%{opacity:0}1%{opacity:1}45%{opacity:1}50%{opacity:0}55%{opacity:1}96%{opacity:1}100%{opacity:0}}
+@media(prefers-reduced-motion:reduce){.line,.cursor{animation:none;opacity:1}}
+</style>
+<rect x="0.5" y="0.5" width="708" height="581" rx="10" fill="var(--term)" stroke="var(--edge)"/>
+<path d="M0.5 38.5 H708" stroke="var(--edge)"/>
+<rect x="0.5" y="0.5" width="708" height="38" rx="10" fill="var(--chrome)"/>
+<rect x="0.5" y="28" width="708" height="10" fill="var(--chrome)"/>
+<path d="M0.5 38.5 H708" stroke="var(--edge)"/>
+<circle cx="20" cy="19" r="5.5" class="dot d0"/><circle cx="38" cy="19" r="5.5" class="dot d1"/><circle cx="56" cy="19" r="5.5" class="dot d2"/>
+<text x="683" y="23" class="cap" text-anchor="end">console session, verbatim from tools/ci/qemu_smoke.py</text>
+<text x="26" y="79" class="mono t-prompt line" style="animation-delay:0.0s">dezh&gt; <tspan class="t-fg">redteam</tspan></text>
+<text x="26" y="100" class="mono t-dim line" style="animation-delay:0.62s">[redteam] adversary loose: a malicious agent attempts five escapes;</text>
+<text x="26" y="121" class="mono t-dim line" style="animation-delay:1.24s">          each must hit a NAMED boundary and the system must survive</text>
+<text x="26" y="163" class="mono t-dim line" style="animation-delay:2.48s">[redteam] escape 1/5: read another app&#x27;s private Cairn namespace</text>
+<text x="26" y="184" class="mono t-ok line" style="animation-delay:3.1s">[redteam] escape 1 STOPPED at boundary: storage-service capability check</text>
+<text x="26" y="205" class="mono t-dim line" style="animation-delay:3.72s">          (kernel-attested caps) -- console survived</text>
+<text x="26" y="226" class="mono t-dim line" style="animation-delay:4.34s">[redteam] escape 2/5: write a device MMIO register directly</text>
+<text x="26" y="247" class="mono t-ok line" style="animation-delay:4.96s">[redteam] escape 2 STOPPED at boundary: hardware memory boundary</text>
+<text x="26" y="268" class="mono t-dim line" style="animation-delay:5.58s">          (Sv39 paging, MMIO mapped U=0) -- console survived</text>
+<text x="26" y="289" class="mono t-dim line" style="animation-delay:6.2s">[redteam] escape 3/5: forge a capability</text>
+<text x="26" y="310" class="mono t-bad line" style="animation-delay:6.82s">  [kernel] DENIED print: task 0 holds no PRINT capability</text>
+<text x="26" y="331" class="mono t-ok line" style="animation-delay:7.44s">[redteam] escape 3 STOPPED at boundary: kernel syscall capability check</text>
+<text x="26" y="352" class="mono t-dim line" style="animation-delay:8.06s">          (no ambient authority to forge/amplify) -- console survived</text>
+<text x="26" y="373" class="mono t-dim line" style="animation-delay:8.68s">[redteam] escape 4/5: act beyond the granted intent</text>
+<text x="26" y="394" class="mono t-warn line" style="animation-delay:9.3s">[redteam] beyond-intent dropped by the derivation ceiling: cairn-read cairn-write</text>
+<text x="26" y="415" class="mono t-ok line" style="animation-delay:9.92s">[redteam] escape 4 STOPPED at boundary: intent-derivation ceiling (derived cap &lt;= Ahd)</text>
+<text x="26" y="436" class="mono t-dim line" style="animation-delay:10.54s">[redteam] escape 5/5: monopolize the CPU (two busy tasks that never yield)</text>
+<text x="26" y="457" class="mono t-ok line" style="animation-delay:11.16s">[redteam] escape 5 STOPPED at boundary: preemptive scheduler</text>
+<text x="26" y="478" class="mono t-dim line" style="animation-delay:11.78s">          (timer interrupt forces a context switch) -- console survived</text>
+<text x="26" y="520" class="mono t-pass line" style="animation-delay:13.02s">[redteam] PASS: all five escapes were stopped at named boundaries;</text>
+<text x="26" y="541" class="mono t-pass line" style="animation-delay:13.64s">          the adversary was contained and the console is still alive</text>
+<rect x="26" y="552" width="8" height="15" class="cursor" style="animation-delay:14.26s"/>
+</svg>

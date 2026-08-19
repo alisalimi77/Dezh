@@ -400,6 +400,80 @@ smoke-test edit is a step that got something wrong.
 
 ---
 
+#### Cross-ISA status, and where the two kernels actually diverge
+
+W5 and W16 are the only workstreams with x86 in the title, and reading the rest
+of this file it would be easy to conclude that everything else is ISA-neutral.
+It is not. Every workstream from W8 onward has landed on RISC-V alone, and this
+section exists so that fact is stated once, in a table, rather than inferred
+from silence.
+
+**What is genuinely shared.** `dezh-core` — 2,228 lines of `mcap`, `dzp`, `ir`,
+`sig`, `ocap`, `difc`, `b64`. Both kernels execute the same pinned `.dzp` bytes
+(`demo_sum_bytes_are_pinned`, in CI), and both derive authority through
+`mcap`'s `requested ∩ ceiling`. That is the whole of the shared surface: x86
+reaches `dezh_core::{mcap, dzp, ir}` and nothing else, and it does not depend on
+`dezh-kernel` at all — even though `dezh-kernel` already models
+`BootTarget::QemuVirtioX86_64`.
+
+| Capability | RISC-V | x86_64 | Why the gap |
+|---|---|---|---|
+| Boots, long/S-mode, own page tables | yes | yes | — |
+| Runs the pinned `.dzp` / Dezh-IR package | yes | yes | the F3 claim; the point of `dezh-core` |
+| Authority as `requested ∩ ceiling` | yes | yes | shared `mcap` |
+| Timer, returnable IRQ path | yes | yes | W9 / W16.1 |
+| Preemptive scheduler, ring 3, per-task address space | yes | yes | W9 / W16.2–3 |
+| Bootable ISO (GRUB, VirtualBox) | no | yes | the one place x86 is ahead; RISC-V boots via `-kernel` |
+| Console (941 lines vs 56) | yes | no | never built on x86 |
+| Device IRQs (PLIC), blocking, `irq_wait` | yes | no | W16 remainder |
+| Disk, virtio-block driver | yes | no | W16 remainder; blocks Cairn and the ledger |
+| IPC (typed, timeouts, mailboxes) | yes | no | no counterpart in x86's task model |
+| Cairn (commit log, namespaces, rollback) | yes | no | needs a disk first |
+| Effect ledger (Sand), mission (Sfar) | yes | no | needs Cairn first |
+| DIFC taint, Marz egress, ocap tables | yes | no | never built on x86 |
+| Pol (foreign Linux binary) | yes | no | RISC-V-specific by nature (Linux syscall ABI per ISA) |
+| Package install lifecycle (`pkg.rs`, 3,059 lines) | yes | no | needs a disk first |
+| SMP: several harts, one scheduler (W13) | in progress | no | no x86 AP bring-up at all |
+
+**The divergence that actually costs money is not the missing features — it is
+the data model underneath them.** These two schedulers were derived twice,
+independently, and they do not agree on what a task *is*:
+
+| | `dezh-boot/src/sched.rs` | `dezh-boot-x86/src/sched.rs` |
+|---|---|---|
+| size | 1,203 lines | 437 lines |
+| task state | `Unused / Ready / Blocked / Done` | `Idle / Runnable` |
+| the running task | `[usize; MAX_HARTS]`, `NO_TASK` doubling as the run claim | one `AtomicUsize` |
+| saved frame | 33 slots (32 registers + the dispatching hart) | 22 qwords |
+| blocking, IPC, resource accounting | yes | none |
+
+So a step like W13 cannot be *ported* to x86; it would have to be re-derived,
+because there is no `Blocked` state to teach about harts and no claim to make
+per-hart. Every deep change from here is paid for twice unless something
+changes.
+
+**What we are choosing, deliberately.** Not parity. D021's claim is that the ISA
+is an implementation backend, and what that claim needs is for x86 to have a
+*runtime* — which W16.1–W16.4 delivered — not for x86 to have Cairn. So x86 is
+a second-class backend until W16 completes, and this file says so rather than
+implying otherwise by omission.
+
+**The rule going forward.** Every workstream below carries a `*Cross-ISA:*` line
+saying which of three it is: **shared** (lands once, in `dezh-core` or
+`dezh-kernel`), **RISC-V first** (will need re-deriving on x86, and W16 owns
+that debt), or **RISC-V only by design** (nothing to port). An entry with no
+such line is a gap in this ledger, not an ISA-neutral workstream.
+
+**The extraction question, and its answer for now.** The obvious fix to the
+double-payment is to lift the arch-independent half of the scheduler — task
+table, state machine, IPC, the run claim, the capability checks — into a crate
+behind a trait, leaving frame layout, trap assembly, `satp`/`cr3`, PLIC/APIC and
+SBI/ACPI on the arch side. That is the right end state and it is **not** the
+right next move: W13 is mid-surgery on exactly the interface such a trait would
+have to name, and an abstraction extracted from code that is still changing
+freezes the wrong shape. Order: finish W13, then extract, then make both kernels
+prove the same contract. Doing it in the other order costs the extraction twice.
+
 #### The order after W10, and why
 
 W11–W17 are ranked by one criterion: **how much other work each unblocks per
@@ -487,6 +561,8 @@ not a move.
   what remains is the loader's own job. `abi` and the console dispatcher got
   globs, because enumerating a shared vocabulary measures nothing.
 
+*Cross-ISA:* RISC-V only by design — x86 is 2,598 lines across 21 files and was
+never the monolith this splits.
 *Cost:* large but mechanical; one module per commit. Actual: 23 commits.
 *Blocked on:* nothing.
 *Acceptance:* no file in `dezh-boot/src/` over 1,200 lines; `main.rs` is the
@@ -556,6 +632,8 @@ Two things the work turned up:
 Still modeled, and still labelled as such: `email.send` and `prod.deploy`. What
 changed is that the ledger now holds at least one effect that is not.
 
+*Cross-ISA:* RISC-V first. The connector is arch-neutral but the ledger it
+records into is Cairn, which x86 has no disk for.
 *Cost:* medium. Effect schema, one connector, compensation registration, and the
 `marz` request/response path (which already receives).
 *Blocked on:* nothing — UDP egress and the ICMP receive path exist.
@@ -573,6 +651,9 @@ under the lock. Merging them into one lock-protected structure, so every task in
 the system (daemons included) is dispatchable on any hart, is what moves Dezh
 from "several convincing demos" to "an operating system".
 
+*Cross-ISA:* RISC-V first, and the most expensive entry in that column — x86 has
+no AP bring-up and no `Blocked` state, so this is a re-derivation, not a port.
+See the extraction note above.
 *Cost:* large, and genuinely hard — this is real concurrency work.
 *Blocked on:* W11 in practice; the tables must be modules with owners first.
 *Acceptance:* a daemon migrates between harts under load; a task on a secondary
@@ -590,10 +671,238 @@ This buys the second half of the acceptance and none of the first. The tick
 resumes the interrupted task; it does not choose another, because choosing means
 reading a task table that is still `Global<T>` on the boot hart with no lock.
 
-**Step 2 — next: the console's tables under one lock.** `sched.rs` says it
-itself: "every `Global` here needs a concurrency argument stronger than *only one
-hart reaches it*". That is the real body of W13, and W14 waits on it because the
-task table is the thing object-capabilities have to be threaded through.
+**Step 2 — done: the tables are private, and the reachable surface is locked.**
+`sync::TicketLock` is one lock for the kernel and masks the acquiring hart's
+interrupts, because `plic_handle` writes scheduler state from interrupt context.
+The task table is private to `sched`; the five accessors other modules call and
+`wake_irq_waiters` take the lock.
+
+**Step 3a — done: the scheduler entry is lock-safe.** `schedule_or_return` and
+`idle_until_device` take the lock in scopes rather than across the sleep, since
+the sleep services the PLIC and reaches the same lock.
+
+**Step 3b — next, and it needs a decision before it needs code.** What is left
+is `utrap_handler`: 280 lines, ~35 table accesses, 29 return points, 8 of which
+call `schedule_or_return` — which now takes the lock itself, so a guard held
+across the handler would deadlock on them.
+
+Two shapes, and the obvious one is wrong:
+
+- *One lock across the syscall dispatch.* Mechanical to write, and it puts
+  `SYS_PRINT` — a byte-at-a-time UART write — inside a critical section with
+  this hart's interrupts masked. A long line would hold off every device
+  interrupt on the hart for the length of the print. Correct and unusable.
+- *Fine-grained, one critical section per table touch.* Keeps the sections
+  short, but a syscall stops being atomic against another hart: read `TSTATE`,
+  release, act on a value that has changed. Which of those reads actually need
+  to be atomic together is the design question, and it is answerable — the
+  syscall paths that matter are IPC send/receive and the capability checks.
+
+**Step 3b — done.** The atomic unit is one syscall's table work. `SYS_SEND`,
+`SYS_RECV`/`_TIMEOUT` and `SYS_IRQ_WAIT` each take one section; the rest are
+short reads. `SYS_PRINT` turned out to touch no table at all, so the argument
+against a coarse lock was aimed at the wrong line. Guard placement is checked by
+a script that walks brace depth, because the failure mode is a hang.
+
+**Step 3c — the trap-path merge, and the crux.** Two routes, both real:
+
+- *The boot hart becomes per-hart.* `ktrap_stack` and `KCTX` are singletons and
+  a second hart entering `utrap` clobbers both. Fixing it means widening the
+  saved frame past its 32 slots (index 31 is `sepc`, all are used) so each
+  dispatch can record the running hart's stack and context, then changing
+  `utrap`, `run_first`, `enter_user` and `restore_kernel_ctx`. High risk: it
+  edits the proven trap path.
+- *The AP adopts the real handler.* `smp` already has per-hart trap state
+  (`ApCtx` via `sscratch`) and its own kernel context, but `ap_trap_handler` is
+  74 lines serving two syscalls against `utrap_handler`'s 348. Lower risk,
+  because the boot path is untouched.
+
+Both meet the same wall: `restore_kernel_ctx` is wired to one saved context, so
+no hart but the boot hart can return from `schedule_or_return`. Choosing the
+right context per hart starts with a hart being able to ask which it is — and
+until now the boot hart was the one that could not, because `_start` never set
+`tp`. It does now (`smp::current_hart`), verified by a boot-time check against
+the id SBI passes, with a negative control: remove the register write and `tp`
+reads as garbage and the kernel refuses to continue.
+
+`current_hart` is kernel-context only — **was**. Inside a U-mode trap the task
+owns every register including `tp`, so the handler read whatever the task left
+behind. That is now closed from the other side: the saved frame carries a slot
+33 (`F_HART`) that the dispatching hart stamps with its own id, and `utrap`
+loads it into `tp` on the way in. Both first-dispatch paths stamp it too, and
+because it is written every time a task is chosen, it survives migration by
+construction.
+
+Every trap now checks the restored identity against the hart that dispatches
+tasks and halts on a mismatch, since a wrong answer would send a hart at another
+hart's per-hart state — a corruption rather than a crash. Negative control:
+remove the load and the handler reports hart 0 while the boot hart is 2.
+
+`KCTX` and `ktrap_stack` are per-hart now, indexed by `tp` in all four places
+that touch them. Verified at non-zero indices — runs landing on boot harts 1, 2
+and 3 exercise `KCTX[1..3]` — but **not** in the case the split exists for: a
+control pointing every hart back at hart 0's stack still passes, because nothing
+puts two harts in a trap at once yet.
+
+**What is left, and the constraint that shapes it.** A secondary hart cannot run
+just any task. `set_active_task_mem` flips `PTE_U` in the *shared* kernel page
+table so exactly one task's stack is reachable from U-mode — one global view. Two
+harts running two such tasks would race, the last writer would win, and the
+loser's task would fault on its own stack: corruption, not a crash. Only tasks
+with a private `satp` are free of it, which is why `smp` already builds one per
+AP slot.
+
+That is now enforced in `schedule_or_return` rather than left as a comment: a
+hart other than the boot hart picking a task that shares the kernel address
+space halts the kernel. The guard costs nothing today, because only the boot
+hart dispatches — it is there so the piece that changes that cannot land
+quietly wrong.
+
+`CURRENT` is per-hart now too, and it was the last singleton in the dispatch
+path. It carries two jobs — whose syscall `utrap_handler` is serving, and where
+`pick_next` resumes its round-robin — and one cell for both across two harts
+would charge a syscall to the wrong task's capability set. That is an authority
+bug, not a lost tick, which is why it moves before anything starts dispatching.
+Reads and writes go through one accessor pair so the hart index cannot be
+dropped at one of the seven sites.
+
+Indexing by `tp` is now bounded, once, where the boot hart's identity is already
+checked: three tables (`KCTX`, `ktrap_stack`, `CURRENT`) are indexed by it with
+no check at the use site, and two of those indexings are in assembly where a
+check is not available. Negative control: with `MAX_HARTS` temporarily at 2, the
+runs QEMU lands on harts 2 and 3 print the FATAL and halt while harts 0 and 1
+boot normally — the guard fires exactly at the boundary and nowhere else.
+
+And two harts can no longer pick the same task. `Ready` means runnable, not
+idle — a task stays `Ready` for the whole time it runs — so `pick_next` would
+have handed the same slot to both, and the second hart would have resumed from a
+register frame the first was still saving into. The claim is the `CURRENT` entry
+itself rather than a `Running` state or a second table: one cell cannot disagree
+with itself, and a `Running` state would have to be got right by all eleven
+places that write `TaskState`, none of which are about this. `NO_TASK` is the
+other half — a hart on the console holds no claim, and the claim is dropped
+inside the same locked section that reads claims, on the way out through
+`restore_kernel_ctx`, because that path never returns.
+
+Negative control, and this one does exercise the case the mechanism exists for:
+a phantom claim on task 1, planted at run entry as if a second hart held it,
+makes task 1 undispatchable — `ipc-typed-demo` reaches the console, prints its
+banner and then never prints `PING -> 0`, because the server task can no longer
+be chosen. Every leg before it is unaffected. Remove the claim and the same run
+is green.
+
+The run entries are closed too, which was the gap named here a commit ago. They
+built the table and took the first claim unlocked, and step 2's note said why:
+the ticket lock is not reentrant and `reclaim_task_resources` is called both
+from outside this module and from within it. So it splits — a public wrapper
+that locks, a `_locked` inner for callers that already hold it — and the four
+entries now hold the lock across their table setup and their first claim, and
+drop it before `run_first`, which never returns to them.
+
+`build_address_space` stays outside on purpose. It loads an ELF and walks page
+tables, and this lock masks the hart's interrupts, so a section that long would
+hold off every device interrupt for the length of a program load. It touches the
+frame allocator, not the table, so the unit stays one task's row at a time — the
+same unit step 3b chose for syscalls.
+
+Getting guard placement wrong hangs the hart instead of crashing it, and CI would
+show only a QEMU timeout. So it is checked rather than reviewed:
+`tools/ci/check_sched_lock.py` walks brace depth, computes which functions take
+the lock transitively, and fails if any call inside a guard reaches one. Negative
+control: a `task_state()` call planted inside the `run_tasks` guard is reported
+by file and line, naming both the callee and the guard it sits in.
+
+**The last shared write is gone too.** `set_active_task_mem` was called on every
+pick, and it writes `PTE_U` into the one L1 that the kernel root *and* every
+process root point at. That is the state a second hart in `schedule_or_return`
+would have raced on — last writer wins, and the losing hart's baked task faults
+on its own stack. It is now called only when the picked task shares the kernel
+address space, which is the only case that needs it.
+
+The same edit closes something that was already true: calling it for a loaded
+process wrote `PTE_U` onto baked stack region `i` inside that process's address
+space, exposing 2 MiB of kernel RAM for as long as the process ran. No run mixes
+baked tasks with processes — `run_tasks` wipes every slot to baked, `run_processes`
+wipes every slot to loaded, and the daemon at slot 0 is a loaded process — so the
+region held no task's data and nothing was leaked. It was slack, and it is closed.
+
+Negative control: invert the condition, so the call is made for processes and
+skipped for baked tasks, and `ipc-typed-demo` never reaches `PING -> 0` — the
+baked tasks fault on stacks that are no longer mapped for U-mode. The call is
+load-bearing exactly where it was kept.
+
+**The trap guard now names the invariant, not the boot hart.** It read
+`current_hart() != BOOT_HART`, which was true only because the boot hart was the
+only dispatcher — a secondary joining would have had to weaken the check that
+exists to catch exactly that hart being wrong. The property that has to hold is
+that the trapping hart *holds a claim*: a trap from U-mode means it is running a
+task, so `CURRENT[hart]` must name that task. A restored `tp` pointing at another
+hart fails that for free, since that hart's claim is either `NO_TASK` or some
+other task, and the check keeps holding once a second hart dispatches — with no
+list of permitted harts to maintain beside the claim it would duplicate. `tp` is
+bounded against `MAX_HARTS` first, because it is the subscript.
+
+Negative control, the same one that proved the stamp: delete the `ld tp, 256(sp)`
+that restores kernel identity in `utrap`, and the runs QEMU lands on harts 1 and 3
+print `FATAL: trap on hart 0 which holds no task` and halt, while runs on hart 0
+pass — there the wrong answer and the right one coincide. The guard fires exactly
+when the identity is actually wrong.
+
+**The address-space rule became a filter instead of a halt.** It had been a
+guard in `schedule_or_return` that stops the kernel when a secondary picks a task
+sharing the kernel address space — right for a rule nothing was meant to reach,
+useless for a secondary that has to keep going. `pick_next` now skips such a task
+and looks at the next one, and the halt stays as a backstop for a task arriving at
+dispatch by some path that did not come through the filter. Negative control:
+invert the predicate so the boot hart is the one refused a baked task, and
+`ipc-typed-demo` never reaches `PING -> 0` — the filter is what chooses, not
+decoration next to the choice.
+
+**The merge was attempted, and it has a defect. Here is exactly what is known.**
+A `secondary_serve` was written — pick under the lock honouring claims and the
+address-space filter, install `stvec = utrap`, SUM, the task's satp and this
+hart's own timer, `run_first`, and undo all of it on the way back — plus a
+`CONSOLE_SMP_ON` switch (off by default, because W13's acceptance requires every
+existing demo to be unchanged) and an `smp-console` demo. It is **not** in the
+tree, because it hangs. What was measured before backing it out:
+
+- With no prior demo, it works, five runs out of five: three loaded processes,
+  three different harts, clean exit, `MERGED-OK`. A console task really does run
+  on a secondary through `utrap` — all 348 lines of it — not the AP path's
+  74-line handler.
+- After any demo that has run a **U-mode task on a secondary via the AP path**
+  (`smp-task`, `smp-sched`, sometimes `smp-preempt`), the next `smp-console`
+  wedges. `smp-demo`, which runs no U-mode task, does not poison it.
+- The hang is in the boot hart's `run_processes`, between installing the trap
+  vector and returning — the first task never prints.
+- Replacing the U-mode entry with a pick-and-release, so a secondary claims a
+  task and never `sret`s, is clean in every case. **The defect is in a secondary
+  entering U-mode on the console trap path, not in the pick.**
+- Not the secondary's timer: the hang survives with `sie.STIE` left clear.
+- Not the UART lock: the hang survives with the macros not taking it.
+- Not `run_processes` itself: after `smp-task`, the existing `procs` command —
+  the same entry with the switch off — is fine.
+
+The leading suspicion, unproven, is per-hart CSR state the AP path leaves behind
+and `secondary_serve` does not reset — `sscratch` is the one both trap paths use
+for different structures, and `frame_restore` only sets it at the very end of
+`run_first`. A trap taken in the window between `csrw stvec, utrap` and that
+store would enter `utrap` with the AP path's `sscratch` and save a console task's
+registers into an `ApCtx`. Proving or refuting that is the next step's first job.
+
+So the last piece is: let a secondary pull from the console task table, limited
+to tasks with their own address space, and then make a daemon migrate under
+load. Everything under it is in place — identity in both contexts, per-hart
+context, stack and current task, the table private and locked on every path
+including entry, the run claim enforced, syscalls atomic per call — and the
+entry itself is written and known to work from a cold console. What is left is
+one defect with a bounded search space, not a design question.
+
+Migration needs one more thing the demo made obvious: a hart keeps its claim
+across preemption, and with as many harts as runnable tasks it re-picks its own.
+A task moves hart only after it **blocks** and is woken, so the daemon — which
+blocks on `sys_irq_wait` — is the case that shows it, and the loop tasks never
+will.
 
 ##### W14 — Object-capabilities as the live substrate (P4)
 
@@ -611,6 +920,8 @@ Linux-style ambient authority — but it is a bit per class, not an unforgeable
 per-object reference in the seL4/CHERI sense. The ocap tables today are a gate
 layered above it, not the thing authority is made of.
 
+*Cross-ISA:* shared, and this is the strongest candidate for it — `ocap` already
+lives in `dezh-core`, and x86 already derives authority through `mcap`.
 *Cost:* large; it touches every syscall check and the IPC attestation path.
 *Blocked on:* W11 and W13 (the task table is the thing being changed).
 *Acceptance:* a task holds object handles, not a bitmask; delegation is a graph
@@ -626,6 +937,9 @@ GC** (currently untested), the ticket lock's arithmetic, run-queue push/pop unde
 simulated interleaving, and the Marz checksum — whose odd-length-body bug was
 found by hand in W9 and is exactly what a three-line test catches.
 
+*Cross-ISA:* both, separately, and x86 is the cheaper half — it is on edition
+2021 like the rest of the workspace, but it carries zero `static mut` against
+RISC-V's 16, so only the attribute conversions apply to it.
 *Cost:* medium, entirely mechanical.
 *Blocked on:* W11.
 *Acceptance:* every `Cargo.toml` on edition 2024 with no new `#[allow]`;
@@ -649,6 +963,8 @@ is derived but its effects are not yet accounted for.
 
 This is also **the only practical route to an IOMMU** — see W17.
 
+*Cross-ISA:* this workstream **is** the cross-ISA debt. Everything in the
+"RISC-V first" column above is owed here.
 *Cost:* very large. Timer and returnable IRQ path (done, W16.1), scheduler
 (done, W16.2), paging and ring-3 containment (done, W16.3), intent-derived
 capability checks (done, W16.4), then a virtio-pci disk driver, then Cairn and
@@ -683,6 +999,8 @@ threat model, and the comparison matrix — which a serious reviewer accepts. Wh
 they do not accept is a claim that was never true. W12 closes a gap of that
 second kind, which is why it ranks above this one despite being less famous.
 
+*Cross-ISA:* x86 first, uniquely — VT-d is mature on QEMU 8.2 while the RISC-V
+IOMMU needs QEMU 9.1 and a virtio-pci migration.
 *Cost:* large, after a larger prerequisite.
 *Blocked on:* W16 (x86) or a virtio-pci migration plus QEMU 9.1+ (RISC-V).
 *Acceptance:* the block daemon's DMA is confined by hardware, and a deliberately

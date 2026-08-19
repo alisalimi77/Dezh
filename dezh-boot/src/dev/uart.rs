@@ -185,6 +185,30 @@ fn rx_pop() -> Option<u8> {
     Some(byte)
 }
 
+/// Serialises whole writes to the transmit register.
+///
+/// One hart at a time was a property of the machine until a secondary started
+/// running console tasks: two harts in `SYS_PRINT`, or one printing while the
+/// other reports a task exit, hand `putc` interleaved bytes and the line arrives
+/// shredded - `[[pprroocc]]` rather than two `[proc]`s. That is what the merged
+/// scheduler's first run actually printed.
+///
+/// Held around a whole `SYS_PRINT`, and deliberately **not** by `kprint!` /
+/// `kprintln!`. A macro that took it would evaluate its own arguments inside the
+/// critical section - `kprintln!("{}", task_state(i))` would then hold this lock
+/// while asking for the scheduler's, which is the reverse of the order every
+/// other path uses and is a deadlock the moment two harts print. Kernel lines
+/// can still interleave with each other; a task's write no longer shreds them
+/// mid-token, which is the failure a second hart in `SYS_PRINT` actually
+/// produced: `[[pprroocc]]` rather than two `[proc]`s.
+static TX_LOCK: TicketLock = TicketLock::new();
+
+/// Hold the transmit lock for one whole write. Used by `kprint!`/`kprintln!` and
+/// by the `SYS_PRINT` paths, which are the only writers.
+pub(crate) fn tx_lock() -> crate::sync::Guard<'static> {
+    TX_LOCK.lock()
+}
+
 impl Write for Uart {
     fn write_str(&mut self, s: &str) -> fmt::Result {
         for b in s.bytes() {

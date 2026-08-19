@@ -44,7 +44,7 @@ use crate::ocap::ns::{ns_grant, ns_revoke};
 use crate::proc::loader::{ProcessSpec, TaskKind};
 use crate::sched::*;
 use crate::service::*;
-use crate::smp::{smp_bringup, smp_report_boot};
+use crate::smp::{current_hart, smp_bringup, smp_report_boot, MAX_HARTS};
 use crate::vblk::*;
 use crate::*;
 
@@ -845,6 +845,26 @@ pub extern "C" fn kmain(hart_id: usize, _fdt: usize) -> ! {
     Uart.init();
     // SBI hands the boot hart's id in a0. Capture it before anything else needs a0.
     let boot_hart = hart_id;
+    // `_start` also put it in `tp`. Checked rather than assumed, because every
+    // later use of `current_hart()` trusts this and a silent mismatch would send
+    // a hart to another hart's per-hart state.
+    if current_hart() != boot_hart {
+        kprintln!(
+            "[dezh-boot] FATAL: tp says hart {} but SBI says {boot_hart}",
+            current_hart()
+        );
+        shutdown(FINISH_FAIL);
+    }
+    // And the id has to be one the per-hart tables can hold. `KCTX`,
+    // `ktrap_stack` and the scheduler's `CURRENT` are all indexed by `tp` with
+    // no check at the use site - two of them from assembly, where a check is not
+    // available. Bounding it once, here, is what makes those indexings sound; a
+    // machine booted on hart 8 or above would otherwise scribble past the end of
+    // three tables before printing anything.
+    if boot_hart >= MAX_HARTS {
+        kprintln!("[dezh-boot] FATAL: boot hart {boot_hart} is beyond MAX_HARTS={MAX_HARTS}");
+        shutdown(FINISH_FAIL);
+    }
 
     let memory = vec![
         MemoryRegion::new(0x8000_0000, 0x20_0000, MemoryKind::Reserved),
