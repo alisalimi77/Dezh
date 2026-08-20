@@ -13,5 +13,6 @@ pub mod difc;
 pub mod dzp;
 pub mod ir;
 pub mod mcap;
+pub mod net;
 pub mod ocap;
 pub mod sig;

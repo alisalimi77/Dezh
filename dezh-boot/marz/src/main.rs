@@ -245,27 +245,24 @@ fn nic_init(dma_pa: usize) -> bool {
     true
 }
 
-/// The standard internet checksum. An IPv4 header is always even-length, but ICMP
-/// covers header + payload and can be odd — in which case the final byte is padded
-/// with a zero, not dropped. (Dropping it produced a checksum the host rejected
-/// silently: the echo went out and no reply ever came back.)
+/// The standard internet checksum over `len` bytes of the DMA window at `off`.
+///
+/// The arithmetic is `dezh_core::net::internet_checksum`, and it is there rather
+/// than here for a reason this function is the example of. It used to do the
+/// summing itself, reading through `DMA_VA` — so it had no input a test could
+/// supply, and the only way to exercise it was to boot a machine and send a
+/// packet. An IPv4 header is always even-length, but ICMP covers header +
+/// payload and can be odd; the final byte must be padded with a zero, not
+/// dropped, and dropping it produced a checksum the host rejected *silently* —
+/// the echo went out and no reply ever came back.
+///
+/// What stays here is the reading. Handing `dezh-core` an accessor keeps the
+/// volatile loads at the address that needs them; building a `&[u8]` over a DMA
+/// window instead would be the aliasing `Global<T>` exists to prevent.
 fn ip_checksum(off: usize, len: usize) -> u16 {
-    let mut sum: u32 = 0;
-    let mut i = 0usize;
-    while i + 1 < len {
-        let hi = unsafe { core::ptr::read_volatile((DMA_VA + off + i) as *const u8) } as u32;
-        let lo = unsafe { core::ptr::read_volatile((DMA_VA + off + i + 1) as *const u8) } as u32;
-        sum += (hi << 8) | lo;
-        i += 2;
-    }
-    if i < len {
-        let hi = unsafe { core::ptr::read_volatile((DMA_VA + off + i) as *const u8) } as u32;
-        sum += hi << 8; // odd tail byte, zero-padded on the right
-    }
-    while sum >> 16 != 0 {
-        sum = (sum & 0xffff) + (sum >> 16);
-    }
-    !(sum as u16)
+    dezh_core::net::internet_checksum(len, |i| unsafe {
+        core::ptr::read_volatile((DMA_VA + off + i) as *const u8)
+    })
 }
 
 /// Build one Ethernet + IPv4 + UDP frame carrying `payload` into the DMA window.
