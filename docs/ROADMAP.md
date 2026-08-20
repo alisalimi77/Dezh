@@ -929,6 +929,43 @@ edge; `redteam`'s forgery escape still fails, now against a generation check.
 
 ##### W15 — Edition 2024 and the rest of the kernel's tests (P5)
 
+**The edition half is done.** Every live `Cargo.toml` is on edition 2024 — the
+two shared crates, both kernels, the nine embedded user programs, the three wasm
+guests and the eight superseded spikes — with no `#[allow]` added to get there.
+The only 2021 left in the tree is inside `dist/`, a published release snapshot
+rather than source.
+
+It was done by reading rather than by `cargo fix --edition`, for the reason
+recorded at W11: the last time that tool was pointed at this repository it
+proposed renaming a constant to `_sys_exit`, which would have made a match-arm
+bug permanent and silent.
+
+Three things it turned up that were not bookkeeping:
+
+- **`unsafe_op_in_unsafe_fn`, denied an edition early**, named all 99 sites while
+  both kernels still built either way. Wrapping the bodies produced exactly one
+  `unnecessary unsafe` in return, and that one is a finding: `BumpHeap::alloc`
+  performs no unsafe operation at all — `UnsafeCell::get` is safe and so is every
+  atomic under it. The `unsafe` on that signature is `GlobalAlloc`'s contract
+  with its caller, not the body's with the hardware.
+- **`gen` is a reserved word now**, and both `dezh_core::ocap` and the
+  `virtio-blk` daemon used it. The rename is where the only real hazard was: a
+  whole-word pass also rewrote `sys_print(b" gen=")` into `b" generation="` — a
+  string literal, in output CI asserts against. Caught and reverted. Renaming an
+  identifier and renaming everything spelled like one are different operations.
+- **A workspace edition bump can break a crate the workspace does not list.** The
+  `guests/` wasm crates are built by `dezh-host`'s build script, so their errors
+  arrived as that script exiting 101 rather than as a compile failure anyone
+  could read.
+
+What remains under W15 is the second half: the tests. The measured list is
+unchanged — Cairn commit-record encode/decode, the **255-slot boundary with no
+GC**, the ticket lock's arithmetic, run-queue push/pop under simulated
+interleaving, and the Marz checksum. All five need `dezh-boot` to be host-
+testable first, which it is not: it is a `no_std`, `no_main` binary crate for one
+target. That is the next piece of work here, and it is a structural change rather
+than a mechanical one.
+
 The measured remainder: 81 attribute conversions and 65 `unsafe fn` bodies to
 wrap. Both are mechanical and both are much easier to review once W11 has split
 the trap and boot paths into their own files. The second half of W10.4 rides
