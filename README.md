@@ -66,6 +66,16 @@ cannot be undone is refused out loud rather than silently skipped:
   <img src="docs/assets/demo-sfar.svg" alt="Animated replay of a Dezh console session: a mission rollback that retracts two reversible effects and refuses one irreversible send" width="880">
 </p>
 
+And the flagship: a coding agent left loose overnight under **one** intent, and
+a morning where its whole night is accounted for — the reversible writes
+retracted, the external action compensated by a recorded compensating action,
+the irreversible deploy refused with a reason, and its attempt to act beyond
+the intent denied at a boundary that can be named.
+
+<p align="center">
+  <img src="docs/assets/demo-overnight.svg" alt="Animated replay of a Dezh console session: a coding agent's overnight mission forecast, then rolled back with the irreversible deploy refused and the compensatable action compensated" width="880">
+</p>
+
 ## At A Glance
 
 | Surface | Current evidence |

@@ -1,0 +1,49 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="762" height="687" viewBox="0 0 762 687" role="img" aria-labelledby="ti de">
+<title id="ti">Dezh: a coding agent loose overnight, and the morning it is accounted for</title>
+<desc id="de">An animated replay of a real Dezh console session. overnight [overnight] you leave a coding agent loose overnight under ONE intent;             in the morning you account for and undo its night [overnight] 1/6 opened the agent&#x27;s intent Ahd#8 (a writer ceiling) and turned it loose [overnight] 2/6 the agent&#x27;s night: an irreversible deploy + two reversible writes             (ns=lab), one compensatable external action (ns=calc) [overnight] 3/6 morning: FORECAST the rollback before touching anything   [sfar] plan: reversible=2 compensatable=1 irreversible=1 unknown=0          confidence=partial (some effects cannot be undone)   [tbar] 4 effect(s) attributed to intent Ahd#8 [overnight] 4/6 undo the night honestly     [sfar] REFUSED at ns=lab slot=19: irreversible effect already happened            in the outside world; cannot be undone     [sfar] COMPENSATED at ns=calc slot=22: ran compensating action            &quot;revoke api-key:tmp/42&quot; recorded as effect slot=23   [sfar] mission Ahd#8 rolled back: reversible effects retracted=2          compensations performed=1 refused_irreversible=1 [overnight] 5/6 the agent also TRIED to escape its intent (a write beyond the ceiling) [redteam] beyond-intent dropped by the derivation ceiling: cairn-read cairn-write [why-denied] boundary: intent-derivation ceiling (derived cap &lt;= Ahd), enforced in the kernel [overnight] PASS: the whole night is accounted for - reversibles undone,             the compensatable action compensated, the irreversible deploy             refused with a reason, and the escape contained</desc>
+<style>
+:root{--term:#f6f8fa;--chrome:#eaeef2;--edge:#d1d9e0;--fg:#1f2328;--dim:#59636e;--prompt:#0969da;--ok:#1a7f37;--warn:#9a6700;--bad:#cf222e;--pass:#1a7f37;--c1:#ff5f57;--c2:#febc2e;--c3:#28c840}
+@media(prefers-color-scheme:dark){:root{--term:#0d1117;--chrome:#161b22;--edge:#30363d;--fg:#e6edf3;--dim:#8b949e;--prompt:#79c0ff;--ok:#3fb950;--warn:#e3b341;--bad:#ff7b72;--pass:#3fb950}}
+.mono{font:400 13px ui-monospace,SFMono-Regular,'SF Mono',Menlo,Consolas,'Liberation Mono',monospace}
+.t-fg{fill:var(--fg)}.t-dim{fill:var(--dim)}.t-ok{fill:var(--ok)}.t-warn{fill:var(--warn)}.t-bad{fill:var(--bad)}.t-prompt{fill:var(--prompt)}
+.t-pass{fill:var(--pass);font-weight:700}
+.cap{font:400 11px ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;fill:var(--dim)}
+.d0{fill:var(--c1)}.d1{fill:var(--c2)}.d2{fill:var(--c3)}
+.line{opacity:0;animation:appear 20.56s linear infinite}
+@keyframes appear{0%{opacity:0}1%{opacity:1}96%{opacity:1}100%{opacity:0}}
+.cursor{fill:var(--prompt);opacity:0;animation:cur 20.56s linear infinite}
+@keyframes cur{0%{opacity:0}1%{opacity:1}45%{opacity:1}50%{opacity:0}55%{opacity:1}96%{opacity:1}100%{opacity:0}}
+@media(prefers-reduced-motion:reduce){.line,.cursor{animation:none;opacity:1}}
+</style>
+<rect x="0.5" y="0.5" width="761" height="686" rx="10" fill="var(--term)" stroke="var(--edge)"/>
+<path d="M0.5 38.5 H761" stroke="var(--edge)"/>
+<rect x="0.5" y="0.5" width="761" height="38" rx="10" fill="var(--chrome)"/>
+<rect x="0.5" y="28" width="761" height="10" fill="var(--chrome)"/>
+<path d="M0.5 38.5 H761" stroke="var(--edge)"/>
+<circle cx="20" cy="19" r="5.5" class="dot d0"/><circle cx="38" cy="19" r="5.5" class="dot d1"/><circle cx="56" cy="19" r="5.5" class="dot d2"/>
+<text x="736" y="23" class="cap" text-anchor="end">console session, verbatim from docs/transcripts/overnight.md</text>
+<text x="26" y="79" class="mono t-prompt line" style="animation-delay:0.0s">dezh&gt; <tspan class="t-fg">overnight</tspan></text>
+<text x="26" y="100" class="mono t-dim line" style="animation-delay:0.62s">[overnight] you leave a coding agent loose overnight under ONE intent;</text>
+<text x="26" y="121" class="mono t-dim line" style="animation-delay:1.24s">            in the morning you account for and undo its night</text>
+<text x="26" y="163" class="mono t-dim line" style="animation-delay:2.48s">[overnight] 1/6 opened the agent&#x27;s intent Ahd#8 (a writer ceiling) and turned it loose</text>
+<text x="26" y="184" class="mono t-dim line" style="animation-delay:3.1s">[overnight] 2/6 the agent&#x27;s night: an irreversible deploy + two reversible writes</text>
+<text x="26" y="205" class="mono t-dim line" style="animation-delay:3.72s">            (ns=lab), one compensatable external action (ns=calc)</text>
+<text x="26" y="247" class="mono t-dim line" style="animation-delay:4.96s">[overnight] 3/6 morning: FORECAST the rollback before touching anything</text>
+<text x="26" y="268" class="mono t-warn line" style="animation-delay:5.58s">  [sfar] plan: reversible=2 compensatable=1 irreversible=1 unknown=0</text>
+<text x="26" y="289" class="mono t-warn line" style="animation-delay:6.2s">         confidence=partial (some effects cannot be undone)</text>
+<text x="26" y="310" class="mono t-dim line" style="animation-delay:6.82s">  [tbar] 4 effect(s) attributed to intent Ahd#8</text>
+<text x="26" y="352" class="mono t-dim line" style="animation-delay:8.06s">[overnight] 4/6 undo the night honestly</text>
+<text x="26" y="373" class="mono t-bad line" style="animation-delay:8.68s">    [sfar] REFUSED at ns=lab slot=19: irreversible effect already happened</text>
+<text x="26" y="394" class="mono t-bad line" style="animation-delay:9.3s">           in the outside world; cannot be undone</text>
+<text x="26" y="415" class="mono t-ok line" style="animation-delay:9.92s">    [sfar] COMPENSATED at ns=calc slot=22: ran compensating action</text>
+<text x="26" y="436" class="mono t-ok line" style="animation-delay:10.54s">           &quot;revoke api-key:tmp/42&quot; recorded as effect slot=23</text>
+<text x="26" y="457" class="mono t-ok line" style="animation-delay:11.16s">  [sfar] mission Ahd#8 rolled back: reversible effects retracted=2</text>
+<text x="26" y="478" class="mono t-ok line" style="animation-delay:11.78s">         compensations performed=1 refused_irreversible=1</text>
+<text x="26" y="520" class="mono t-dim line" style="animation-delay:13.02s">[overnight] 5/6 the agent also TRIED to escape its intent (a write beyond the ceiling)</text>
+<text x="26" y="541" class="mono t-warn line" style="animation-delay:13.64s">[redteam] beyond-intent dropped by the derivation ceiling: cairn-read cairn-write</text>
+<text x="26" y="562" class="mono t-dim line" style="animation-delay:14.26s">[why-denied] boundary: intent-derivation ceiling (derived cap &lt;= Ahd), enforced in the kernel</text>
+<text x="26" y="604" class="mono t-pass line" style="animation-delay:15.5s">[overnight] PASS: the whole night is accounted for - reversibles undone,</text>
+<text x="26" y="625" class="mono t-pass line" style="animation-delay:16.12s">            the compensatable action compensated, the irreversible deploy</text>
+<text x="26" y="646" class="mono t-pass line" style="animation-delay:16.74s">            refused with a reason, and the escape contained</text>
+<rect x="26" y="657" width="8" height="15" class="cursor" style="animation-delay:17.36s"/>
+</svg>
