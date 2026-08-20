@@ -958,13 +958,37 @@ Three things it turned up that were not bookkeeping:
   arrived as that script exiting 101 rather than as a compile failure anyone
   could read.
 
-What remains under W15 is the second half: the tests. The measured list is
-unchanged — Cairn commit-record encode/decode, the **255-slot boundary with no
-GC**, the ticket lock's arithmetic, run-queue push/pop under simulated
-interleaving, and the Marz checksum. All five need `dezh-boot` to be host-
-testable first, which it is not: it is a `no_std`, `no_main` binary crate for one
-target. That is the next piece of work here, and it is a structural change rather
-than a mechanical one.
+What remains under W15 is the second half: the tests — Cairn commit-record
+encode/decode, the **255-slot boundary with no GC**, the ticket lock's
+arithmetic, run-queue push/pop under simulated interleaving, and the Marz
+checksum.
+
+**And the reason they have not moved is not the one recorded here before.** The
+note used to say all five were blocked on making `dezh-boot` host-testable. That
+is true and it is not the binding constraint. Two of the five are not even in
+that crate — the Cairn record format lives in the `virtio-blk` daemon (33
+`CAIRN1_OFF_*` sites) and the checksum lives in the `marz` daemon, both separate
+`no_std` RISC-V binaries.
+
+The binding constraint is narrower and more fixable: **these functions take their
+input from a fixed address rather than as an argument.** `ip_checksum(off, len)`
+volatile-reads out of the DMA window at `DMA_VA`; the Cairn codec reads through
+`d_read_u8` from the daemon's data pointer. A host test cannot call either one,
+and making the crate host-testable would not change that — there is no input to
+supply.
+
+So the work is not "port a kernel to the host". It is to give five pieces of
+logic real parameters, and it has a shape that keeps the volatile reads where
+they belong: split the arithmetic from the reading, so the caller passes an
+accessor and a length while a test passes an array. Doing it any other way —
+building a `&[u8]` over a DMA window — creates exactly the aliasing that
+`Global<T>` exists to prevent.
+
+The checksum is the one worth doing first. Its odd-length-body bug was found by
+hand in W9, the fix is recorded in a comment above the function, and the failure
+mode it describes is the kind a test exists for: *"the echo went out and no reply
+ever came back"* — silently, because the host rejected a checksum nobody could
+see was wrong.
 
 The measured remainder: 81 attribute conversions and 65 `unsafe fn` bodies to
 wrap. Both are mechanical and both are much easier to review once W11 has split
