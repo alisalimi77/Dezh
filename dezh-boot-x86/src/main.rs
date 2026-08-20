@@ -9,6 +9,12 @@
 //! the x86 hardware layer — boot, paging, traps, timer — the only part that must
 //! be written per ISA.
 
+// Edition 2024 stops treating an `unsafe fn` body as an implicit `unsafe`
+// block. Denying it here, an edition early, means the compiler names every one
+// of those bodies now - while the crate still builds either way - instead of
+// the edition bump arriving as a wall of errors with nothing to check them
+// against.
+#![deny(unsafe_op_in_unsafe_fn)]
 #![no_std]
 #![no_main]
 
@@ -24,7 +30,7 @@ use console::print;
 use core::arch::asm;
 use core::panic::PanicInfo;
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn kmain() -> ! {
     console::init();
     arch::gdt::init();
