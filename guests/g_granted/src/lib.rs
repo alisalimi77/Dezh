@@ -17,14 +17,14 @@ fn panic(_: &core::panic::PanicInfo) -> ! {
 // The ONLY things this guest can call. Every name is resolved by the host's
 // capability-gated Linker; there is no other import surface.
 #[link(wasm_import_module = "dezh")]
-extern "C" {
+unsafe extern "C" {
     fn cap_read(handle: u32, out_ptr: *mut u8, out_cap: u32) -> i32;
 }
 
 // Destination buffer in the guest's own linear memory.
 static mut BUF: [u8; 256] = [0; 256];
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn run() -> i64 {
     unsafe {
         let ptr = core::ptr::addr_of_mut!(BUF) as *mut u8;

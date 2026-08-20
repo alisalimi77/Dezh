@@ -14,7 +14,7 @@ fn panic(_: &core::panic::PanicInfo) -> ! {
 }
 
 #[link(wasm_import_module = "dezh")]
-extern "C" {
+unsafe extern "C" {
     fn cap_read(handle: u32, out_ptr: *mut u8, out_cap: u32) -> i32;
     fn cap_write(handle: u32, src_ptr: *const u8, src_len: u32) -> i32;
     fn cap_print(handle: u32, src_ptr: *const u8, src_len: u32) -> i32;
@@ -23,7 +23,7 @@ extern "C" {
 static mut BUF: [u8; 64] = [0; 64];
 static SRC: [u8; 4] = [1, 2, 3, 4];
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn run() -> i64 {
     unsafe {
         let bp = core::ptr::addr_of_mut!(BUF) as *mut u8;

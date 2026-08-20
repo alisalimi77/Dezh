@@ -1,7 +1,7 @@
 [package]
 name = "dezh-identity"
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
 description = "Dezh Step 3 — principals, delegation, invocations, and provenance chains."
 
 [dependencies]
