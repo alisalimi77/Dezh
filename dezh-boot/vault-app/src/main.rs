@@ -19,8 +19,8 @@ fn panic(_: &core::panic::PanicInfo) -> ! {
     loop {}
 }
 
-#[no_mangle]
-#[link_section = ".text._start"]
+#[unsafe(no_mangle)]
+#[unsafe(link_section = ".text._start")]
 extern "C" fn _start() -> ! {
     unsafe {
         asm!(
@@ -61,7 +61,7 @@ fn sys_exit(code: usize) -> ! {
     unsafe { asm!("ecall", in("a0") code, in("a7") SYS_EXIT, options(noreturn)) }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 extern "C" fn main(role: usize, daemon: usize, _arg2: usize, _arg3: usize) -> ! {
     if role == ROLE_RUN {
         sys_print(b"\n");

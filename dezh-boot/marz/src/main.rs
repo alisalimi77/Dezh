@@ -108,8 +108,8 @@ fn panic(_: &core::panic::PanicInfo) -> ! {
     loop {}
 }
 
-#[no_mangle]
-#[link_section = ".text._start"]
+#[unsafe(no_mangle)]
+#[unsafe(link_section = ".text._start")]
 extern "C" fn _start() -> ! {
     unsafe {
         asm!("li sp, 0x40700000", "j {main}", main = sym main, options(noreturn))
@@ -789,7 +789,7 @@ fn do_ping(dma_pa: usize, dst_ip: [u8; 4]) -> ! {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 extern "C" fn main(op: usize, dma_pa: usize, dest: usize, _a3: usize) -> ! {
     sys_print(b"  [marz] egress daemon started; holds ONLY the granted NIC page + DMA\n");
     if !nic_init(dma_pa) {

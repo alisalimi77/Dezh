@@ -3,7 +3,7 @@
 [package]
 name = "virtio-blk"
 version = "0.0.0"
-edition = "2021"
+edition = "2024"
 publish = false
 
 [[bin]]

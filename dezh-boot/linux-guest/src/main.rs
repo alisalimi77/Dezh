@@ -33,7 +33,7 @@ unsafe fn write(fd: usize, bytes: &[u8]) -> isize {
     syscall3(SYS_WRITE, fd, bytes.as_ptr() as usize, bytes.len())
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn _start() -> ! {
     // 1. A capability-gated write to stdout. Without the print capability the
     //    Pol layer returns -EACCES and nothing reaches the console.

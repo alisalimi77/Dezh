@@ -209,8 +209,8 @@ fn panic(_: &core::panic::PanicInfo) -> ! {
     loop {}
 }
 
-#[no_mangle]
-#[link_section = ".text._start"]
+#[unsafe(no_mangle)]
+#[unsafe(link_section = ".text._start")]
 extern "C" fn _start() -> ! {
     unsafe {
         asm!(
@@ -635,11 +635,11 @@ fn print_sand_record(slot: u32) {
     let derived = d_read_u32(CAIRN1_OFF_DERIVED);
     let revclass = d_read_u8(CAIRN1_OFF_REVCLASS);
     let status = d_read_u8(CAIRN1_OFF_STATUS);
-    let gen = (d_read_u8(CAIRN1_OFF_GEN) as u16) | ((d_read_u8(CAIRN1_OFF_GEN + 1) as u16) << 8);
+    let generation = (d_read_u8(CAIRN1_OFF_GEN) as u16) | ((d_read_u8(CAIRN1_OFF_GEN + 1) as u16) << 8);
     sys_print(b"slot=");
     print_num(slot as usize);
     sys_print(b" gen=");
-    print_num(gen as usize);
+    print_num(generation as usize);
     sys_print(b" actor=task");
     print_num(d_read_u32(24) as usize);
     sys_print(b" intent=");
@@ -751,12 +751,12 @@ fn cairn_commit(
     // Sand enrichment (offsets 36..48).
     d_write_u32(CAIRN1_OFF_INTENT, intent);
     d_write_u32(CAIRN1_OFF_DERIVED, derived);
-    let gen = count + 1;
+    let generation = count + 1;
     unsafe {
         core::ptr::write_volatile(data_ptr().add(CAIRN1_OFF_REVCLASS), rev_class);
         core::ptr::write_volatile(data_ptr().add(CAIRN1_OFF_STATUS), SAND_STATUS_COMMITTED);
-        core::ptr::write_volatile(data_ptr().add(CAIRN1_OFF_GEN), gen as u8);
-        core::ptr::write_volatile(data_ptr().add(CAIRN1_OFF_GEN + 1), (gen >> 8) as u8);
+        core::ptr::write_volatile(data_ptr().add(CAIRN1_OFF_GEN), generation as u8);
+        core::ptr::write_volatile(data_ptr().add(CAIRN1_OFF_GEN + 1), (generation >> 8) as u8);
     }
     unsafe {
         core::ptr::copy_nonoverlapping(
@@ -912,7 +912,7 @@ fn append_commit_raw(
     intent: u32,
     derived: u32,
     status: u8,
-    gen: u32,
+    generation: u32,
 ) -> bool {
     let len = value.len().min(CAIRN1_VALUE_MAX - 1);
     let hash = fnv64(value.as_ptr(), len);
@@ -930,8 +930,8 @@ fn append_commit_raw(
     unsafe {
         core::ptr::write_volatile(data_ptr().add(CAIRN1_OFF_REVCLASS), SAND_REV_REVERSIBLE);
         core::ptr::write_volatile(data_ptr().add(CAIRN1_OFF_STATUS), status);
-        core::ptr::write_volatile(data_ptr().add(CAIRN1_OFF_GEN), gen as u8);
-        core::ptr::write_volatile(data_ptr().add(CAIRN1_OFF_GEN + 1), (gen >> 8) as u8);
+        core::ptr::write_volatile(data_ptr().add(CAIRN1_OFF_GEN), generation as u8);
+        core::ptr::write_volatile(data_ptr().add(CAIRN1_OFF_GEN + 1), (generation >> 8) as u8);
         core::ptr::copy_nonoverlapping(value.as_ptr(), data_ptr().add(CAIRN1_VALUE_OFF), len);
     }
     rw(dma_base, CAIRN1_COMMIT_FIRST_SECTOR + slot as u64, true) == 0
@@ -1181,7 +1181,7 @@ fn sfar_rollback(dma_base: usize, ahd: u32, sender_caps: usize, from: usize) -> 
                         k += 1;
                     }
                     let slot = next_free;
-                    let gen = count[ns].saturating_sub(undone[ns]) + 1;
+                    let generation = count[ns].saturating_sub(undone[ns]) + 1;
                     let ok = append_commit_raw(
                         dma_base,
                         slot,
@@ -1192,7 +1192,7 @@ fn sfar_rollback(dma_base: usize, ahd: u32, sender_caps: usize, from: usize) -> 
                         ahd,
                         derived,
                         SAND_STATUS_COMPENSATION,
-                        gen,
+                        generation,
                     );
                     if !ok {
                         return IPC_STATUS_IO_FAILURE;
