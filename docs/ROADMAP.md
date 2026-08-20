@@ -984,11 +984,29 @@ accessor and a length while a test passes an array. Doing it any other way —
 building a `&[u8]` over a DMA window — creates exactly the aliasing that
 `Global<T>` exists to prevent.
 
-The checksum is the one worth doing first. Its odd-length-body bug was found by
-hand in W9, the fix is recorded in a comment above the function, and the failure
-mode it describes is the kind a test exists for: *"the echo went out and no reply
-ever came back"* — silently, because the host rejected a checksum nobody could
-see was wrong.
+**The checksum is done, and it is the worked example for the other four.** The
+arithmetic is `dezh_core::net::internet_checksum`, taking a length and an
+accessor; the `marz` daemon keeps the volatile loads and passes a closure over
+its DMA window. Eight tests, and a negative control that matters: reintroducing
+the W9 bug — dropping the odd tail instead of padding it — fails exactly
+`an_odd_tail_byte_is_padded_not_dropped` and
+`the_odd_tail_is_the_high_half_of_its_word`, and leaves the other six silent. The
+second exists because the near-miss (padding on the wrong side) passes the first.
+
+The known-vector test is only worth something because of the one beside it:
+`inserting_the_checksum_makes_a_fresh_sum_zero` is the receiver's own check and
+does not depend on knowing the right constant, and `0xb861` was verified against
+an independent implementation rather than against this one. A constant and an
+implementation that are wrong in the same way agree perfectly.
+
+Cost of the dependency: **8 bytes**. `marz` builds `release` with `lto = true`,
+so `dezh-core`'s signature verifier and everything else unused is dead-stripped —
+15,920 to 15,928.
+
+Four left: the Cairn record codec and the 255-slot boundary (both in the
+`virtio-blk` daemon, both reading through `d_read_u8` from a fixed data pointer,
+so both need the same treatment), the ticket lock's arithmetic, and run-queue
+push/pop under simulated interleaving.
 
 The measured remainder: 81 attribute conversions and 65 `unsafe fn` bodies to
 wrap. Both are mechanical and both are much easier to review once W11 has split
