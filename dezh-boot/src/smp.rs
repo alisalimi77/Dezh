@@ -513,8 +513,8 @@ pub(crate) fn build_ap_slot_space(slot: usize) -> usize {
 /// A U-mode worker. Lives in the user region (U+X) and speaks only through
 /// syscalls — zero ambient authority, exactly like a boot-hart task. `a0` is its
 /// slot id; it spins briefly so concurrent workers genuinely overlap in time.
-#[link_section = ".user.text"]
-#[no_mangle]
+#[unsafe(link_section = ".user.text")]
+#[unsafe(no_mangle)]
 pub(crate) extern "C" fn ap_worker_task(slot: usize) -> ! {
     sys_print(b"  [ap-task] hello from a U-mode task running on a SECONDARY hart\n");
     let mut i = 0usize;
@@ -533,8 +533,8 @@ pub(crate) extern "C" fn ap_worker_task(slot: usize) -> ! {
 /// the host emulates, which is not something to assert on. This one is sized so
 /// that it cannot finish inside one, so "the hart's timer fired" is a claim
 /// about the kernel rather than about the host's speed.
-#[link_section = ".user.text"]
-#[no_mangle]
+#[unsafe(link_section = ".user.text")]
+#[unsafe(no_mangle)]
 pub(crate) extern "C" fn ap_spin_task(slot: usize) -> ! {
     sys_print(b"  [ap-spin] a U-mode task on a secondary hart that never yields\n");
     let mut i = 0usize;
@@ -553,8 +553,8 @@ pub(crate) const AP_SPIN_ITERS: usize = 40_000_000;
 
 /// A U-mode task that reaches into ANOTHER task's stack (address in `a1`). With
 /// per-task address spaces that page is not mapped U here, so it must fault.
-#[link_section = ".user.text"]
-#[no_mangle]
+#[unsafe(link_section = ".user.text")]
+#[unsafe(no_mangle)]
 pub(crate) extern "C" fn ap_rogue_task(_slot: usize, victim: usize) -> ! {
     unsafe {
         asm!("sb {v}, 0({p})", v = in(reg) 0x41usize, p = in(reg) victim);
@@ -565,7 +565,7 @@ pub(crate) extern "C" fn ap_rogue_task(_slot: usize, victim: usize) -> ! {
 
 /// AP U-mode trap handler. Per-hart state comes from the frame pointer (which is
 /// the hart's `ApCtx`), never from `tp`.
-#[no_mangle]
+#[unsafe(no_mangle)]
 extern "C" fn ap_trap_handler(frame: *mut usize) -> *const usize {
     let scause: usize;
     unsafe {
@@ -649,69 +649,73 @@ extern "C" fn ap_trap_handler(frame: *mut usize) -> *const usize {
 /// identity-mapped in every space, so this hart's own PC/SP stay valid across the
 /// satp switch.
 unsafe fn ap_execute(hartid: usize, slot: usize) {
-    let ctx = &mut *core::ptr::addr_of_mut!(AP_CTX[hartid]);
-    ctx.frame = [0; 32];
-    ctx.frame[F_SEPC] = AP_SLOT_ENTRY[slot].load(Ordering::Relaxed);
-    ctx.frame[F_SP] = task_stack_top(slot);
-    ctx.frame[F_A0] = slot;
-    ctx.frame[F_A1] = AP_SLOT_ARG[slot].load(Ordering::Relaxed);
-    ctx.trap_top = ap_trap_top(hartid);
-    ctx.slot = slot;
+    unsafe {
+        let ctx = &mut *core::ptr::addr_of_mut!(AP_CTX[hartid]);
+        ctx.frame = [0; 32];
+        ctx.frame[F_SEPC] = AP_SLOT_ENTRY[slot].load(Ordering::Relaxed);
+        ctx.frame[F_SP] = task_stack_top(slot);
+        ctx.frame[F_A0] = slot;
+        ctx.frame[F_A1] = AP_SLOT_ARG[slot].load(Ordering::Relaxed);
+        ctx.trap_top = ap_trap_top(hartid);
+        ctx.slot = slot;
 
-    AP_SLOT_RUNS[slot].fetch_add(1, Ordering::Relaxed);
-    AP_SLOT_HART[slot].store(hartid as u32, Ordering::Relaxed);
+        AP_SLOT_RUNS[slot].fetch_add(1, Ordering::Relaxed);
+        AP_SLOT_HART[slot].store(hartid as u32, Ordering::Relaxed);
 
-    // Track real overlap: how many U-mode tasks are live at once.
-    let live = AP_LIVE.fetch_add(1, Ordering::AcqRel) + 1;
-    AP_LIVE_MAX.fetch_max(live, Ordering::AcqRel);
+        // Track real overlap: how many U-mode tasks are live at once.
+        let live = AP_LIVE.fetch_add(1, Ordering::AcqRel) + 1;
+        AP_LIVE_MAX.fetch_max(live, Ordering::AcqRel);
 
-    let satp = AP_SLOT_SATP[slot].load(Ordering::Relaxed);
-    asm!("sfence.vma");
-    asm!("csrw satp, {}", in(reg) satp);
-    asm!("sfence.vma");
-    asm!("csrw stvec, {}", in(reg) utrap_ap as *const () as usize);
-    asm!("csrs sstatus, {}", in(reg) 1usize << 18); // SUM: S-mode may read the task's U pages
+        let satp = AP_SLOT_SATP[slot].load(Ordering::Relaxed);
+        asm!("sfence.vma");
+        asm!("csrw satp, {}", in(reg) satp);
+        asm!("sfence.vma");
+        asm!("csrw stvec, {}", in(reg) utrap_ap as *const () as usize);
+        asm!("csrs sstatus, {}", in(reg) 1usize << 18); // SUM: S-mode may read the task's U pages
 
-    // Arm this hart's own timer for the duration of the task. Before this the
-    // secondary ran U-mode with `sie.STIE` clear, so nothing could take the CPU
-    // back from a task that did not exit - the boot hart's timer is a different
-    // hart's timer and cannot preempt this one. `sstatus.SIE` is left alone:
-    // U-mode traps are taken regardless of it, and setting it would also expose
-    // the hart's kernel-mode stretches here, which is not what this step claims.
-    sbi_set_timer(rdtime() + QUANTUM);
-    asm!("csrs sie, {}", in(reg) STIE);
+        // Arm this hart's own timer for the duration of the task. Before this the
+        // secondary ran U-mode with `sie.STIE` clear, so nothing could take the CPU
+        // back from a task that did not exit - the boot hart's timer is a different
+        // hart's timer and cannot preempt this one. `sstatus.SIE` is left alone:
+        // U-mode traps are taken regardless of it, and setting it would also expose
+        // the hart's kernel-mode stretches here, which is not what this step claims.
+        sbi_set_timer(rdtime() + QUANTUM);
+        asm!("csrs sie, {}", in(reg) STIE);
 
-    let fp = core::ptr::addr_of!(ctx.frame) as *const usize;
-    let kp = core::ptr::addr_of!(ctx.kctx) as *const usize;
-    ap_run(fp, kp); // returns (via ap_return) when the task exits or faults
+        let fp = core::ptr::addr_of!(ctx.frame) as *const usize;
+        let kp = core::ptr::addr_of!(ctx.kctx) as *const usize;
+        ap_run(fp, kp); // returns (via ap_return) when the task exits or faults
 
-    // Disarm before leaving U-mode behind: the hart's compute and queue rounds
-    // run in S-mode with no trap vector installed, so a timer arriving there
-    // would have nowhere to go.
-    asm!("csrc sie, {}", in(reg) STIE);
+        // Disarm before leaving U-mode behind: the hart's compute and queue rounds
+        // run in S-mode with no trap vector installed, so a timer arriving there
+        // would have nowhere to go.
+        asm!("csrc sie, {}", in(reg) STIE);
 
-    // Back to bare mode so the hart's compute/queue rounds are unaffected.
-    asm!("csrw stvec, {}", in(reg) 0usize);
-    asm!("sfence.vma");
-    asm!("csrw satp, {}", in(reg) 0usize);
-    asm!("sfence.vma");
+        // Back to bare mode so the hart's compute/queue rounds are unaffected.
+        asm!("csrw stvec, {}", in(reg) 0usize);
+        asm!("sfence.vma");
+        asm!("csrw satp, {}", in(reg) 0usize);
+        asm!("sfence.vma");
 
-    AP_LIVE.fetch_sub(1, Ordering::AcqRel);
-    AP_TASKS_DONE.fetch_add(1, Ordering::Release);
+        AP_LIVE.fetch_sub(1, Ordering::AcqRel);
+        AP_TASKS_DONE.fetch_add(1, Ordering::Release);
+    }
 }
 
 /// Pull tasks off the shared queue and run them until it is empty. Every secondary
 /// hart runs this concurrently — this is the symmetric dispatch loop.
 unsafe fn ap_schedule(hartid: usize) {
-    while let Some(slot) = ap_q_pop() {
-        ap_execute(hartid, slot as usize);
+    unsafe {
+        while let Some(slot) = ap_q_pop() {
+            ap_execute(hartid, slot as usize);
+        }
     }
 }
 
 /// Secondary hart body. Never prints (only the boot hart owns the UART) and never
 /// traps (no stvec installed here): it checks in, then serves parallel rounds the
 /// boot hart opens by bumping `SMP_GEN`.
-#[no_mangle]
+#[unsafe(no_mangle)]
 extern "C" fn hart_main(hartid: usize) -> ! {
     if hartid < MAX_HARTS {
         HART_RAN[hartid].store(true, Ordering::Release);

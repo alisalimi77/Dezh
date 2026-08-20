@@ -840,7 +840,7 @@ pub(crate) fn read_line(buf: &mut [u8]) -> usize {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn kmain(hart_id: usize, _fdt: usize) -> ! {
     Uart.init();
     // SBI hands the boot hart's id in a0. Capture it before anything else needs a0.

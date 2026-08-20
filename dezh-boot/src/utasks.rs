@@ -20,14 +20,14 @@ use crate::{
     SYS_PRINT, SYS_REPORT, SYS_SEND, SYS_YIELD, TASK_PRINT,
 };
 
-#[link_section = ".user.text"]
+#[unsafe(link_section = ".user.text")]
 #[inline(never)]
 pub(crate) fn sys_yield() {
     unsafe { asm!("ecall", in("a7") SYS_YIELD, lateout("a0") _, lateout("a1") _) };
 }
 
-#[link_section = ".user.text"]
-#[no_mangle]
+#[unsafe(link_section = ".user.text")]
+#[unsafe(no_mangle)]
 pub(crate) extern "C" fn worker_a() -> ! {
     sys_print(b"    [task A] step 1\n");
     sys_yield();
@@ -37,8 +37,8 @@ pub(crate) extern "C" fn worker_a() -> ! {
     sys_exit(0)
 }
 
-#[link_section = ".user.text"]
-#[no_mangle]
+#[unsafe(link_section = ".user.text")]
+#[unsafe(no_mangle)]
 pub(crate) extern "C" fn worker_b() -> ! {
     sys_print(b"    [task B] step 1\n");
     sys_yield();
@@ -48,8 +48,8 @@ pub(crate) extern "C" fn worker_b() -> ! {
     sys_exit(0)
 }
 
-#[link_section = ".user.text"]
-#[no_mangle]
+#[unsafe(link_section = ".user.text")]
+#[unsafe(no_mangle)]
 pub(crate) extern "C" fn worker_c() -> ! {
     sys_print(b"    [task C] step 1\n");
     sys_yield();
@@ -79,7 +79,7 @@ pub(crate) fn enc(op: usize, val: usize) -> usize {
     (op << 32) | (val & 0xFFFF_FFFF)
 }
 
-#[link_section = ".user.text"]
+#[unsafe(link_section = ".user.text")]
 #[inline(never)]
 pub(crate) fn vsend(to: usize, word: usize) {
     unsafe {
@@ -87,7 +87,7 @@ pub(crate) fn vsend(to: usize, word: usize) {
     };
 }
 
-#[link_section = ".user.text"]
+#[unsafe(link_section = ".user.text")]
 #[inline(never)]
 pub(crate) fn vrecv() -> (usize, usize) {
     let word: usize;
@@ -98,7 +98,7 @@ pub(crate) fn vrecv() -> (usize, usize) {
     (word, from)
 }
 
-#[link_section = ".user.text"]
+#[unsafe(link_section = ".user.text")]
 #[inline(never)]
 pub(crate) fn vrecv_timeout(timeout_ticks: usize) -> (usize, usize, usize) {
     let rc: usize;
@@ -117,7 +117,7 @@ pub(crate) fn vrecv_timeout(timeout_ticks: usize) -> (usize, usize, usize) {
     (rc, from, word)
 }
 
-#[link_section = ".user.text"]
+#[unsafe(link_section = ".user.text")]
 #[inline(always)]
 pub(crate) fn utyped_word(service: usize, op: usize, request_id: usize, status: usize, arg: usize) -> usize {
     (IPC_PROTO_V1 << 56)
@@ -128,26 +128,26 @@ pub(crate) fn utyped_word(service: usize, op: usize, request_id: usize, status: 
         | (arg & 0xffff)
 }
 
-#[link_section = ".user.text"]
+#[unsafe(link_section = ".user.text")]
 #[inline(always)]
 pub(crate) fn utyped_op(word: usize) -> usize {
     (word >> 40) & 0xff
 }
 
-#[link_section = ".user.text"]
+#[unsafe(link_section = ".user.text")]
 #[inline(always)]
 pub(crate) fn utyped_status(word: usize) -> usize {
     (word >> 16) & 0xff
 }
 
-#[link_section = ".user.text"]
+#[unsafe(link_section = ".user.text")]
 #[inline(never)]
 pub(crate) fn sys_printnum(v: usize) {
     unsafe { asm!("ecall", inout("a0") v => _, in("a7") SYS_PRINTNUM) };
 }
 
-#[link_section = ".user.text"]
-#[no_mangle]
+#[unsafe(link_section = ".user.text")]
+#[unsafe(no_mangle)]
 pub(crate) extern "C" fn cairn_service() -> ! {
     let mut cur: usize = 0;
     let mut prev: usize = 0;
@@ -171,8 +171,8 @@ pub(crate) extern "C" fn cairn_service() -> ! {
     }
 }
 
-#[link_section = ".user.text"]
-#[no_mangle]
+#[unsafe(link_section = ".user.text")]
+#[unsafe(no_mangle)]
 pub(crate) extern "C" fn agent_cairn() -> ! {
     let svc = 0usize; // the Cairn store service is task 0
 
@@ -209,7 +209,7 @@ pub(crate) extern "C" fn agent_cairn() -> ! {
 // With timer preemption, "B start" appears before "A end" — the timer forces a
 // switch mid-loop, so one task can no longer monopolize the CPU (the safety
 // property needed before running untrusted agents).
-#[link_section = ".user.text"]
+#[unsafe(link_section = ".user.text")]
 #[inline(never)]
 pub(crate) fn busy(n: usize) {
     let mut i = 0usize;
@@ -219,8 +219,8 @@ pub(crate) fn busy(n: usize) {
     }
 }
 
-#[link_section = ".user.text"]
-#[no_mangle]
+#[unsafe(link_section = ".user.text")]
+#[unsafe(no_mangle)]
 pub(crate) extern "C" fn preempt_a() -> ! {
     sys_print(b"    [A] start (busy loop, never yields)\n");
     busy(8_000_000);
@@ -228,8 +228,8 @@ pub(crate) extern "C" fn preempt_a() -> ! {
     sys_exit(0)
 }
 
-#[link_section = ".user.text"]
-#[no_mangle]
+#[unsafe(link_section = ".user.text")]
+#[unsafe(no_mangle)]
 pub(crate) extern "C" fn preempt_b() -> ! {
     sys_print(b"    [B] start (busy loop, never yields)\n");
     busy(8_000_000);
@@ -242,8 +242,8 @@ pub(crate) extern "C" fn preempt_b() -> ! {
 // While the spy runs, the victim's region is U=0, so the load page-faults and the
 // kernel kills only the spy — inter-task no-ambient-authority at the hardware
 // memory boundary, which is what makes the IPC layer the *only* way to share.
-#[link_section = ".user.text"]
-#[no_mangle]
+#[unsafe(link_section = ".user.text")]
+#[unsafe(no_mangle)]
 pub(crate) extern "C" fn victim_task() -> ! {
     sys_print(b"    [task0] my stack is private; only I can touch my region\n");
     sys_yield(); // let the spy try
@@ -255,16 +255,16 @@ pub(crate) extern "C" fn victim_task() -> ! {
 // it calls the privileged PRINT syscall directly. There is no ambient authority
 // to inherit and no way to forge or amplify a capability, so the kernel denies
 // the syscall at the capability check and the task prints nothing.
-#[link_section = ".user.text"]
-#[no_mangle]
+#[unsafe(link_section = ".user.text")]
+#[unsafe(no_mangle)]
 pub(crate) extern "C" fn forge_task() -> ! {
     let msg = b"    [forge] (BUG) I printed without holding the PRINT capability!\n";
     sys_write(msg.as_ptr(), msg.len());
     sys_exit(0)
 }
 
-#[link_section = ".user.text"]
-#[no_mangle]
+#[unsafe(link_section = ".user.text")]
+#[unsafe(no_mangle)]
 pub(crate) extern "C" fn spy_task() -> ! {
     // Read straight into task0's stack region (base = stack_base(); see the
     // kernel log). It is U=0 while we run, so this load faults and we are killed.
@@ -281,7 +281,7 @@ pub(crate) extern "C" fn spy_task() -> ! {
 // a message that *delegates* the PRINT capability. The kernel enforces that the
 // agent can only delegate what it holds (attenuation, never widening) — the
 // microkernel keystone for agents calling services and spawning sub-agents.
-#[link_section = ".user.text"]
+#[unsafe(link_section = ".user.text")]
 #[inline(never)]
 pub(crate) fn sys_send(to: usize, s: &[u8], grant: usize) -> usize {
     let mut a0 = to;
@@ -291,7 +291,7 @@ pub(crate) fn sys_send(to: usize, s: &[u8], grant: usize) -> usize {
     a0
 }
 
-#[link_section = ".user.text"]
+#[unsafe(link_section = ".user.text")]
 #[inline(never)]
 pub(crate) fn sys_recv(buf: &mut [u8]) -> usize {
     let mut a0 = buf.as_mut_ptr() as usize;
@@ -303,7 +303,7 @@ pub(crate) fn sys_recv(buf: &mut [u8]) -> usize {
 
 // Raw write wrapper: takes ptr+len so user code never calls a (non-inlined,
 // kernel-resident) core slicing helper — which a U-mode task cannot fetch.
-#[link_section = ".user.text"]
+#[unsafe(link_section = ".user.text")]
 #[inline(never)]
 pub(crate) fn sys_write(ptr: *const u8, len: usize) -> usize {
     let mut a0 = ptr as usize;
@@ -311,8 +311,8 @@ pub(crate) fn sys_write(ptr: *const u8, len: usize) -> usize {
     a0
 }
 
-#[link_section = ".user.text"]
-#[no_mangle]
+#[unsafe(link_section = ".user.text")]
+#[unsafe(no_mangle)]
 pub(crate) extern "C" fn service_task() -> ! {
     // No authority yet: this print is denied by the kernel.
     sys_print(b"    [service] (pre-IPC) I have no capabilities; this print is denied\n");
@@ -323,8 +323,8 @@ pub(crate) extern "C" fn service_task() -> ! {
     sys_exit(0)
 }
 
-#[link_section = ".user.text"]
-#[no_mangle]
+#[unsafe(link_section = ".user.text")]
+#[unsafe(no_mangle)]
 pub(crate) extern "C" fn agent_task() -> ! {
     sys_print(b"    [agent] delegating my PRINT capability to the service over IPC\n");
     sys_send(
@@ -335,8 +335,8 @@ pub(crate) extern "C" fn agent_task() -> ! {
     sys_exit(0)
 }
 
-#[link_section = ".user.text"]
-#[no_mangle]
+#[unsafe(link_section = ".user.text")]
+#[unsafe(no_mangle)]
 pub(crate) extern "C" fn typed_ipc_service_task() -> ! {
     let (word1, from1) = vrecv();
     if utyped_op(word1) == IPC_OP_PING {
@@ -370,8 +370,8 @@ pub(crate) extern "C" fn typed_ipc_service_task() -> ! {
     sys_exit(0)
 }
 
-#[link_section = ".user.text"]
-#[no_mangle]
+#[unsafe(link_section = ".user.text")]
+#[unsafe(no_mangle)]
 pub(crate) extern "C" fn typed_ipc_client_task() -> ! {
     vsend(
         0,
@@ -391,8 +391,8 @@ pub(crate) extern "C" fn typed_ipc_client_task() -> ! {
     sys_exit(0)
 }
 
-#[link_section = ".user.text"]
-#[no_mangle]
+#[unsafe(link_section = ".user.text")]
+#[unsafe(no_mangle)]
 pub(crate) extern "C" fn typed_ipc_timeout_task() -> ! {
     let (rc, _, word) = vrecv_timeout(0);
     sys_print(b"    [typed-ipc] RECV_TIMEOUT -> ");
@@ -404,8 +404,8 @@ pub(crate) extern "C" fn typed_ipc_timeout_task() -> ! {
     sys_exit(0)
 }
 
-#[link_section = ".user.text"]
-#[no_mangle]
+#[unsafe(link_section = ".user.text")]
+#[unsafe(no_mangle)]
 pub(crate) extern "C" fn typed_ipc_denied_task() -> ! {
     let rc = sys_send(0, b"", 0);
     sys_print(b"    [typed-ipc] no-IPC SEND -> ");
@@ -417,8 +417,8 @@ pub(crate) extern "C" fn typed_ipc_denied_task() -> ! {
     sys_exit(0)
 }
 
-#[link_section = ".user.text"]
-#[no_mangle]
+#[unsafe(link_section = ".user.text")]
+#[unsafe(no_mangle)]
 pub(crate) extern "C" fn queue_service_task() -> ! {
     sys_print(b"    [queue-service] delaying receive so two clients enqueue\n");
     sys_yield();
@@ -438,16 +438,16 @@ pub(crate) extern "C" fn queue_service_task() -> ! {
     sys_exit(0)
 }
 
-#[link_section = ".user.text"]
-#[no_mangle]
+#[unsafe(link_section = ".user.text")]
+#[unsafe(no_mangle)]
 pub(crate) extern "C" fn queue_agent_a() -> ! {
     sys_print(b"    [queue-agent-a] enqueue alpha\n");
     sys_send(0, b"alpha\n", 0);
     sys_exit(0)
 }
 
-#[link_section = ".user.text"]
-#[no_mangle]
+#[unsafe(link_section = ".user.text")]
+#[unsafe(no_mangle)]
 pub(crate) extern "C" fn queue_agent_b() -> ! {
     sys_print(b"    [queue-agent-b] enqueue beta\n");
     sys_send(0, b"beta\n", 0);
@@ -459,7 +459,7 @@ pub(crate) extern "C" fn queue_agent_b() -> ! {
 // Pol layer translates each into a capability-checked Dezh action; an
 // unsupported syscall returns ENOSYS. The app has zero ambient authority — it
 // only reaches the console because it holds the PRINT capability.
-#[link_section = ".user.text"]
+#[unsafe(link_section = ".user.text")]
 #[inline(never)]
 pub(crate) fn linux_write(fd: usize, s: &[u8]) -> i64 {
     let mut a0 = fd;
@@ -469,7 +469,7 @@ pub(crate) fn linux_write(fd: usize, s: &[u8]) -> i64 {
     a0 as i64
 }
 
-#[link_section = ".user.text"]
+#[unsafe(link_section = ".user.text")]
 #[inline(never)]
 pub(crate) fn linux_close(fd: usize) -> i64 {
     let mut a0 = fd;
@@ -478,7 +478,7 @@ pub(crate) fn linux_close(fd: usize) -> i64 {
     a0 as i64
 }
 
-#[link_section = ".user.text"]
+#[unsafe(link_section = ".user.text")]
 #[inline(never)]
 pub(crate) fn linux_exit(code: usize) -> ! {
     unsafe { asm!("ecall", in("a0") code, in("a7") LINUX_EXIT, options(noreturn)) }
@@ -488,13 +488,13 @@ pub(crate) fn linux_exit(code: usize) -> ! {
 // Times N minimal syscalls with the U-mode-readable `time` CSR and reports the
 // per-call cost back to the kernel. (Under QEMU this is an emulated figure; see
 // BENCH.md for the real-hardware comparison.)
-#[link_section = ".user.text"]
+#[unsafe(link_section = ".user.text")]
 #[inline(never)]
 pub(crate) fn sys_null() {
     unsafe { asm!("ecall", in("a7") SYS_NULL, lateout("a0") _, lateout("a1") _) };
 }
 
-#[link_section = ".user.text"]
+#[unsafe(link_section = ".user.text")]
 #[inline(never)]
 pub(crate) fn rdtime_u() -> usize {
     let t: usize;
@@ -502,14 +502,14 @@ pub(crate) fn rdtime_u() -> usize {
     t
 }
 
-#[link_section = ".user.text"]
+#[unsafe(link_section = ".user.text")]
 #[inline(never)]
 pub(crate) fn sys_report(ticks: usize, iters: usize) {
     unsafe { asm!("ecall", inout("a0") ticks => _, in("a1") iters, in("a7") SYS_REPORT) };
 }
 
-#[link_section = ".user.text"]
-#[no_mangle]
+#[unsafe(link_section = ".user.text")]
+#[unsafe(no_mangle)]
 pub(crate) extern "C" fn bench_task() -> ! {
     let n: usize = 500_000;
     let t0 = rdtime_u();
@@ -533,8 +533,8 @@ pub(crate) extern "C" fn bench_task() -> ! {
 // number for F4 — see BENCH.md.)
 pub(crate) const BENCH_POL_ITERS: usize = 200_000;
 
-#[link_section = ".user.text"]
-#[no_mangle]
+#[unsafe(link_section = ".user.text")]
+#[unsafe(no_mangle)]
 pub(crate) extern "C" fn bench_native_print_task() -> ! {
     let mut i = 0;
     while i < BENCH_POL_ITERS {
@@ -544,8 +544,8 @@ pub(crate) extern "C" fn bench_native_print_task() -> ! {
     sys_exit(0)
 }
 
-#[link_section = ".user.text"]
-#[no_mangle]
+#[unsafe(link_section = ".user.text")]
+#[unsafe(no_mangle)]
 pub(crate) extern "C" fn bench_pol_write_task() -> ! {
     let mut i = 0;
     while i < BENCH_POL_ITERS {
@@ -555,8 +555,8 @@ pub(crate) extern "C" fn bench_pol_write_task() -> ! {
     linux_exit(0)
 }
 
-#[link_section = ".user.text"]
-#[no_mangle]
+#[unsafe(link_section = ".user.text")]
+#[unsafe(no_mangle)]
 pub(crate) extern "C" fn linux_app() -> ! {
     linux_write(
         1,
