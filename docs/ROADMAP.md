@@ -925,10 +925,47 @@ behind a switch that is off, so the reproduction is one console command away
 rather than a patch to re-apply. Every existing demo is unchanged with the switch
 closed, and the whole suite is green.
 
-The next question is narrow: which path advances `next` without advancing
-`serving`. `Ticket::release` does a plain load-then-store rather than a
-`fetch_add`, justified by "only the holder gets here" — and that justification is
-now the thing to check rather than assume.
+**Narrowed again, and the mechanism is named.** `Ticket::release` is not at
+fault: a global acquire/release count taken at the wedge reads `acq - rel = 4`,
+exactly the four blocked harts. Nothing is leaked and no release is lost.
+
+Reading which lock each hart waits on, and the ticket its last successful
+acquire was served at:
+
+```text
+SCHED_LOCK   next=0x33 (51)   serving=0x2c (44)
+hart 0  ->  SCHED_LOCK   last served ticket 4    from utrap_handler+0x98
+hart 1  ->  SCHED_LOCK   last served ticket 39   from utrap_handler+0x98
+hart 2  ->  SCHED_LOCK   last served ticket 44   from utrap_handler+0x98
+hart 3  ->  AP_Q_LOCK    (balanced; it gets in)
+```
+
+**Hart 2 was served ticket 44, and `serving` is 44 — so it holds the lock — and
+it is waiting for `SCHED_LOCK` again, from the same source offset.** A hart
+blocked on a lock it already holds. Harts 0 and 1 are behind it, which is why the
+gap looks like a leak from the outside; it is one self-deadlock with a queue.
+
+`utrap_handler+0x98` is the first acquisition in the trap handler:
+
+```rust
+let cur = {
+    let _held = SCHED_LOCK.lock();
+    current_task()
+};
+```
+
+That scope is correct, and `tools/ci/check_sched_lock.py` agrees — it reports 33
+guard scopes, none re-entrant, and it is right about the source. So the second
+acquisition is not a call the source makes from inside the first. **Something
+re-enters `utrap_handler` while the lock is held**, and the lock masks
+`sstatus.SIE`, which gates S-mode interrupts only.
+
+That is the next question, and it is a much smaller one than the last two: what
+reaches this handler on a hart whose S-mode interrupts are masked. The static
+checker cannot see it by construction — it checks what the source calls, and this
+is something arriving from outside the source. A checker that only reads calls
+will keep saying "none re-entrant" about a re-entrancy, which is worth knowing
+about the checker as much as about the bug.
 
 So the last piece is: let a secondary pull from the console task table, limited
 to tasks with their own address space, and then make a daemon migrate under
