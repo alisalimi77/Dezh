@@ -86,12 +86,15 @@ pub(crate) fn calc_command(plan: &KernelPlan, arg: &str) {
     run_foreground_processes(&[
         ProcessSpec::new(CALC_ELF, TASK_PRINT | TASK_IPC, CALC_ROLE_EVAL).args(op, a, b),
     ]);
-    if foreground_exit_code() == 0 {
-        if let Some(result) = calc_eval(op, a, b) {
-            let expr = format!("{} {} {} = {}", a_s, op_s, b_s, result);
-            run_registered_virtio_client(plan, BLK_REQ_CALC_SET, &expr);
-            record_event("app", "calc.eval", "calc", "OK");
-        }
+    // A let-chain, which edition 2024 is what makes available here. Both halves
+    // are the same condition - the app exited cleanly *and* the expression is
+    // one we can restate - and nesting them said that less directly.
+    if foreground_exit_code() == 0
+        && let Some(result) = calc_eval(op, a, b)
+    {
+        let expr = format!("{} {} {} = {}", a_s, op_s, b_s, result);
+        run_registered_virtio_client(plan, BLK_REQ_CALC_SET, &expr);
+        record_event("app", "calc.eval", "calc", "OK");
     }
 }
 

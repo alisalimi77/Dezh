@@ -19,8 +19,8 @@ fn panic(_: &core::panic::PanicInfo) -> ! {
     loop {}
 }
 
-#[no_mangle]
-#[link_section = ".text._start"]
+#[unsafe(no_mangle)]
+#[unsafe(link_section = ".text._start")]
 extern "C" fn _start() -> ! {
     // a0 already holds the id the kernel passed; just set the stack and go.
     unsafe { asm!("li sp, 0x40700000", "j {main}", main = sym main, options(noreturn)) }

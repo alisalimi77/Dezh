@@ -61,7 +61,7 @@ cap_blob_end:
 "#
 );
 
-extern "C" {
+unsafe extern "C" {
     static cap_blob_start: u8;
     static cap_blob_end: u8;
 }

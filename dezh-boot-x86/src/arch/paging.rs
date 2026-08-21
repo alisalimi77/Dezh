@@ -99,15 +99,17 @@ pub(crate) fn new_address_space() -> Option<u64> {
 
 /// Returns the next level down, allocating it if this entry is empty.
 unsafe fn descend(table: *mut u64, index: usize) -> Option<*mut u64> {
-    let entry = core::ptr::read(table.add(index));
-    if entry & PRESENT != 0 {
-        return Some((entry & ADDR_MASK) as *mut u64);
+    unsafe {
+        let entry = core::ptr::read(table.add(index));
+        if entry & PRESENT != 0 {
+            return Some((entry & ADDR_MASK) as *mut u64);
+        }
+        let page = alloc_page()? as u64;
+        // Permissive at every level above the leaf: the leaf entry is what decides
+        // whether a page is writable and whether CPL3 may touch it.
+        core::ptr::write(table.add(index), page | PRESENT | WRITABLE | USER);
+        Some(page as *mut u64)
     }
-    let page = alloc_page()? as u64;
-    // Permissive at every level above the leaf: the leaf entry is what decides
-    // whether a page is writable and whether CPL3 may touch it.
-    core::ptr::write(table.add(index), page | PRESENT | WRITABLE | USER);
-    Some(page as *mut u64)
 }
 
 /// Maps one 4 KiB page. Returns false only when the pool is spent.
@@ -115,24 +117,26 @@ unsafe fn descend(table: *mut u64, index: usize) -> Option<*mut u64> {
 /// Safety: `pml4` must be an address space made by `new_address_space`, and
 /// `va` must not already be mapped to something the caller still needs.
 pub(crate) unsafe fn map_page(pml4: u64, va: u64, pa: u64, flags: u64) -> bool {
-    let l4 = ((va >> 39) & 0x1FF) as usize;
-    let l3 = ((va >> 30) & 0x1FF) as usize;
-    let l2 = ((va >> 21) & 0x1FF) as usize;
-    let l1 = ((va >> 12) & 0x1FF) as usize;
-    let pdpt = match descend(pml4 as *mut u64, l4) {
-        Some(p) => p,
-        None => return false,
-    };
-    let pd = match descend(pdpt, l3) {
-        Some(p) => p,
-        None => return false,
-    };
-    let pt = match descend(pd, l2) {
-        Some(p) => p,
-        None => return false,
-    };
-    core::ptr::write(pt.add(l1), (pa & ADDR_MASK) | flags | PRESENT);
-    true
+    unsafe {
+        let l4 = ((va >> 39) & 0x1FF) as usize;
+        let l3 = ((va >> 30) & 0x1FF) as usize;
+        let l2 = ((va >> 21) & 0x1FF) as usize;
+        let l1 = ((va >> 12) & 0x1FF) as usize;
+        let pdpt = match descend(pml4 as *mut u64, l4) {
+            Some(p) => p,
+            None => return false,
+        };
+        let pd = match descend(pdpt, l3) {
+            Some(p) => p,
+            None => return false,
+        };
+        let pt = match descend(pd, l2) {
+            Some(p) => p,
+            None => return false,
+        };
+        core::ptr::write(pt.add(l1), (pa & ADDR_MASK) | flags | PRESENT);
+        true
+    }
 }
 
 /// Allocates a page and maps it into `pml4` at `va`. Returns a pointer the

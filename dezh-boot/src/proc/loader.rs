@@ -180,16 +180,18 @@ unsafe fn walk_alloc(
     idx: usize,
     resources: &mut TaskResources,
 ) -> Option<*mut u64> {
-    let e = *table.add(idx);
-    if e & PTE_V != 0 {
-        Some((((e >> 10) << 12) as usize) as *mut u64) // existing next table
-    } else {
-        let frame = resources.alloc_frame();
-        if frame == 0 {
-            return None;
+    unsafe {
+        let e = *table.add(idx);
+        if e & PTE_V != 0 {
+            Some((((e >> 10) << 12) as usize) as *mut u64) // existing next table
+        } else {
+            let frame = resources.alloc_frame();
+            if frame == 0 {
+                return None;
+            }
+            *table.add(idx) = ((frame as u64 >> 12) << 10) | PTE_V; // non-leaf
+            Some(frame as *mut u64)
         }
-        *table.add(idx) = ((frame as u64 >> 12) << 10) | PTE_V; // non-leaf
-        Some(frame as *mut u64)
     }
 }
 
@@ -215,13 +217,15 @@ const USER_STACK_BOTTOM: usize = 0x406F_0000;
 
 /// Walk a page table to the frame backing `va` (page must already be mapped).
 unsafe fn translate(root: usize, va: usize) -> usize {
-    let vpn2 = (va >> 30) & 0x1ff;
-    let vpn1 = (va >> 21) & 0x1ff;
-    let vpn0 = (va >> 12) & 0x1ff;
-    let l1 = (((*(root as *const u64).add(vpn2)) >> 10) << 12) as usize;
-    let l0 = (((*(l1 as *const u64).add(vpn1)) >> 10) << 12) as usize;
-    let leaf = *(l0 as *const u64).add(vpn0);
-    ((leaf >> 10) << 12) as usize
+    unsafe {
+        let vpn2 = (va >> 30) & 0x1ff;
+        let vpn1 = (va >> 21) & 0x1ff;
+        let vpn0 = (va >> 12) & 0x1ff;
+        let l1 = (((*(root as *const u64).add(vpn2)) >> 10) << 12) as usize;
+        let l0 = (((*(l1 as *const u64).add(vpn1)) >> 10) << 12) as usize;
+        let leaf = *(l0 as *const u64).add(vpn0);
+        ((leaf >> 10) << 12) as usize
+    }
 }
 
 /// Build a fresh address space for the embedded program. Returns (satp root, entry).

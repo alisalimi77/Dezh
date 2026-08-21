@@ -129,10 +129,14 @@ pub fn task_caps_from(mcaps: u32, name: &str) -> usize {
     if mcaps & MCAP_UPTIME != 0 {
         c |= TASK_TIME;
     }
-    if mcaps & (MCAP_CAIRN_READ | MCAP_CAIRN_WRITE) != 0 {
-        if let Some(ns) = cairn_ns_id(name) {
-            c |= task_ns_cap(ns);
-        }
+    // A let-chain, available since this crate moved to edition 2024. Asking for
+    // Cairn and having a namespace to be granted are one condition: a manifest
+    // that requests storage under a name with no v1 namespace gets no storage
+    // capability, and nesting the two said that less directly.
+    if mcaps & (MCAP_CAIRN_READ | MCAP_CAIRN_WRITE) != 0
+        && let Some(ns) = cairn_ns_id(name)
+    {
+        c |= task_ns_cap(ns);
     }
     c
 }

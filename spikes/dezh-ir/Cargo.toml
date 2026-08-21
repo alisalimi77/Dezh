@@ -1,7 +1,7 @@
 [package]
 name = "dezh-ir"
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
 description = "Dezh Step 8 - WASM-like IR runtime contract and module validator."
 
 [dependencies]

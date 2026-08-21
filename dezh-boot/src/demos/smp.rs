@@ -13,6 +13,9 @@ use crate::smp::{
     BOOT_HART, HARTS_ONLINE, HART_TICKS, MAX_HARTS, NJOBS, SMP_LOCK_WORK, SMP_STARTED, SMP_WORK,
 };
 use crate::mm::paging::task_stack_top;
+use crate::proc::loader::ProcessSpec;
+use crate::sched::{join_secondaries, run_processes, CONSOLE_SMP_ON};
+use crate::{TASK_PRINT, USERPROG_ELF};
 use crate::smp::{ap_rogue_task, ap_spin_task, ap_worker_task};
 use crate::{kprint, kprintln};
 
@@ -290,6 +293,40 @@ pub(crate) fn run_smp_isolate_demo() {
             "ISOLATION-OK - concurrent tasks on different harts cannot reach each other's memory"
         } else {
             "ISOLATION-BROKEN"
+        }
+    );
+}
+
+/// `smp-console`: the merged scheduler — a secondary hart taking a task out of
+/// the **console's** table and running it on `utrap`, the real trap path.
+///
+/// Under diagnosis. It works from a cold console and wedges after any demo that
+/// has run a U-mode task on a secondary through the AP path, which is a
+/// different mechanism with its own slots and its own 74-line handler. See
+/// `docs/ROADMAP.md` for what has been ruled out, and
+/// `tools/debug/hart_pcs.py` for where each hart actually is when it stops.
+pub(crate) fn run_smp_console_demo() {
+    let boot = BOOT_HART.load(Ordering::Relaxed);
+    if SMP_STARTED.load(Ordering::Relaxed) == 0 {
+        kprintln!("[smp-console] no secondary harts. Launch QEMU with -smp N.");
+        return;
+    }
+    kprintln!(
+        "[smp-console] opening the console scheduler to every hart (boot hart {boot}); 3 loaded processes"
+    );
+    CONSOLE_SMP_ON.store(true, Ordering::Release);
+    run_processes(&[
+        ProcessSpec::new(USERPROG_ELF, TASK_PRINT, 1),
+        ProcessSpec::new(USERPROG_ELF, TASK_PRINT, 2),
+        ProcessSpec::new(USERPROG_ELF, TASK_PRINT, 3),
+    ]);
+    let joined = join_secondaries();
+    kprintln!(
+        "[smp-console] verdict -> {}",
+        if joined {
+            "RETURNED - every hart handed its task back"
+        } else {
+            "TIMEOUT - a secondary never gave its task back"
         }
     );
 }

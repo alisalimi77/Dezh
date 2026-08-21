@@ -169,29 +169,32 @@ const PKG_BLOB_LAST_SECTOR: u64 = 1599;
 // namespace's head ref back along the parent chain; history is never erased.
 const CAIRN1_SUPER_SECTOR: u64 = 1600;
 const CAIRN1_COMMIT_FIRST_SECTOR: u64 = 1601;
-const CAIRN1_COMMIT_SLOTS: u32 = 255;
+const CAIRN1_COMMIT_SLOTS: u32 = dezh_core::cairn::COMMIT_SLOTS;
 const CAIRN1_NS_MAX: usize = 8;
-const CAIRN1_NONE: u32 = 0xffff_ffff;
-const CAIRN1_VALUE_OFF: usize = 64;
+const CAIRN1_NONE: u32 = dezh_core::cairn::NONE;
+const CAIRN1_VALUE_OFF: usize = dezh_core::cairn::VALUE_OFF;
 const CAIRN1_VALUE_MAX: usize = SECTOR_SIZE - CAIRN1_VALUE_OFF;
 // Sand enrichment lives in the commit-record header's previously-spare span
 // (offsets 36..64). It is additive: a freshly formatted store zeroes these, so
 // a direct/operator commit reads intent=0 (no Ahd). The DZC1 magic is unchanged
 // — Sand is the same commit record, richer, never a second log.
+// The offsets and the classes are `dezh_core::cairn`'s, not a second copy. They
+// were declared here and read back here, which meant the only thing checking the
+// format was that this file agreed with itself.
 const CAIRN1_OFF_INTENT: usize = 36; // u32: Ahd (intent) id; 0 = direct, no intent
 const CAIRN1_OFF_DERIVED: usize = 40; // u32: capability set derived under the Ahd
 const CAIRN1_OFF_REVCLASS: usize = 44; // u8: reversibility class (see SAND_REV_*)
 const CAIRN1_OFF_STATUS: usize = 45; // u8: effect status (see SAND_STATUS_*)
 const CAIRN1_OFF_GEN: usize = 46; // u16: this effect's generation on the ns chain
-const SAND_REV_REVERSIBLE: u8 = 0; // undo by moving the ref (a Cairn commit)
-const SAND_REV_COMPENSATABLE: u8 = 1; // undo needs a compensating effect
-const SAND_REV_IRREVERSIBLE: u8 = 2; // cannot be undone (e.g. an external send)
-const SAND_REV_UNKNOWN: u8 = 3; // connector did not declare — never assume reversible
-const SAND_STATUS_COMMITTED: u8 = 0;
+const SAND_REV_REVERSIBLE: u8 = dezh_core::cairn::rev::REVERSIBLE;
+const SAND_REV_COMPENSATABLE: u8 = dezh_core::cairn::rev::COMPENSATABLE;
+const SAND_REV_IRREVERSIBLE: u8 = dezh_core::cairn::rev::IRREVERSIBLE;
+const SAND_REV_UNKNOWN: u8 = dezh_core::cairn::rev::UNKNOWN;
+const SAND_STATUS_COMMITTED: u8 = dezh_core::cairn::status::COMMITTED;
 // A compensating action recorded during a Sfar rollback. It is a first-class,
 // accountable effect on the ledger — the honest way to "undo" a compensatable
 // effect is to perform and RECORD an inverse action, never to erase the record.
-const SAND_STATUS_COMPENSATION: u8 = 2;
+const SAND_STATUS_COMPENSATION: u8 = dezh_core::cairn::status::COMPENSATION;
 // The unit separator inside a compensatable effect's value: "forward\x1fcompensation".
 // The connector supplies the compensating action at commit time; the daemon
 // persists it in the commit record and replays it as a logged effect on rollback.
@@ -209,8 +212,8 @@ fn panic(_: &core::panic::PanicInfo) -> ! {
     loop {}
 }
 
-#[no_mangle]
-#[link_section = ".text._start"]
+#[unsafe(no_mangle)]
+#[unsafe(link_section = ".text._start")]
 extern "C" fn _start() -> ! {
     unsafe {
         asm!(
@@ -635,11 +638,11 @@ fn print_sand_record(slot: u32) {
     let derived = d_read_u32(CAIRN1_OFF_DERIVED);
     let revclass = d_read_u8(CAIRN1_OFF_REVCLASS);
     let status = d_read_u8(CAIRN1_OFF_STATUS);
-    let gen = (d_read_u8(CAIRN1_OFF_GEN) as u16) | ((d_read_u8(CAIRN1_OFF_GEN + 1) as u16) << 8);
+    let generation = (d_read_u8(CAIRN1_OFF_GEN) as u16) | ((d_read_u8(CAIRN1_OFF_GEN + 1) as u16) << 8);
     sys_print(b"slot=");
     print_num(slot as usize);
     sys_print(b" gen=");
-    print_num(gen as usize);
+    print_num(generation as usize);
     sys_print(b" actor=task");
     print_num(d_read_u32(24) as usize);
     sys_print(b" intent=");
@@ -740,24 +743,24 @@ fn cairn_commit(
     // now doubles as a Sand effect record: actor + intent(Ahd) + derived cap +
     // reversibility class + status + generation, all on the same commit.
     zero_data();
-    set_data(b"DZC1");
-    d_write_u32(4, next);
-    d_write_u32(8, head); // parent
-    d_write_u32(12, ns as u32);
-    d_write_u64(16, hash);
-    d_write_u32(24, from as u32); // actor (kernel task id)
-    d_write_u32(28, 1); // flags bit0: reversible
-    d_write_u32(32, len as u32);
-    // Sand enrichment (offsets 36..48).
-    d_write_u32(CAIRN1_OFF_INTENT, intent);
-    d_write_u32(CAIRN1_OFF_DERIVED, derived);
-    let gen = count + 1;
-    unsafe {
-        core::ptr::write_volatile(data_ptr().add(CAIRN1_OFF_REVCLASS), rev_class);
-        core::ptr::write_volatile(data_ptr().add(CAIRN1_OFF_STATUS), SAND_STATUS_COMMITTED);
-        core::ptr::write_volatile(data_ptr().add(CAIRN1_OFF_GEN), gen as u8);
-        core::ptr::write_volatile(data_ptr().add(CAIRN1_OFF_GEN + 1), (gen >> 8) as u8);
+    let generation = count + 1;
+    // One encoder, host-tested against real records, writing through this
+    // daemon's own volatile access to the DMA page.
+    dezh_core::cairn::CommitHeader {
+        slot: next,
+        parent: head,
+        ns: ns as u32,
+        hash,
+        actor: from as u32,
+        flags: 1, // bit0: reversible
+        len: len as u32,
+        intent,
+        derived,
+        rev_class,
+        status: SAND_STATUS_COMMITTED,
+        generation: generation as u16,
     }
+    .encode(|off, b| unsafe { core::ptr::write_volatile(data_ptr().add(off), b) });
     unsafe {
         core::ptr::copy_nonoverlapping(
             (DMA_VA + INPUT_OFF) as *const u8,
@@ -912,7 +915,7 @@ fn append_commit_raw(
     intent: u32,
     derived: u32,
     status: u8,
-    gen: u32,
+    generation: u32,
 ) -> bool {
     let len = value.len().min(CAIRN1_VALUE_MAX - 1);
     let hash = fnv64(value.as_ptr(), len);
@@ -930,8 +933,8 @@ fn append_commit_raw(
     unsafe {
         core::ptr::write_volatile(data_ptr().add(CAIRN1_OFF_REVCLASS), SAND_REV_REVERSIBLE);
         core::ptr::write_volatile(data_ptr().add(CAIRN1_OFF_STATUS), status);
-        core::ptr::write_volatile(data_ptr().add(CAIRN1_OFF_GEN), gen as u8);
-        core::ptr::write_volatile(data_ptr().add(CAIRN1_OFF_GEN + 1), (gen >> 8) as u8);
+        core::ptr::write_volatile(data_ptr().add(CAIRN1_OFF_GEN), generation as u8);
+        core::ptr::write_volatile(data_ptr().add(CAIRN1_OFF_GEN + 1), (generation >> 8) as u8);
         core::ptr::copy_nonoverlapping(value.as_ptr(), data_ptr().add(CAIRN1_VALUE_OFF), len);
     }
     rw(dma_base, CAIRN1_COMMIT_FIRST_SECTOR + slot as u64, true) == 0
@@ -1181,7 +1184,7 @@ fn sfar_rollback(dma_base: usize, ahd: u32, sender_caps: usize, from: usize) -> 
                         k += 1;
                     }
                     let slot = next_free;
-                    let gen = count[ns].saturating_sub(undone[ns]) + 1;
+                    let generation = count[ns].saturating_sub(undone[ns]) + 1;
                     let ok = append_commit_raw(
                         dma_base,
                         slot,
@@ -1192,7 +1195,7 @@ fn sfar_rollback(dma_base: usize, ahd: u32, sender_caps: usize, from: usize) -> 
                         ahd,
                         derived,
                         SAND_STATUS_COMPENSATION,
-                        gen,
+                        generation,
                     );
                     if !ok {
                         return IPC_STATUS_IO_FAILURE;

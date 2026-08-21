@@ -530,6 +530,7 @@ pub(crate) fn dispatch(cmd: &str, arg: &str, plan: &KernelPlan, memory: &[Memory
         "smp-preempt" => run_smp_preempt_demo(),
         "smp-sched" => run_smp_sched_demo(),
         "smp-isolate" => run_smp_isolate_demo(),
+        "smp-console" => run_smp_console_demo(),
         "ns-revoke" => ns_revoke(plan, arg),
         "ns-grant" => ns_grant(plan, arg),
         "nsrevoke-demo" => run_nsrevoke_demo(plan),
@@ -840,7 +841,7 @@ pub(crate) fn read_line(buf: &mut [u8]) -> usize {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn kmain(hart_id: usize, _fdt: usize) -> ! {
     Uart.init();
     // SBI hands the boot hart's id in a0. Capture it before anything else needs a0.

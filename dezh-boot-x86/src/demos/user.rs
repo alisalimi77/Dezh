@@ -70,7 +70,7 @@ user_bad_end:
 "#
 );
 
-extern "C" {
+unsafe extern "C" {
     static user_good_start: u8;
     static user_good_end: u8;
     static user_bad_start: u8;

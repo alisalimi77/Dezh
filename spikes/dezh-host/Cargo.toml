@@ -1,7 +1,7 @@
 [package]
 name = "dezh-host"
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
 description = "Dezh Step 1 — capability runtime + in-memory resource backend for WASM guests."
 
 [dependencies]

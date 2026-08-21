@@ -17,7 +17,7 @@
 //! "only one hart reaches it".
 
 use core::arch::asm;
-use core::sync::atomic::Ordering;
+use core::sync::atomic::{AtomicBool, Ordering};
 
 use crate::dev::plic::{EXT_IRQS, SCAUSE_EXTERNAL};
 use crate::proc::loader::{ProcessSpec, EMPTY_TASK_RESOURCES, TaskKind, TaskResources};
@@ -27,7 +27,7 @@ use crate::abi::{
     typed_word, FIRST_FOREGROUND_TASK, IPC_OP_TIMEOUT, IPC_SERVICE_SYSTEM, IPC_STATUS_TIMEOUT,
 };
 use crate::arch::finisher::{shutdown, FINISH_FAIL};
-use crate::arch::timer::{rdtime, sbi_set_timer, QUANTUM, TICKS, TIMER_DELTA};
+use crate::arch::timer::{rdtime, sbi_set_timer, QUANTUM, STIE, TICKS, TIMER_DELTA};
 use crate::mm::global::Global;
 use crate::smp::{current_hart, BOOT_HART, MAX_HARTS};
 use crate::sync::TicketLock;
@@ -156,11 +156,15 @@ const NO_TASK: usize = usize::MAX;
 /// The running task on the calling hart. Every read and write of it goes
 /// through this pair, so the hart index cannot be dropped at one site.
 unsafe fn current_task() -> usize {
-    (*CURRENT.get())[current_hart()]
+    unsafe {
+        (*CURRENT.get())[current_hart()]
+    }
 }
 
 unsafe fn set_current_task(i: usize) {
-    (*CURRENT.get())[current_hart()] = i;
+    unsafe {
+        (*CURRENT.get())[current_hart()] = i;
+    }
 }
 
 fn clear_mailbox(i: usize) {
@@ -174,53 +178,57 @@ fn clear_mailbox(i: usize) {
 }
 
 unsafe fn recv_message_into(task: usize, frame: &mut [usize]) -> bool {
-    if (*MBOX.get())[task].count == 0 {
-        return false;
+    unsafe {
+        if (*MBOX.get())[task].count == 0 {
+            return false;
+        }
+        let head = (*MBOX.get())[task].head;
+        let msg = (*MBOX.get())[task].slots[head];
+        let n = msg.len.min(frame[F_A1]);
+        if n > 0 {
+            let dst = core::slice::from_raw_parts_mut(frame[F_A0] as *mut u8, n);
+            dst.copy_from_slice(&msg.buf[..n]);
+        }
+        (*TCAPS.get())[task] |= msg.grant;
+        (*MBOX.get())[task].slots[head] = EMPTY_IPC_MESSAGE;
+        (*MBOX.get())[task].head = (head + 1) % MAILBOX_DEPTH;
+        (*MBOX.get())[task].count -= 1;
+        frame[F_A0] = n;
+        frame[F_A1] = msg.from;
+        frame[F_A2] = msg.word;
+        // Services check the SENDER's authority (not their own) against this
+        // kernel-attested value; a client cannot forge it from user space.
+        frame[F_A3] = msg.sender_caps;
+        (*IPC_STATS.get()).receives += 1;
+        true
     }
-    let head = (*MBOX.get())[task].head;
-    let msg = (*MBOX.get())[task].slots[head];
-    let n = msg.len.min(frame[F_A1]);
-    if n > 0 {
-        let dst = core::slice::from_raw_parts_mut(frame[F_A0] as *mut u8, n);
-        dst.copy_from_slice(&msg.buf[..n]);
-    }
-    (*TCAPS.get())[task] |= msg.grant;
-    (*MBOX.get())[task].slots[head] = EMPTY_IPC_MESSAGE;
-    (*MBOX.get())[task].head = (head + 1) % MAILBOX_DEPTH;
-    (*MBOX.get())[task].count -= 1;
-    frame[F_A0] = n;
-    frame[F_A1] = msg.from;
-    frame[F_A2] = msg.word;
-    // Services check the SENDER's authority (not their own) against this
-    // kernel-attested value; a client cannot forge it from user space.
-    frame[F_A3] = msg.sender_caps;
-    (*IPC_STATS.get()).receives += 1;
-    true
 }
 
 unsafe fn expire_recv_timeouts() {
-    let now = TICKS.load(Ordering::Relaxed);
-    let mut i = 0usize;
-    while i < MAX_TASKS {
-        if (*TRECV_WAITING.get())[i] && (*TSTATE.get())[i] == TaskState::Blocked && (*TRECV_DEADLINE.get())[i] <= now {
-            if (*MBOX.get())[i].count > 0 {
-                (*TRECV_WAITING.get())[i] = false;
-                (*TSTATE.get())[i] = TaskState::Ready;
-            } else {
-                (*TRECV_WAITING.get())[i] = false;
-                (*TRECV_DEADLINE.get())[i] = 0;
-                (*TRECV_PTR.get())[i] = 0;
-                (*TRECV_LEN.get())[i] = 0;
-                (*FRAMES.get())[i][F_SEPC] += 4;
-                (*FRAMES.get())[i][F_A0] = IPC_STATUS_TIMEOUT;
-                (*FRAMES.get())[i][F_A1] = usize::MAX;
-                (*FRAMES.get())[i][F_A2] =
-                    typed_word(IPC_SERVICE_SYSTEM, IPC_OP_TIMEOUT, 0, IPC_STATUS_TIMEOUT, 0);
-                (*TSTATE.get())[i] = TaskState::Ready;
-                (*IPC_STATS.get()).timeouts += 1;
+    unsafe {
+        let now = TICKS.load(Ordering::Relaxed);
+        let mut i = 0usize;
+        while i < MAX_TASKS {
+            if (*TRECV_WAITING.get())[i] && (*TSTATE.get())[i] == TaskState::Blocked && (*TRECV_DEADLINE.get())[i] <= now {
+                if (*MBOX.get())[i].count > 0 {
+                    (*TRECV_WAITING.get())[i] = false;
+                    (*TSTATE.get())[i] = TaskState::Ready;
+                } else {
+                    (*TRECV_WAITING.get())[i] = false;
+                    (*TRECV_DEADLINE.get())[i] = 0;
+                    (*TRECV_PTR.get())[i] = 0;
+                    (*TRECV_LEN.get())[i] = 0;
+                    (*FRAMES.get())[i][F_SEPC] += 4;
+                    (*FRAMES.get())[i][F_A0] = IPC_STATUS_TIMEOUT;
+                    (*FRAMES.get())[i][F_A1] = usize::MAX;
+                    (*FRAMES.get())[i][F_A2] =
+                        typed_word(IPC_SERVICE_SYSTEM, IPC_OP_TIMEOUT, 0, IPC_STATUS_TIMEOUT, 0);
+                    (*TSTATE.get())[i] = TaskState::Ready;
+                    (*IPC_STATS.get()).timeouts += 1;
+                }
             }
+            i += 1;
         }
-        i += 1;
     }
 }
 
@@ -353,18 +361,20 @@ fn frame_ptr(i: usize) -> *mut usize {
 }
 
 unsafe fn pick_next() -> Option<usize> {
-    expire_recv_timeouts();
-    // Resume after the task this hart ran last, or at 0 if it is arriving from
-    // the console with nothing to resume after.
-    let cur = current_task();
-    let start = if cur == NO_TASK { 0 } else { cur + 1 };
-    for off in 0..MAX_TASKS {
-        let i = (start + off) % MAX_TASKS;
-        if (*TSTATE.get())[i] == TaskState::Ready && !claimed_elsewhere(i) && runnable_here(i) {
-            return Some(i);
+    unsafe {
+        expire_recv_timeouts();
+        // Resume after the task this hart ran last, or at 0 if it is arriving from
+        // the console with nothing to resume after.
+        let cur = current_task();
+        let start = if cur == NO_TASK { 0 } else { cur + 1 };
+        for off in 0..MAX_TASKS {
+            let i = (start + off) % MAX_TASKS;
+            if (*TSTATE.get())[i] == TaskState::Ready && !claimed_elsewhere(i) && runnable_here(i) {
+                return Some(i);
+            }
         }
+        None
     }
-    None
 }
 
 /// May the calling hart run task `i`?
@@ -383,7 +393,9 @@ unsafe fn pick_next() -> Option<usize> {
 /// halt stays there as a backstop: it catches a task reaching dispatch by some
 /// path that did not come through here.
 unsafe fn runnable_here(i: usize) -> bool {
-    current_hart() == BOOT_HART.load(Ordering::Relaxed) || (*TSATP.get())[i] != kernel_satp()
+    unsafe {
+        current_hart() == BOOT_HART.load(Ordering::Relaxed) || (*TSATP.get())[i] != kernel_satp()
+    }
 }
 
 /// Is another hart running task `i` right now?
@@ -399,8 +411,10 @@ unsafe fn runnable_here(i: usize) -> bool {
 /// write `TaskState`, and every one of them would have to get the
 /// Ready/Running distinction right for a property none of them are about.
 unsafe fn claimed_elsewhere(i: usize) -> bool {
-    let me = current_hart();
-    (0..MAX_HARTS).any(|h| h != me && (*CURRENT.get())[h] == i)
+    unsafe {
+        let me = current_hart();
+        (0..MAX_HARTS).any(|h| h != me && (*CURRENT.get())[h] == i)
+    }
 }
 
 /// Pick the next Ready task and return its frame, or longjmp back to the console
@@ -409,7 +423,9 @@ unsafe fn claimed_elsewhere(i: usize) -> bool {
 /// IPC is waiting for another task, not for hardware - idling for it would wait
 /// for an interrupt that is never coming.
 unsafe fn any_irq_waiting() -> bool {
-    (0..MAX_TASKS).any(|i| (*TIRQ_WAITING.get())[i] && (*TSTATE.get())[i] == TaskState::Blocked)
+    unsafe {
+        (0..MAX_TASKS).any(|i| (*TIRQ_WAITING.get())[i] && (*TSTATE.get())[i] == TaskState::Blocked)
+    }
 }
 
 /// Idle until hardware makes someone runnable. We service the PLIC by hand
@@ -417,126 +433,130 @@ unsafe fn any_irq_waiting() -> bool {
 /// `sstatus.SIE`, so a pending interrupt would wake `wfi` but never be taken,
 /// and the blocked task would never be woken. Claiming it here closes that hole.
 unsafe fn idle_until_device() {
-    const IDLE_LIMIT: u64 = 50_000_000;
-    let mut spins = 0u64;
-    loop {
-        // The test reads the task table, so it takes the lock - and gives it
-        // back before sleeping. `plic_handle` below takes the same lock through
-        // `wake_irq_waiters`, so holding it across the wait would leave this
-        // hart waiting for a lock only it can release, with the release on the
-        // far side of the wait.
-        let idle = {
-            let _held = SCHED_LOCK.lock();
-            pick_next().is_none() && any_irq_waiting()
-        };
-        if !idle {
-            return;
-        }
-        asm!("wfi");
-        plic_handle();
-        spins += 1;
-        if spins > IDLE_LIMIT {
-            // A device that never reports back must not wedge the machine.
-            return;
+    unsafe {
+        const IDLE_LIMIT: u64 = 50_000_000;
+        let mut spins = 0u64;
+        loop {
+            // The test reads the task table, so it takes the lock - and gives it
+            // back before sleeping. `plic_handle` below takes the same lock through
+            // `wake_irq_waiters`, so holding it across the wait would leave this
+            // hart waiting for a lock only it can release, with the release on the
+            // far side of the wait.
+            let idle = {
+                let _held = SCHED_LOCK.lock();
+                pick_next().is_none() && any_irq_waiting()
+            };
+            if !idle {
+                return;
+            }
+            asm!("wfi");
+            plic_handle();
+            spins += 1;
+            if spins > IDLE_LIMIT {
+                // A device that never reports back must not wedge the machine.
+                return;
+            }
         }
     }
 }
 
 unsafe fn schedule_or_return() -> *const usize {
-    // Nothing ready but something blocked means work is pending on a device:
-    // wait for it instead of abandoning the run. This is what makes blocking on
-    // I/O possible at all - without it the kernel returns from the task loop and
-    // orphans the sleeping driver.
-    //
-    // The lock is taken twice on purpose rather than held across the middle.
-    // `idle_until_device` sleeps and services the PLIC, which reaches
-    // `wake_irq_waiters` and this same lock; a hart holding it there would be
-    // waiting for itself. Re-deciding after the wait is not a cost, it is the
-    // point - the wait exists precisely because the answer was expected to
-    // change.
-    // Only the boot hart may idle for a device, because idling *services* the
-    // PLIC by hand and the PLIC is routed to the boot hart's S-mode context. A
-    // secondary claiming there would take an interrupt meant for another hart
-    // and acknowledge it on its behalf. A secondary with nothing to run has a
-    // better answer anyway: return, and let its caller look for other work.
-    let should_idle = current_hart() == BOOT_HART.load(Ordering::Relaxed) && {
-        let _held = SCHED_LOCK.lock();
-        pick_next().is_none() && any_irq_waiting()
-    };
-    if should_idle {
-        idle_until_device();
-    }
-
-    // The address-space switch belongs inside the critical section with the
-    // choice that produced it: picking task `i` and then having another hart
-    // change `TSATP[i]` before the write would install a page table for a task
-    // this hart is no longer about to run.
-    let next = {
-        let _held = SCHED_LOCK.lock();
-        match pick_next() {
-            Some(i) => {
-                // The backstop for `runnable_here`, which is where the rule is
-                // now enforced. `pick_next` cannot return such a task to a
-                // secondary any more, so reaching this means a task arrived at
-                // dispatch by a path that did not go through the filter - and
-                // the consequence is a corruption rather than a crash, so it
-                // halts instead of correcting itself.
-                if current_hart() != BOOT_HART.load(Ordering::Relaxed)
-                    && (*TSATP.get())[i] == kernel_satp()
-                {
-                    kprintln!(
-                        "
-[dezh-boot] FATAL: hart {} picked task {i}, which shares the kernel address space -- halting",
-                        current_hart()
-                    );
-                    shutdown(FINISH_FAIL);
-                }
-                set_current_task(i);
-                // Stamp the running hart into the frame before the task resumes,
-                // so `utrap` can restore kernel identity on the way back in.
-                (*FRAMES.get())[i][F_HART] = current_hart();
-                // Only a baked task needs this, and only a baked task can be
-                // harmed by it. Calling it for a loaded process wrote `PTE_U`
-                // onto baked stack region `i` in the L1 that every process root
-                // also points at - exposing 2 MiB of kernel RAM inside that
-                // process's address space for as long as it ran. No run mixes
-                // the two kinds, so that region held nothing and no task's data
-                // was reachable; it was slack, and it is now closed.
-                //
-                // It is also the last piece of global paging state written on
-                // every pick, which is what a second hart in this function would
-                // have raced on: one shared L1, last writer wins, and the loser's
-                // baked task faults on its own stack.
-                if (*TSATP.get())[i] == kernel_satp() {
-                    set_active_task_mem(i); // give the new task its stack, hide others
-                }
-                // Switch to the task's address space (own satp for a loaded
-                // process, the shared kernel satp for a baked task).
-                asm!("sfence.vma");
-                asm!("csrw satp, {}", in(reg) (*TSATP.get())[i]);
-                asm!("sfence.vma");
-                Some(frame_ptr(i) as *const usize)
-            }
-            None => {
-                // Leaving the scheduler: drop the claim here, inside the same
-                // section that reads claims, rather than on the far side of the
-                // longjmp - which never returns, so there is no far side.
-                // A hart that kept its claim would fence off a perfectly
-                // runnable task for the rest of the boot.
-                set_current_task(NO_TASK);
-                None
-            }
+    unsafe {
+        // Nothing ready but something blocked means work is pending on a device:
+        // wait for it instead of abandoning the run. This is what makes blocking on
+        // I/O possible at all - without it the kernel returns from the task loop and
+        // orphans the sleeping driver.
+        //
+        // The lock is taken twice on purpose rather than held across the middle.
+        // `idle_until_device` sleeps and services the PLIC, which reaches
+        // `wake_irq_waiters` and this same lock; a hart holding it there would be
+        // waiting for itself. Re-deciding after the wait is not a cost, it is the
+        // point - the wait exists precisely because the answer was expected to
+        // change.
+        // Only the boot hart may idle for a device, because idling *services* the
+        // PLIC by hand and the PLIC is routed to the boot hart's S-mode context. A
+        // secondary claiming there would take an interrupt meant for another hart
+        // and acknowledge it on its behalf. A secondary with nothing to run has a
+        // better answer anyway: return, and let its caller look for other work.
+        let should_idle = current_hart() == BOOT_HART.load(Ordering::Relaxed) && {
+            let _held = SCHED_LOCK.lock();
+            pick_next().is_none() && any_irq_waiting()
+        };
+        if should_idle {
+            idle_until_device();
         }
-    };
-    match next {
-        Some(f) => f,
-        // Outside the lock: this longjmps back to the console and never returns,
-        // so a guard here would never be dropped.
-        None => restore_kernel_ctx(),
+
+        // The address-space switch belongs inside the critical section with the
+        // choice that produced it: picking task `i` and then having another hart
+        // change `TSATP[i]` before the write would install a page table for a task
+        // this hart is no longer about to run.
+        let next = {
+            let _held = SCHED_LOCK.lock();
+            match pick_next() {
+                Some(i) => {
+                    // The backstop for `runnable_here`, which is where the rule is
+                    // now enforced. `pick_next` cannot return such a task to a
+                    // secondary any more, so reaching this means a task arrived at
+                    // dispatch by a path that did not go through the filter - and
+                    // the consequence is a corruption rather than a crash, so it
+                    // halts instead of correcting itself.
+                    if current_hart() != BOOT_HART.load(Ordering::Relaxed)
+                        && (*TSATP.get())[i] == kernel_satp()
+                    {
+                        kprintln!(
+                            "
+    [dezh-boot] FATAL: hart {} picked task {i}, which shares the kernel address space -- halting",
+                            current_hart()
+                        );
+                        shutdown(FINISH_FAIL);
+                    }
+                    set_current_task(i);
+                    // Stamp the running hart into the frame before the task resumes,
+                    // so `utrap` can restore kernel identity on the way back in.
+                    (*FRAMES.get())[i][F_HART] = current_hart();
+                    // Only a baked task needs this, and only a baked task can be
+                    // harmed by it. Calling it for a loaded process wrote `PTE_U`
+                    // onto baked stack region `i` in the L1 that every process root
+                    // also points at - exposing 2 MiB of kernel RAM inside that
+                    // process's address space for as long as it ran. No run mixes
+                    // the two kinds, so that region held nothing and no task's data
+                    // was reachable; it was slack, and it is now closed.
+                    //
+                    // It is also the last piece of global paging state written on
+                    // every pick, which is what a second hart in this function would
+                    // have raced on: one shared L1, last writer wins, and the loser's
+                    // baked task faults on its own stack.
+                    if (*TSATP.get())[i] == kernel_satp() {
+                        set_active_task_mem(i); // give the new task its stack, hide others
+                    }
+                    // Switch to the task's address space (own satp for a loaded
+                    // process, the shared kernel satp for a baked task).
+                    asm!("sfence.vma");
+                    asm!("csrw satp, {}", in(reg) (*TSATP.get())[i]);
+                    asm!("sfence.vma");
+                    Some(frame_ptr(i) as *const usize)
+                }
+                None => {
+                    // Leaving the scheduler: drop the claim here, inside the same
+                    // section that reads claims, rather than on the far side of the
+                    // longjmp - which never returns, so there is no far side.
+                    // A hart that kept its claim would fence off a perfectly
+                    // runnable task for the rest of the boot.
+                    set_current_task(NO_TASK);
+                    None
+                }
+            }
+        };
+        match next {
+            Some(f) => f,
+            // Outside the lock: this longjmps back to the console and never returns,
+            // so a guard here would never be dropped.
+            None => restore_kernel_ctx(),
+        }
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 extern "C" fn utrap_handler(frame_ptr: *mut usize) -> *const usize {
     let scause: usize;
     unsafe { asm!("csrr {}, scause", out(reg) scause) };
@@ -558,12 +578,19 @@ extern "C" fn utrap_handler(frame_ptr: *mut usize) -> *const usize {
             );
             shutdown(FINISH_FAIL);
         }
-        // Snapshot before any reschedule (avoids &static_mut), and under the
-        // lock because another hart may be choosing the next task right now.
-        let cur = {
-            let _held = SCHED_LOCK.lock();
-            current_task()
-        };
+        // The claim, read WITHOUT the lock, and that ordering is the point.
+        //
+        // `CURRENT[hart]` has exactly one writer - this hart, through
+        // `set_current_task`, which indexes by `current_hart()`. No other hart
+        // ever stores into this slot, so a bare read of it is sound and needs no
+        // section. What a section would add is a way to not get here at all: the
+        // check below exists for a hart that arrived in a trap holding no task,
+        // and reading `cur` from behind `SCHED_LOCK` made the guard depend on
+        // acquiring a lock in exactly the situation where the scheduler is the
+        // thing that has gone wrong. Measured, not supposed: at the wedge this
+        // handler is stopped in `Ticket::acquire` on this very line, on a hart
+        // whose claim is `NO_TASK` - the guard could never have fired.
+        let cur = current_task();
         // The identity check, and it names the invariant rather than a hart.
         //
         // It used to read `current_hart() != BOOT_HART`, which was true only
@@ -579,9 +606,11 @@ extern "C" fn utrap_handler(frame_ptr: *mut usize) -> *const usize {
         // Also load-bearing on its own: if the claim were dropped while the task
         // was live, another hart would be free to enter this same frame.
         if cur == NO_TASK {
+            let satp: usize;
+            asm!("csrr {}, satp", out(reg) satp);
             kprintln!(
                 "
-[dezh-boot] FATAL: trap on hart {} which holds no task -- halting",
+[dezh-boot] FATAL: trap on hart {} which holds no task (satp={satp:#x}, scause={scause:#x}) -- halting",
                 current_hart()
             );
             shutdown(FINISH_FAIL);
@@ -1073,6 +1102,101 @@ pub(crate) fn run_processes(specs: &[ProcessSpec]) {
             i += 1;
         }
     }
+}
+
+/// Off by default, and every existing demo depends on that.
+///
+/// A secondary joining the console scheduler changes which hart runs what, and
+/// therefore the order lines reach the UART. W13's acceptance says `smp-*` and
+/// every existing demo stay unchanged, so participation is opt-in for the run
+/// that wants to prove it rather than ambient for every run that does not.
+pub(crate) static CONSOLE_SMP_ON: AtomicBool = AtomicBool::new(false);
+
+/// A secondary hart takes one task from the console table and runs it.
+///
+/// This is the merge W13 exists for, and it is under active diagnosis: it works
+/// from a cold console and wedges after any demo that has run a U-mode task on a
+/// secondary through the AP path. `docs/ROADMAP.md` carries the evidence. It is
+/// in the tree behind a switch that is off so the defect can be reproduced with
+/// `tools/debug/hart_pcs.py` rather than reasoned about from what stopped
+/// printing.
+///
+/// Returns as soon as there is nothing this hart may run. It does not idle: only
+/// the boot hart owns the PLIC context, so waiting for a device is not this
+/// hart's job.
+pub(crate) fn secondary_serve() {
+    if !CONSOLE_SMP_ON.load(Ordering::Acquire) {
+        return;
+    }
+    unsafe {
+        // The claim and the address space it names, taken together, exactly as
+        // `schedule_or_return` does. Released before entering U-mode, because
+        // `run_first` comes back through `restore_kernel_ctx` and never here.
+        let next = {
+            let _held = SCHED_LOCK.lock();
+            match pick_next() {
+                Some(i) => {
+                    set_current_task(i);
+                    (*FRAMES.get())[i][F_HART] = current_hart();
+                    Some((i, (*TSATP.get())[i]))
+                }
+                None => None,
+            }
+        };
+        let Some((first, satp)) = next else {
+            return;
+        };
+
+        // `hart_main` runs bare: no trap vector, satp zero. Give this hart the
+        // console trap path, the task's address space, and SUM so the handler
+        // may read the task's U-mode pages - the same three the AP path sets.
+        asm!("csrw stvec, {}", in(reg) utrap as *const () as usize);
+        asm!("csrs sstatus, {}", in(reg) 1usize << 18);
+        asm!("sfence.vma");
+        asm!("csrw satp, {}", in(reg) satp);
+        asm!("sfence.vma");
+        sbi_set_timer(rdtime() + QUANTUM);
+        asm!("csrs sie, {}", in(reg) STIE);
+
+        run_first(frame_ptr(first) as *const usize);
+
+        // Back via `restore_kernel_ctx` once this hart found nothing more to
+        // run. Undo all three: the rounds `hart_main` serves next have no trap
+        // vector installed, so a timer arriving there would jump to zero.
+        asm!("csrc sie, {}", in(reg) STIE);
+        asm!("csrw stvec, {}", in(reg) 0usize);
+        asm!("sfence.vma");
+        asm!("csrw satp, {}", in(reg) 0usize);
+        asm!("sfence.vma");
+    }
+}
+
+/// Close the window and wait for every secondary to hand its task back.
+///
+/// `run_processes` returns as soon as the boot hart has nothing to run, and a
+/// task a secondary claimed is exactly that: invisible to `pick_next` here.
+/// Without this the console would come back while a task is still executing, and
+/// the next command that calls a run entry would wipe the table and free the
+/// frames of an address space a hart is running in.
+pub(crate) fn join_secondaries() -> bool {
+    const JOIN_SPIN_LIMIT: u64 = 300_000_000;
+    CONSOLE_SMP_ON.store(false, Ordering::Release);
+    let mut spins = 0u64;
+    while secondary_claims_outstanding() {
+        core::hint::spin_loop();
+        spins += 1;
+        if spins > JOIN_SPIN_LIMIT {
+            return false;
+        }
+    }
+    true
+}
+
+/// Does any hart other than the boot hart still hold a console task?
+fn secondary_claims_outstanding() -> bool {
+    let _held = SCHED_LOCK.lock();
+    let boot = BOOT_HART.load(Ordering::Relaxed);
+    unsafe { (0..MAX_HARTS).any(|h| h != boot && (*CURRENT.get())[h] != NO_TASK) }
 }
 
 pub(crate) fn run_scheduler_from(first: usize) {

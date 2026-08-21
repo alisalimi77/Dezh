@@ -7,6 +7,14 @@
 //! version pays for itself — W13 needs a third, over the scheduler's tables, and
 //! that one is where getting it wrong stops being cosmetic.
 //!
+//! The queue itself now lives in `dezh_core::sync::Ticket`, and what is left
+//! here is the half that is actually RISC-V: masking `sstatus.SIE`. That split
+//! is not tidiness. Welded together, the lock could only be exercised by booting
+//! a machine, and the one thing that could never be reached that way — the u32
+//! wraparound — was wrong: `next` was handed out with `fetch_add`, which wraps,
+//! while the release side did a plain `+ 1`, which on this kernel's dev profile
+//! aborts. Four billion acquisitions in, inside a `Drop`, while holding it.
+//!
 //! ## Why the lock masks interrupts
 //!
 //! `plic_handle` runs in interrupt context and writes `TIRQ_WAITING` and
@@ -36,7 +44,7 @@
 //! hold, so anything slow inside one is a latency bug even when it is correct.
 
 use core::arch::asm;
-use core::sync::atomic::{AtomicU32, Ordering};
+use dezh_core::sync::Ticket;
 
 /// `sstatus.SIE` — the supervisor global interrupt enable.
 const SSTATUS_SIE: usize = 1 << 1;
@@ -47,15 +55,13 @@ const SSTATUS_SIE: usize = 1 << 1;
 /// the way in and Release on the way out, so an ordinary read-modify-write
 /// inside the critical section is correct.
 pub(crate) struct TicketLock {
-    next: AtomicU32,
-    serving: AtomicU32,
+    queue: Ticket,
 }
 
 impl TicketLock {
     pub(crate) const fn new() -> Self {
         Self {
-            next: AtomicU32::new(0),
-            serving: AtomicU32::new(0),
+            queue: Ticket::new(),
         }
     }
 
@@ -66,10 +72,7 @@ impl TicketLock {
     /// lock" and "I cannot be interrupted" does not exist.
     pub(crate) fn lock(&self) -> Guard<'_> {
         let irq_was_on = irq_off();
-        let ticket = self.next.fetch_add(1, Ordering::Relaxed);
-        while self.serving.load(Ordering::Acquire) != ticket {
-            core::hint::spin_loop();
-        }
+        self.queue.acquire();
         Guard {
             lock: self,
             irq_was_on,
@@ -87,11 +90,7 @@ pub(crate) struct Guard<'a> {
 
 impl Drop for Guard<'_> {
     fn drop(&mut self) {
-        // Only the holder gets here and each release advances the queue by one,
-        // so a store is enough — no read-modify-write needed.
-        self.lock
-            .serving
-            .store(self.lock.serving.load(Ordering::Relaxed) + 1, Ordering::Release);
+        self.lock.queue.release();
         irq_restore(self.irq_was_on);
     }
 }

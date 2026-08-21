@@ -168,7 +168,11 @@ jobs:
           set -e
           python3 tools/docs/make_terminal_svg.py --scene redteam             --out docs/assets/demo-redteam.svg --verify smoke-riscv64.txt
           python3 tools/docs/make_terminal_svg.py --scene sfar             --out docs/assets/demo-sfar.svg --verify smoke-riscv64.txt
-          git diff --exit-code -- docs/assets/demo-redteam.svg docs/assets/demo-sfar.svg
+          # The overnight flagship is checked against its committed transcript
+          # rather than this run: `overnight` is driven by tools/demo, not by the
+          # smoke, so the transcript is the record it has to stay true to.
+          python3 tools/docs/make_terminal_svg.py --scene overnight --out docs/assets/demo-overnight.svg --verify docs/transcripts/overnight.md
+          git diff --exit-code -- docs/assets/demo-redteam.svg docs/assets/demo-sfar.svg docs/assets/demo-overnight.svg
 
       - name: Run SDK package install acceptance
         run: >

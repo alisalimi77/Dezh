@@ -22,8 +22,8 @@ fn panic(_: &core::panic::PanicInfo) -> ! {
     loop {}
 }
 
-#[no_mangle]
-#[link_section = ".text._start"]
+#[unsafe(no_mangle)]
+#[unsafe(link_section = ".text._start")]
 extern "C" fn _start() -> ! {
     unsafe {
         asm!(
@@ -170,7 +170,7 @@ fn role_deny_mmio() -> ! {
     sys_exit(2)
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 extern "C" fn main(role: usize, arg1: usize, arg2: usize, _arg3: usize) -> ! {
     match role {
         ROLE_UI => role_ui(arg1),

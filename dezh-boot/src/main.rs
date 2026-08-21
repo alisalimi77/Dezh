@@ -13,6 +13,11 @@
 //!      against the *task's* capabilities. A syscall the task wasn't granted is
 //!      denied — the Step 1 thesis, now enforced by hardware privilege levels.
 
+// Edition 2024 stops treating an `unsafe fn` body as an implicit `unsafe`
+// block. Denying it an edition early means the compiler names every one of
+// those bodies while the crate still builds either way, instead of the bump
+// arriving as a wall of errors with nothing to check them against.
+#![deny(unsafe_op_in_unsafe_fn)]
 #![no_std]
 #![no_main]
 
@@ -465,7 +470,7 @@ const KTRAP_STACK_BYTES: usize = 8192;
 /// restores the kernel's `tp` from the frame's hart stamp before any of this
 /// runs; without that, `restore_kernel_ctx` - which is called from inside the
 /// handler - would have indexed with a value the task chose.
-#[no_mangle]
+#[unsafe(no_mangle)]
 static mut KCTX: [[usize; KCTX_WORDS]; MAX_HARTS] = [[0; KCTX_WORDS]; MAX_HARTS];
 
 /// Layout MUST match the push order in `trap_entry`. Most fields exist only to
@@ -521,7 +526,7 @@ const TASK_BLOCK_READ: usize = 1 << 4;
 const TASK_BLOCK_WRITE: usize = 1 << 5;
 static CURRENT_TASK_CAPS: AtomicUsize = AtomicUsize::new(0);
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 extern "C" fn trap_handler(frame: *mut TrapFrame) {
     let scause: usize;
     unsafe { asm!("csrr {}, scause", out(reg) scause) };
@@ -636,7 +641,7 @@ fn user_region() -> (usize, usize) {
 }
 
 // --- Syscall wrappers — these run in U-mode, so they live in the user region. --
-#[link_section = ".user.text"]
+#[unsafe(link_section = ".user.text")]
 #[inline(never)]
 fn sys_print(s: &[u8]) -> usize {
     let mut a0 = s.as_ptr() as usize;
@@ -644,7 +649,7 @@ fn sys_print(s: &[u8]) -> usize {
     a0
 }
 
-#[link_section = ".user.text"]
+#[unsafe(link_section = ".user.text")]
 #[inline(never)]
 fn sys_uptime() -> usize {
     let mut a0: usize = 0;
@@ -652,7 +657,7 @@ fn sys_uptime() -> usize {
     a0
 }
 
-#[link_section = ".user.text"]
+#[unsafe(link_section = ".user.text")]
 #[inline(never)]
 fn sys_exit(code: usize) -> ! {
     unsafe { asm!("ecall", in("a0") code, in("a7") SYS_EXIT, options(noreturn)) }
@@ -660,8 +665,8 @@ fn sys_exit(code: usize) -> ! {
 
 /// A well-behaved U-mode task: granted PRINT but not TIME, so its `sys_uptime`
 /// is denied at the kernel boundary, then it exits cleanly.
-#[link_section = ".user.text"]
-#[no_mangle]
+#[unsafe(link_section = ".user.text")]
+#[unsafe(no_mangle)]
 extern "C" fn user_task() -> ! {
     sys_print(b"  [task] hello from a U-mode task (zero ambient authority)\n");
     let t = sys_uptime();
@@ -678,8 +683,8 @@ extern "C" fn user_task() -> ! {
 /// hardware access). With paging on, the UART is a supervisor-only page, so the
 /// store page-faults and the kernel kills the task — proof that authority is
 /// denied at the hardware memory boundary, not just at the syscall boundary.
-#[link_section = ".user.text"]
-#[no_mangle]
+#[unsafe(link_section = ".user.text")]
+#[unsafe(no_mangle)]
 extern "C" fn rogue_task() -> ! {
     // Store straight to the UART MMIO. We emit the `sb` inline (not via
     // core::ptr::write_volatile, which in a debug build is an out-of-line call

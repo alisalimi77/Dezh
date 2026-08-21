@@ -1,7 +1,7 @@
 [package]
 name = "dezh-kernel"
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
 description = "Dezh Step 10 - minimal kernel boot contract scaffold."
 
 [dependencies]

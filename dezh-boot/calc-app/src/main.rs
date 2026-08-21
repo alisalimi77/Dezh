@@ -20,8 +20,8 @@ fn panic(_: &core::panic::PanicInfo) -> ! {
     loop {}
 }
 
-#[no_mangle]
-#[link_section = ".text._start"]
+#[unsafe(no_mangle)]
+#[unsafe(link_section = ".text._start")]
 extern "C" fn _start() -> ! {
     unsafe {
         asm!(
@@ -89,7 +89,7 @@ fn eval(op: usize, a: usize, b: usize) -> Option<usize> {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 extern "C" fn main(role: usize, op: usize, a: usize, b: usize) -> ! {
     if role == ROLE_RUN {
         sys_print(b"\n");

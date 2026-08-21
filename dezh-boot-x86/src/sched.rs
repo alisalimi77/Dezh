@@ -114,7 +114,9 @@ pub(crate) const FRAME_CS: usize = 18;
 /// Safety: `frame` must be a frame the interrupt stub saved or `build_frame`
 /// wrote, and `slot` must be one of the offsets above.
 pub(crate) unsafe fn frame_get(frame: u64, slot: usize) -> u64 {
-    core::ptr::read((frame as *const u64).add(slot))
+    unsafe {
+        core::ptr::read((frame as *const u64).add(slot))
+    }
 }
 
 /// Writes one qword into a saved frame — how a syscall returns a value: the
@@ -122,7 +124,9 @@ pub(crate) unsafe fn frame_get(frame: u64, slot: usize) -> u64 {
 ///
 /// Safety: as `frame_get`.
 pub(crate) unsafe fn frame_set(frame: u64, slot: usize, value: u64) {
-    core::ptr::write((frame as *mut u64).add(slot), value);
+    unsafe {
+        core::ptr::write((frame as *mut u64).add(slot), value);
+    }
 }
 
 /// Builds a frame that `isr_ext_common` will restore into a task starting at
@@ -139,44 +143,50 @@ unsafe fn write_frame(
     ss: u16,
     task_rsp: u64,
 ) -> u64 {
-    let mut sp = (stack_top as u64) & !0xF;
-    let mut push = |v: u64| {
-        sp -= 8;
-        core::ptr::write(sp as *mut u64, v);
-    };
-    push(ss as u64);
-    push(task_rsp); // the rsp the task runs on once iretq has restored it
-    push(0x202); // rflags: interrupts enabled, plus the always-set bit 1
-    push(cs as u64);
-    push(rip);
-    push(0); // the stub's dummy error code
-    push(timer::VEC_TIMER as u64); // the stub's vector slot
-    // Whatever is left of the frame after the 5-qword iretq part and the stub's
-    // 2: the 15 general-purpose registers, all zero for a task that has not run.
-    for _ in 0..FRAME_QWORDS - 7 {
-        push(0);
+    unsafe {
+        let mut sp = (stack_top as u64) & !0xF;
+        let mut push = |v: u64| {
+            sp -= 8;
+            core::ptr::write(sp as *mut u64, v);
+        };
+        push(ss as u64);
+        push(task_rsp); // the rsp the task runs on once iretq has restored it
+        push(0x202); // rflags: interrupts enabled, plus the always-set bit 1
+        push(cs as u64);
+        push(rip);
+        push(0); // the stub's dummy error code
+        push(timer::VEC_TIMER as u64); // the stub's vector slot
+        // Whatever is left of the frame after the 5-qword iretq part and the stub's
+        // 2: the 15 general-purpose registers, all zero for a task that has not run.
+        for _ in 0..FRAME_QWORDS - 7 {
+            push(0);
+        }
+        sp
     }
-    sp
 }
 
 /// A kernel task: it runs on the same stack the frame sits on, and `ss` stays
 /// null, which is legal at CPL0 in long mode and is what boot left it as.
 unsafe fn build_frame(stack_top: *mut u8, entry: extern "C" fn() -> !) -> u64 {
-    let top = (stack_top as u64) & !0xF;
-    write_frame(stack_top, entry as usize as u64, gdt::KERNEL_CS, 0, top)
+    unsafe {
+        let top = (stack_top as u64) & !0xF;
+        write_frame(stack_top, entry as usize as u64, gdt::KERNEL_CS, 0, top)
+    }
 }
 
 /// A user task: `cs` and `ss` name the ring-3 descriptors, and the stack it runs
 /// on is its own, not the kernel stack the frame is written to. `iretq` reading
 /// a `cs` whose RPL is 3 is exactly what drops the CPU to CPL3.
 unsafe fn build_user_frame(kstack_top: *mut u8, entry_va: u64, ustack_top: u64) -> u64 {
-    write_frame(
-        kstack_top,
-        entry_va,
-        gdt::USER_CS,
-        gdt::USER_DS,
-        ustack_top & !0xF,
-    )
+    unsafe {
+        write_frame(
+            kstack_top,
+            entry_va,
+            gdt::USER_CS,
+            gdt::USER_DS,
+            ustack_top & !0xF,
+        )
+    }
 }
 
 /// Grants task `id` exactly `caps`. Must be called after `spawn_user` and before

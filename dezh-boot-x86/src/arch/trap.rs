@@ -151,7 +151,7 @@ isr_table:
 "#
 );
 
-extern "C" {
+unsafe extern "C" {
     static isr_table: [u64; 32];
     /// First byte of the vector-32..255 stub table; the stubs have no labels of
     /// their own, only a fixed stride (see the .rept block above).
@@ -299,7 +299,7 @@ fn exception(vector: u64, frame: u64) -> u64 {
 /// and a handler that printed could interleave with a print the interrupted code
 /// was halfway through. The one path that does print is the one that never
 /// returns.
-#[no_mangle]
+#[unsafe(no_mangle)]
 extern "C" fn irq_dispatch(vector: u64, frame: u64) -> u64 {
     if vector < 32 {
         return exception(vector, frame);

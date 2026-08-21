@@ -5,8 +5,15 @@
 [package]
 name = "marz"
 version = "0.0.0"
-edition = "2021"
+edition = "2024"
 publish = false
+
+# For the internet checksum only. The arithmetic lives in `dezh-core` so it can
+# be host-tested with real inputs; the volatile reads out of the DMA window stay
+# here, where they belong. Unused items (the signature verifier and the rest) are
+# dead-stripped by LTO in the release profile this daemon is built with.
+[dependencies]
+dezh-core = { path = "../../dezh-core" }
 
 [[bin]]
 name = "marz"

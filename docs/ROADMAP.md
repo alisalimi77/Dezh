@@ -883,12 +883,125 @@ tree, because it hangs. What was measured before backing it out:
 - Not `run_processes` itself: after `smp-task`, the existing `procs` command —
   the same entry with the switch off — is fine.
 
-The leading suspicion, unproven, is per-hart CSR state the AP path leaves behind
-and `secondary_serve` does not reset — `sscratch` is the one both trap paths use
-for different structures, and `frame_restore` only sets it at the very end of
-`run_first`. A trap taken in the window between `csrw stvec, utrap` and that
-store would enter `utrap` with the AP path's `sscratch` and save a console task's
-registers into an `ApCtx`. Proving or refuting that is the next step's first job.
+~~The leading suspicion is per-hart CSR state the AP path leaves behind —
+`sscratch`, which both trap paths use for different structures.~~ **Refuted, and
+replaced by a measurement.**
+
+`tools/debug/hart_pcs.py` was written for this and answered it on the first
+catch. At the wedge, **all four harts are in `Ticket::acquire`** — the spin loop.
+It is a lock, not a CSR. And the counters name which one:
+
+```text
+SCHED_LOCK      next=0x2e  serving=0x25     <- 9 outstanding
+RX_LOCK         next=serving
+TX_LOCK         next=serving
+SMP_RUNQ_LOCK   next=serving
+SMP_LOCK        next=serving
+AP_Q_LOCK       next=serving
+```
+
+Every other ticket lock in the kernel is balanced. `SCHED_LOCK` is not, and the
+gap grows with the run — a later catch read `next=0x44 serving=0x26`, thirty
+outstanding, with only four harts alive to hold them. **Four harts cannot hold
+thirty tickets**, so this is not one holder that vanished: `serving` is failing
+to keep up with `next`.
+
+What has been ruled out since:
+
+- Not a static escape. A scan for a guard still live across `restore_kernel_ctx`,
+  `run_first` or `shutdown` finds one hit, and it is the `shutdown` in the
+  address-space guard — which halts the machine, so holding the lock into it
+  costs nothing.
+- Not another lock's holder. Per-lock owner recording (temporary, not committed)
+  reads the holder's return address as `0` at the wedge, meaning the last `Drop`
+  ran. A holder that released is not a holder that disappeared.
+
+It is also **intermittent** — roughly one run in two with the same binary — which
+the old note's CSR theory could not explain, because stale `sscratch` would be
+deterministic.
+
+`secondary_serve`, `CONSOLE_SMP_ON` and `smp-console` are **in the tree now**,
+behind a switch that is off, so the reproduction is one console command away
+rather than a patch to re-apply. Every existing demo is unchanged with the switch
+closed, and the whole suite is green.
+
+**Narrowed again, and the mechanism is named.** `Ticket::release` is not at
+fault: a global acquire/release count taken at the wedge reads `acq - rel = 4`,
+exactly the four blocked harts. Nothing is leaked and no release is lost.
+
+Reading which lock each hart waits on, and the ticket its last successful
+acquire was served at:
+
+```text
+SCHED_LOCK   next=0x33 (51)   serving=0x2c (44)
+hart 0  ->  SCHED_LOCK   last served ticket 4    from utrap_handler+0x98
+hart 1  ->  SCHED_LOCK   last served ticket 39   from utrap_handler+0x98
+hart 2  ->  SCHED_LOCK   last served ticket 44   from utrap_handler+0x98
+hart 3  ->  AP_Q_LOCK    (balanced; it gets in)
+```
+
+**Hart 2 was served ticket 44, and `serving` is 44 — so it holds the lock — and
+it is waiting for `SCHED_LOCK` again, from the same source offset.** A hart
+blocked on a lock it already holds. Harts 0 and 1 are behind it, which is why the
+gap looks like a leak from the outside; it is one self-deadlock with a queue.
+
+`utrap_handler+0x98` is the first acquisition in the trap handler:
+
+```rust
+let cur = {
+    let _held = SCHED_LOCK.lock();
+    current_task()
+};
+```
+
+That scope is correct, and `tools/ci/check_sched_lock.py` agrees — it reports 33
+guard scopes, none re-entrant, and it is right about the source. So the second
+acquisition is not a call the source makes from inside the first. **Something
+re-enters `utrap_handler` while the lock is held**, and the lock masks
+`sstatus.SIE`, which gates S-mode interrupts only.
+
+**Answered, and it is worse and simpler than a re-entrancy.** Reading each hart's
+privilege, trap cause, `satp` and claim at the wedge:
+
+```text
+CURRENT[hart] = [0, 1, NO_TASK, 2]
+TSATP[task]   = [ffe, fea, fd5, 0]
+live satp     = [ffe, fea, ffe, fd5]
+                  ^         ^
+                hart 0    hart 2
+```
+
+All four harts have `SPP=0` — every one arrived from U-mode, so there is no
+S-mode exception and no masked-interrupt puzzle. **Hart 2 holds no claim at all
+and is executing in task 0's address space**, the one hart 0 claims. Two harts,
+one task. That is the exact failure the run claim exists to prevent, and the
+deadlock is downstream of it rather than the thing itself.
+
+**And the guard written for this could never fire.** `utrap_handler` opened by
+reading the claim *from behind* `SCHED_LOCK`, so the `cur == NO_TASK` check
+depended on acquiring a lock in precisely the situation where the scheduler is
+what has gone wrong. Measured, not supposed: at the wedge the handler is stopped
+in `Ticket::acquire` on that very line, on the hart whose claim is `NO_TASK`.
+
+`CURRENT[hart]` has exactly one writer — that hart — so the read needs no
+section, and it no longer takes one. With the guard reachable, two runs in eight
+now **name** the state instead of stopping silently:
+
+```text
+FATAL: trap on hart 0 which holds no task (satp=0x8000000000087fd5, scause=0x8000000000000005)
+FATAL: trap on hart 0 which holds no task (satp=0x8000000000087ffe, scause=0x8)
+```
+
+`scause=0x8000...05` is a supervisor timer interrupt; `0x8` is an `ecall`. So a
+hart is in U-mode running a task it does not claim, and either the timer or the
+task's own syscall brings it in. Three runs in eight still stop without a word,
+because a hart can reach one of the handler's later lock sites first — those
+still read under the lock, and legitimately so.
+
+Which leaves one question, and it is about the claim rather than the lock: **how
+does a hart come to be executing a task it never claimed?** The candidates are
+`restore_kernel_ctx` returning a secondary somewhere other than
+`secondary_serve`, and a stale `KCTX[hart]` — both testable with the same tool.
 
 So the last piece is: let a secondary pull from the console task table, limited
 to tasks with their own address space, and then make a daemon migrate under
@@ -927,7 +1040,138 @@ lives in `dezh-core`, and x86 already derives authority through `mcap`.
 *Acceptance:* a task holds object handles, not a bitmask; delegation is a graph
 edge; `redteam`'s forgery escape still fails, now against a generation check.
 
-##### W15 — Edition 2024 and the rest of the kernel's tests (P5)
+##### W15 — Edition 2024 and the rest of the kernel's tests (P5) — **done**
+
+**The edition half is done.** Every live `Cargo.toml` is on edition 2024 — the
+two shared crates, both kernels, the nine embedded user programs, the three wasm
+guests and the eight superseded spikes — with no `#[allow]` added to get there.
+The only 2021 left in the tree is inside `dist/`, a published release snapshot
+rather than source.
+
+It was done by reading rather than by `cargo fix --edition`, for the reason
+recorded at W11: the last time that tool was pointed at this repository it
+proposed renaming a constant to `_sys_exit`, which would have made a match-arm
+bug permanent and silent.
+
+Three things it turned up that were not bookkeeping:
+
+- **`unsafe_op_in_unsafe_fn`, denied an edition early**, named all 99 sites while
+  both kernels still built either way. Wrapping the bodies produced exactly one
+  `unnecessary unsafe` in return, and that one is a finding: `BumpHeap::alloc`
+  performs no unsafe operation at all — `UnsafeCell::get` is safe and so is every
+  atomic under it. The `unsafe` on that signature is `GlobalAlloc`'s contract
+  with its caller, not the body's with the hardware.
+- **`gen` is a reserved word now**, and both `dezh_core::ocap` and the
+  `virtio-blk` daemon used it. The rename is where the only real hazard was: a
+  whole-word pass also rewrote `sys_print(b" gen=")` into `b" generation="` — a
+  string literal, in output CI asserts against. Caught and reverted. Renaming an
+  identifier and renaming everything spelled like one are different operations.
+- **A workspace edition bump can break a crate the workspace does not list.** The
+  `guests/` wasm crates are built by `dezh-host`'s build script, so their errors
+  arrived as that script exiting 101 rather than as a compile failure anyone
+  could read.
+
+What remains under W15 is the second half: the tests — Cairn commit-record
+encode/decode, the **255-slot boundary with no GC**, the ticket lock's
+arithmetic, run-queue push/pop under simulated interleaving, and the Marz
+checksum.
+
+**And the reason they have not moved is not the one recorded here before.** The
+note used to say all five were blocked on making `dezh-boot` host-testable. That
+is true and it is not the binding constraint. Two of the five are not even in
+that crate — the Cairn record format lives in the `virtio-blk` daemon (33
+`CAIRN1_OFF_*` sites) and the checksum lives in the `marz` daemon, both separate
+`no_std` RISC-V binaries.
+
+The binding constraint is narrower and more fixable: **these functions take their
+input from a fixed address rather than as an argument.** `ip_checksum(off, len)`
+volatile-reads out of the DMA window at `DMA_VA`; the Cairn codec reads through
+`d_read_u8` from the daemon's data pointer. A host test cannot call either one,
+and making the crate host-testable would not change that — there is no input to
+supply.
+
+So the work is not "port a kernel to the host". It is to give five pieces of
+logic real parameters, and it has a shape that keeps the volatile reads where
+they belong: split the arithmetic from the reading, so the caller passes an
+accessor and a length while a test passes an array. Doing it any other way —
+building a `&[u8]` over a DMA window — creates exactly the aliasing that
+`Global<T>` exists to prevent.
+
+**The checksum is done, and it is the worked example for the other four.** The
+arithmetic is `dezh_core::net::internet_checksum`, taking a length and an
+accessor; the `marz` daemon keeps the volatile loads and passes a closure over
+its DMA window. Eight tests, and a negative control that matters: reintroducing
+the W9 bug — dropping the odd tail instead of padding it — fails exactly
+`an_odd_tail_byte_is_padded_not_dropped` and
+`the_odd_tail_is_the_high_half_of_its_word`, and leaves the other six silent. The
+second exists because the near-miss (padding on the wrong side) passes the first.
+
+The known-vector test is only worth something because of the one beside it:
+`inserting_the_checksum_makes_a_fresh_sum_zero` is the receiver's own check and
+does not depend on knowing the right constant, and `0xb861` was verified against
+an independent implementation rather than against this one. A constant and an
+implementation that are wrong in the same way agree perfectly.
+
+Cost of the dependency: **8 bytes**. `marz` builds `release` with `lto = true`,
+so `dezh-core`'s signature verifier and everything else unused is dead-stripped —
+15,920 to 15,928.
+
+**The ticket lock is done too, and it is the one that paid.** The checksum test
+pinned a bug that was already known. This one *found* a bug, which is the case
+the whole exercise was for.
+
+`next` is handed out with `fetch_add`, defined to wrap. The release side did
+`serving.store(serving.load() + 1)` — a plain add. On the dev profile, which is
+what CI builds and what every smoke run boots, overflow checks are on, so at
+`u32::MAX` that is an abort rather than a wrap: inside a `Drop`, while holding
+the lock, in the kernel's only mutual-exclusion primitive. Four billion
+acquisitions away, and unreachable by booting — which is precisely why nothing
+had found it, and precisely the shape of thing a test reaches and a demo cannot.
+
+The queue is `dezh_core::sync::Ticket`; masking `sstatus.SIE` stays in
+`dezh-boot`. Same split as the checksum, same reason. Both kernels can now share
+one queue instead of deriving it twice, which is one small piece off the
+cross-ISA debt.
+
+Six tests. Two fail on the old arithmetic with `attempt to add with overflow` and
+the other four stay green, so the control names the defect rather than just going
+red. The other four are the first real test this lock has ever had: eight threads
+doing two thousand *non-atomic* read-modify-writes each — the property is that
+the lock serialises the unserialised, so an atomic would prove nothing — and
+every ticket handed out exactly once across eight racing threads. Before this,
+the only evidence was one QEMU demo counting to 200000. It still says `MUTEX-OK`.
+
+**W15 is done. All five, and three of them found bugs rather than pinning known
+ones.** `dezh-core` went from 52 tests to 81.
+
+- **The run queue could silently lose a job.** `push` had no full check: the 65th
+  push into 64 slots overwrote the oldest unpopped entry. The demo asserts
+  exactly the property that breaks — `QUEUE-OK`, "each job ran exactly once, none
+  lost, none double-run" — and passed anyway, because it pushes 48 jobs into 64
+  slots. The claim was true of the workload, not of the queue. There were two
+  identical copies; now there is one `dezh_core::runq::RunQueue<N>` and `push`
+  reports a refusal. Control: with the check removed, six consumer threads
+  against a ring smaller than the workload return 2672 of 4000 items — 1328 lost
+  or double-popped — while three other tests stay green. `QUEUE-OK` in QEMU has
+  never reached that state.
+- **The Cairn record had two sides and no referee.** Encode and decode were both
+  open-coded in the daemon against a fixed data pointer, so the only thing
+  checking the format was that one file agreed with itself. `dezh_core::cairn`
+  now holds the header, the offsets, the classes and the slot bound, and the
+  daemon's constants are aliases of them. Three of the nine tests earn their
+  place beyond round-tripping: the generation is little-endian across two
+  hand-split bytes (any value under 256 round-trips either way, which is where
+  the slip hides); a pre-Sand record must still decode as a direct commit, which
+  is the compatibility claim the format makes in its own comment and had never
+  been checked; and slot 255 must be refused rather than wrapping onto slot 0 and
+  overwriting the first effect ever recorded.
+
+What the five have in common is worth keeping: **every one of them was
+untestable because it took its input from a fixed address rather than as an
+argument**, and two of the three bugs were unreachable by any amount of booting —
+a `u32` wraparound four billion acquisitions away, and a full ring the demo is
+sized never to reach. That is the argument for having tests at all, and it is now
+an observation rather than a position.
 
 The measured remainder: 81 attribute conversions and 65 `unsafe fn` bodies to
 wrap. Both are mechanical and both are much easier to review once W11 has split
@@ -978,13 +1222,39 @@ the effect ledger.
 The most-attacked gap, and deliberately last, because it is **blocked rather
 than hard**. The investigation, recorded so it is not repeated:
 
-- **RISC-V: two prerequisites, neither about DMA.** QEMU 8.2 (the version CI and
-  the dev containers use) models no `riscv-iommu` device at all — only
-  `virtio-iommu`; the RISC-V IOMMU landed in QEMU 9.1. And every IOMMU in QEMU
-  sits on the **PCI** root complex, while Dezh drives legacy **virtio-mmio**
-  (`VIRTIO_BLK_MMIO_PA = 0x1000_1000`). Reaching an IOMMU here means first
-  migrating the block and NIC drivers to virtio-pci with MSI-X — a full
-  workstream that buys nothing on its own.
+- **RISC-V: re-measured 2026-08-21, and one of the two recorded premises was
+  wrong.** The claim that "every IOMMU in QEMU sits on the PCI root complex" is
+  false on a current QEMU. On 11.0.50, `-machine virt,iommu-sys=on` instantiates
+  a **platform** IOMMU, and the device tree it produces is the same shape as
+  every device Dezh already drives:
+
+  ```text
+  iommu@3010000
+    compatible = "riscv,iommu"
+    reg        = 0x3010000, size 0x1000
+    interrupts = 0x24 0x25 0x26 0x27
+  ```
+
+  MMIO, at a fixed address, with its own interrupts. No PCI root complex, and
+  no MSI-X.
+
+  **But nothing is behind it.** Dumping the device tree with the smoke run's own
+  devices — `virtio-blk-device` and `virtio-net-device` on virtio-mmio — finds
+  **zero** nodes carrying an `iommus` property. The `virt` machine can
+  instantiate the IOMMU and does not route platform-device DMA through it. So
+  the conclusion holds and the reason has changed: the blocker is not that the
+  device does not exist, it is that QEMU does not put Dezh's devices behind the
+  one it now has.
+
+  `riscv-iommu-pci` does exist, so translated DMA is reachable through PCI — and
+  that is where the virtio-pci migration is genuinely required, rather than
+  being required for want of any IOMMU at all.
+
+  The second premise still holds, and moves: CI runs on `ubuntu-latest` and
+  `Dockerfile.review` is `ubuntu:24.04`, both QEMU 8.2, which models no
+  `riscv-iommu`. That is now a **toolchain** blocker rather than an
+  architectural one — a container bump, not a driver rewrite — and it is the
+  cheaper half to fix first.
 - **x86: the hardware is there, the system is not.** `intel-iommu` (VT-d) and
   `amd-iommu` are available and mature even on QEMU 8.2. But with no scheduler,
   no disk and no drivers, **there is no DMA to protect.** An IOMMU on x86 today

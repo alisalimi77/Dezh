@@ -64,18 +64,22 @@ fn lapic_write(reg: usize, val: u32) {
 }
 
 unsafe fn rdmsr(msr: u32) -> u64 {
-    let (lo, hi): (u32, u32);
-    asm!("rdmsr", in("ecx") msr, out("eax") lo, out("edx") hi, options(nomem, nostack));
-    ((hi as u64) << 32) | lo as u64
+    unsafe {
+        let (lo, hi): (u32, u32);
+        asm!("rdmsr", in("ecx") msr, out("eax") lo, out("edx") hi, options(nomem, nostack));
+        ((hi as u64) << 32) | lo as u64
+    }
 }
 unsafe fn wrmsr(msr: u32, val: u64) {
-    asm!(
-        "wrmsr",
-        in("ecx") msr,
-        in("eax") val as u32,
-        in("edx") (val >> 32) as u32,
-        options(nomem, nostack),
-    );
+    unsafe {
+        asm!(
+            "wrmsr",
+            in("ecx") msr,
+            in("eax") val as u32,
+            in("edx") (val >> 32) as u32,
+            options(nomem, nostack),
+        );
+    }
 }
 
 pub(crate) fn sti() {

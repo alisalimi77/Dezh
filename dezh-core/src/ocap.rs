@@ -90,7 +90,7 @@ pub enum CapCheck {
 /// The authority: the live generation per object. Bumping a generation revokes
 /// every outstanding handle to that object. `N` objects, generations start at 1.
 pub struct CapTable<const N: usize> {
-    gen: [u32; N],
+    generation: [u32; N],
 }
 
 impl<const N: usize> Default for CapTable<N> {
@@ -101,7 +101,7 @@ impl<const N: usize> Default for CapTable<N> {
 
 impl<const N: usize> CapTable<N> {
     pub const fn new() -> Self {
-        CapTable { gen: [1u32; N] }
+        CapTable { generation: [1u32; N] }
     }
 
     /// Mint a fresh handle to `object` with `rights`, stamped with the object's
@@ -113,7 +113,7 @@ impl<const N: usize> CapTable<N> {
         Some(Cap {
             object,
             rights,
-            generation: self.gen[object],
+            generation: self.generation[object],
         })
     }
 
@@ -134,7 +134,7 @@ impl<const N: usize> CapTable<N> {
 
     /// Is this handle live (its generation matches the object's current one)?
     pub fn is_live(&self, cap: &Cap) -> bool {
-        cap.object < N && cap.generation != GEN_NEVER && cap.generation == self.gen[cap.object]
+        cap.object < N && cap.generation != GEN_NEVER && cap.generation == self.generation[cap.object]
     }
 
     /// Use `cap` for operations requiring `want` rights.
@@ -142,7 +142,7 @@ impl<const N: usize> CapTable<N> {
         if cap.object >= N {
             return CapCheck::NoSuchObject;
         }
-        if cap.generation == GEN_NEVER || cap.generation != self.gen[cap.object] {
+        if cap.generation == GEN_NEVER || cap.generation != self.generation[cap.object] {
             return CapCheck::Revoked;
         }
         if cap.rights & want != want {
@@ -155,13 +155,13 @@ impl<const N: usize> CapTable<N> {
     /// Per-object: handles to other objects are unaffected.
     pub fn revoke(&mut self, object: ObjectId) {
         if object < N {
-            self.gen[object] = self.gen[object].wrapping_add(1);
+            self.generation[object] = self.generation[object].wrapping_add(1);
         }
     }
 
     pub fn generation_of(&self, object: ObjectId) -> u32 {
         if object < N {
-            self.gen[object]
+            self.generation[object]
         } else {
             GEN_NEVER
         }

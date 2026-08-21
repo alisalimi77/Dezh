@@ -17,6 +17,10 @@ struct BumpHeap {
 }
 unsafe impl Sync for BumpHeap {}
 unsafe impl GlobalAlloc for BumpHeap {
+    // No `unsafe` block here, and that is the interesting part: this body does
+    // not perform one unsafe operation. `UnsafeCell::get` is safe, and so is
+    // every atomic below it. The `unsafe` on the signature is the trait's - a
+    // caller must uphold `GlobalAlloc`'s contract - not this body's.
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         let base = self.arena.get() as usize;
         loop {

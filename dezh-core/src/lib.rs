@@ -9,9 +9,13 @@
 #![no_std]
 
 pub mod b64;
+pub mod cairn;
 pub mod difc;
 pub mod dzp;
 pub mod ir;
 pub mod mcap;
+pub mod net;
 pub mod ocap;
+pub mod runq;
 pub mod sig;
+pub mod sync;
