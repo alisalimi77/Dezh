@@ -1003,10 +1003,35 @@ Cost of the dependency: **8 bytes**. `marz` builds `release` with `lto = true`,
 so `dezh-core`'s signature verifier and everything else unused is dead-stripped —
 15,920 to 15,928.
 
-Four left: the Cairn record codec and the 255-slot boundary (both in the
+**The ticket lock is done too, and it is the one that paid.** The checksum test
+pinned a bug that was already known. This one *found* a bug, which is the case
+the whole exercise was for.
+
+`next` is handed out with `fetch_add`, defined to wrap. The release side did
+`serving.store(serving.load() + 1)` — a plain add. On the dev profile, which is
+what CI builds and what every smoke run boots, overflow checks are on, so at
+`u32::MAX` that is an abort rather than a wrap: inside a `Drop`, while holding
+the lock, in the kernel's only mutual-exclusion primitive. Four billion
+acquisitions away, and unreachable by booting — which is precisely why nothing
+had found it, and precisely the shape of thing a test reaches and a demo cannot.
+
+The queue is `dezh_core::sync::Ticket`; masking `sstatus.SIE` stays in
+`dezh-boot`. Same split as the checksum, same reason. Both kernels can now share
+one queue instead of deriving it twice, which is one small piece off the
+cross-ISA debt.
+
+Six tests. Two fail on the old arithmetic with `attempt to add with overflow` and
+the other four stay green, so the control names the defect rather than just going
+red. The other four are the first real test this lock has ever had: eight threads
+doing two thousand *non-atomic* read-modify-writes each — the property is that
+the lock serialises the unserialised, so an atomic would prove nothing — and
+every ticket handed out exactly once across eight racing threads. Before this,
+the only evidence was one QEMU demo counting to 200000. It still says `MUTEX-OK`.
+
+Three left: the Cairn record codec and the 255-slot boundary (both in the
 `virtio-blk` daemon, both reading through `d_read_u8` from a fixed data pointer,
-so both need the same treatment), the ticket lock's arithmetic, and run-queue
-push/pop under simulated interleaving.
+so both need the same treatment), and run-queue push/pop under simulated
+interleaving.
 
 The measured remainder: 81 attribute conversions and 65 `unsafe fn` bodies to
 wrap. Both are mechanical and both are much easier to review once W11 has split
