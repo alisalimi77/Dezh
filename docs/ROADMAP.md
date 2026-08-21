@@ -1222,13 +1222,39 @@ the effect ledger.
 The most-attacked gap, and deliberately last, because it is **blocked rather
 than hard**. The investigation, recorded so it is not repeated:
 
-- **RISC-V: two prerequisites, neither about DMA.** QEMU 8.2 (the version CI and
-  the dev containers use) models no `riscv-iommu` device at all — only
-  `virtio-iommu`; the RISC-V IOMMU landed in QEMU 9.1. And every IOMMU in QEMU
-  sits on the **PCI** root complex, while Dezh drives legacy **virtio-mmio**
-  (`VIRTIO_BLK_MMIO_PA = 0x1000_1000`). Reaching an IOMMU here means first
-  migrating the block and NIC drivers to virtio-pci with MSI-X — a full
-  workstream that buys nothing on its own.
+- **RISC-V: re-measured 2026-08-21, and one of the two recorded premises was
+  wrong.** The claim that "every IOMMU in QEMU sits on the PCI root complex" is
+  false on a current QEMU. On 11.0.50, `-machine virt,iommu-sys=on` instantiates
+  a **platform** IOMMU, and the device tree it produces is the same shape as
+  every device Dezh already drives:
+
+  ```text
+  iommu@3010000
+    compatible = "riscv,iommu"
+    reg        = 0x3010000, size 0x1000
+    interrupts = 0x24 0x25 0x26 0x27
+  ```
+
+  MMIO, at a fixed address, with its own interrupts. No PCI root complex, and
+  no MSI-X.
+
+  **But nothing is behind it.** Dumping the device tree with the smoke run's own
+  devices — `virtio-blk-device` and `virtio-net-device` on virtio-mmio — finds
+  **zero** nodes carrying an `iommus` property. The `virt` machine can
+  instantiate the IOMMU and does not route platform-device DMA through it. So
+  the conclusion holds and the reason has changed: the blocker is not that the
+  device does not exist, it is that QEMU does not put Dezh's devices behind the
+  one it now has.
+
+  `riscv-iommu-pci` does exist, so translated DMA is reachable through PCI — and
+  that is where the virtio-pci migration is genuinely required, rather than
+  being required for want of any IOMMU at all.
+
+  The second premise still holds, and moves: CI runs on `ubuntu-latest` and
+  `Dockerfile.review` is `ubuntu:24.04`, both QEMU 8.2, which models no
+  `riscv-iommu`. That is now a **toolchain** blocker rather than an
+  architectural one — a container bump, not a driver rewrite — and it is the
+  cheaper half to fix first.
 - **x86: the hardware is there, the system is not.** `intel-iommu` (VT-d) and
   `amd-iommu` are available and mature even on QEMU 8.2. But with no scheduler,
   no disk and no drivers, **there is no DMA to protect.** An IOMMU on x86 today
