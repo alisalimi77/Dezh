@@ -998,10 +998,41 @@ task's own syscall brings it in. Three runs in eight still stop without a word,
 because a hart can reach one of the handler's later lock sites first — those
 still read under the lock, and legitimately so.
 
-Which leaves one question, and it is about the claim rather than the lock: **how
-does a hart come to be executing a task it never claimed?** The candidates are
-`restore_kernel_ctx` returning a secondary somewhere other than
-`secondary_serve`, and a stale `KCTX[hart]` — both testable with the same tool.
+**Answered, by making the kernel report the violation itself.** The `NO_TASK`
+guard now dumps the whole claim table at the moment it fires, rather than leaving
+a sampler to reconstruct the aftermath. What it caught:
+
+```text
+task 2 DENIED: faulted on 0x40700000 (outside its grant) on hart 0 -- killing
+FATAL: trap on hart 0 which holds no task
+  satp=0x..fd5  scause=0x8000000000000005  sepc=0x40000012  SPP=0
+  CURRENT[hart 2] = task 1      CURRENT[hart 3] = task 0
+  task 2: state=done  satp=0x..fd5  stamped_hart=0
+```
+
+Read in order: hart 0 killed its task, `schedule_or_return` found nothing it was
+allowed to run — tasks 0 and 1 are claimed by other harts — cleared hart 0's
+claim, and longjmped out. The `satp` is still the dead task's, `sepc` is user
+code, `SPP=0`, and the cause is that hart's own timer. **The claim was released
+while the hart still had the task's address space, trap vector and armed timer.**
+
+That is a real ordering defect and it is fixed: the claim is no longer dropped in
+`schedule_or_return`. It is dropped by `release_claim_after_teardown`, called by
+each of the four entries *after* they undo the `satp`, `stvec` and timer they
+installed — the code that set the task's world up is the code that takes it down,
+and the claim goes last.
+
+**And it does not fix the wedge.** Twelve runs after: 3 clean, 1 named FATAL, 7
+still stopped. That is worth stating plainly rather than filing the fix as a
+resolution. What the fix closes is the window where a hart traps with no claim at
+all; what still happens is that harts stop in `Ticket::acquire` before reaching
+any of it.
+
+So the score is: two real defects found and fixed on the way — a guard that could
+not fire, and a claim released too early — and the wedge itself outlives both.
+The next attempt starts from the same place the last two did, which is now a
+well-instrumented place: the kernel reports its own violations, and
+`tools/debug/hart_pcs.py` reports where every hart stopped.
 
 So the last piece is: let a secondary pull from the console task table, limited
 to tasks with their own address space, and then make a daemon migrate under

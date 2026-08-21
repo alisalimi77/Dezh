@@ -537,12 +537,34 @@ unsafe fn schedule_or_return() -> *const usize {
                     Some(frame_ptr(i) as *const usize)
                 }
                 None => {
-                    // Leaving the scheduler: drop the claim here, inside the same
-                    // section that reads claims, rather than on the far side of the
-                    // longjmp - which never returns, so there is no far side.
-                    // A hart that kept its claim would fence off a perfectly
-                    // runnable task for the rest of the boot.
-                    set_current_task(NO_TASK);
+                    // The claim is NOT dropped here, and that is the fix rather
+                    // than an omission.
+                    //
+                    // It used to be, on the reasoning that this section is where
+                    // claims are read and the longjmp below has no far side. Both
+                    // halves are true and the conclusion was wrong: clearing it
+                    // here leaves the hart holding no claim while it still has the
+                    // dead task's `satp`, `stvec` pointing at `utrap`, and its own
+                    // timer armed. The next trap on that hart arrives with nothing
+                    // to attribute it to.
+                    //
+                    // That is not hypothetical. It is what the wedge was:
+                    //
+                    // ```text
+                    // task 2 DENIED: faulted on 0x40700000 -- killing
+                    // FATAL: trap on hart 0 which holds no task
+                    //   satp=..fd5 (task 2's) scause=timer sepc=0x40000012 SPP=0
+                    //   task 2: state=done stamped_hart=0
+                    // ```
+                    //
+                    // A hart that killed its task, found nothing else it was
+                    // allowed to run, cleared its claim, and was then interrupted
+                    // before it had left that task's world.
+                    //
+                    // The teardown is the caller's - it is the caller that
+                    // installed `satp` and `stvec` in the first place - so the
+                    // claim is released there too, after them, by
+                    // `release_claim_after_teardown`.
                     None
                 }
             }
@@ -607,12 +629,43 @@ extern "C" fn utrap_handler(frame_ptr: *mut usize) -> *const usize {
         // was live, another hart would be free to enter this same frame.
         if cur == NO_TASK {
             let satp: usize;
+            let sepc: usize;
+            let sstatus: usize;
             asm!("csrr {}, satp", out(reg) satp);
+            asm!("csrr {}, sepc", out(reg) sepc);
+            asm!("csrr {}, sstatus", out(reg) sstatus);
             kprintln!(
                 "
-[dezh-boot] FATAL: trap on hart {} which holds no task (satp={satp:#x}, scause={scause:#x}) -- halting",
+[dezh-boot] FATAL: trap on hart {} which holds no task -- halting",
                 current_hart()
             );
+            kprintln!(
+                "  satp={satp:#x} scause={scause:#x} sepc={sepc:#x} SPP={}",
+                (sstatus >> 8) & 1
+            );
+            // The whole claim table and the address space each task owns, at the
+            // moment of the violation rather than whenever a sampler next looks.
+            // A hart running a task it does not claim is only legible next to
+            // who does claim it.
+            for h in 0..MAX_HARTS {
+                let c = (*CURRENT.get())[h];
+                if c != NO_TASK {
+                    kprintln!("  CURRENT[hart {h}] = task {c}  satp={:#x}", (*TSATP.get())[c]);
+                }
+            }
+            for i in 0..MAX_TASKS {
+                kprintln!(
+                    "  task {i}: state={} satp={:#x} stamped_hart={}",
+                    match (*TSTATE.get())[i] {
+                        TaskState::Unused => "unused",
+                        TaskState::Ready => "ready",
+                        TaskState::Blocked => "blocked",
+                        TaskState::Done => "done",
+                    },
+                    (*TSATP.get())[i],
+                    (*FRAMES.get())[i][F_HART]
+                );
+            }
             shutdown(FINISH_FAIL);
         }
         if interrupt {
@@ -1003,6 +1056,8 @@ pub(crate) fn run_tasks(specs: &[(usize, usize, u8)]) {
         // Returned via restore_kernel_ctx once every task is Done.
         asm!("csrw stvec, {}", in(reg) trap_entry as *const () as usize);
         sbi_set_timer(rdtime() + TIMER_DELTA); // restore the console uptime cadence
+        // The task's world is gone; only now is the claim safe to give up.
+        release_claim_after_teardown();
     }
 }
 
@@ -1093,6 +1148,8 @@ pub(crate) fn run_processes(specs: &[ProcessSpec]) {
             asm!("csrw stvec, {}", in(reg) trap_entry as *const () as usize);
             sbi_set_timer(rdtime() + TIMER_DELTA);
         }
+        // The task's world is gone; only now is the claim safe to give up.
+        release_claim_after_teardown();
         let _held = SCHED_LOCK.lock();
         let mut i = 0usize;
         while i < MAX_TASKS {
@@ -1124,6 +1181,18 @@ pub(crate) static CONSOLE_SMP_ON: AtomicBool = AtomicBool::new(false);
 /// Returns as soon as there is nothing this hart may run. It does not idle: only
 /// the boot hart owns the PLIC context, so waiting for a device is not this
 /// hart's job.
+/// Give up this hart's claim, once it has left the task's world behind.
+///
+/// Every entry that installs a task's `satp` and trap vector calls this after
+/// undoing them. Doing it earlier - in `schedule_or_return`, where the claim is
+/// otherwise managed - is what produced a hart trapping with no task: the claim
+/// was gone while the address space, the trap vector and the timer were still
+/// the dead task's.
+pub(crate) fn release_claim_after_teardown() {
+    let _held = SCHED_LOCK.lock();
+    unsafe { set_current_task(NO_TASK) };
+}
+
 pub(crate) fn secondary_serve() {
     if !CONSOLE_SMP_ON.load(Ordering::Acquire) {
         return;
@@ -1168,6 +1237,8 @@ pub(crate) fn secondary_serve() {
         asm!("sfence.vma");
         asm!("csrw satp, {}", in(reg) 0usize);
         asm!("sfence.vma");
+        // The task's world is gone; only now is the claim safe to give up.
+        release_claim_after_teardown();
     }
 }
 
@@ -1219,6 +1290,8 @@ pub(crate) fn run_scheduler_from(first: usize) {
         asm!("sfence.vma");
         asm!("csrw stvec, {}", in(reg) trap_entry as *const () as usize);
         sbi_set_timer(rdtime() + TIMER_DELTA);
+        // The task's world is gone; only now is the claim safe to give up.
+        release_claim_after_teardown();
     }
 }
 
