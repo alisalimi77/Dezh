@@ -15,5 +15,6 @@ pub mod ir;
 pub mod mcap;
 pub mod net;
 pub mod ocap;
+pub mod runq;
 pub mod sig;
 pub mod sync;

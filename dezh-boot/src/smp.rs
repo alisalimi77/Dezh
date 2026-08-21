@@ -29,6 +29,7 @@ use crate::{
 };
 use crate::arch::timer::{rdtime, sbi_set_timer, QUANTUM, STIE};
 use crate::sync::TicketLock;
+use dezh_core::runq::RunQueue;
 
 /// `scause` code for a supervisor timer interrupt, with the interrupt bit
 /// already stripped by the caller.
@@ -333,43 +334,27 @@ pub(crate) const NJOBS: usize = 48;
 const RUNQ_CAP: usize = 64;
 static SMP_RUNQ_LOCK: TicketLock = TicketLock::new();
 
-struct RunQueue {
-    buf: [u32; RUNQ_CAP],
-    head: usize,
-    tail: usize,
-}
-static mut RUNQ: RunQueue = RunQueue {
-    buf: [0; RUNQ_CAP],
-    head: 0,
-    tail: 0,
-};
+// The ring itself is `dezh_core::runq::RunQueue`, written once instead of the
+// two identical copies that used to sit here and below. The lock stays local,
+// because masking interrupts is this kernel's decision and not a ring buffer's.
+static mut RUNQ: RunQueue<RUNQ_CAP> = RunQueue::new();
 /// How many times each job was executed — must be exactly 1 everywhere.
 pub(crate) static JOB_RUNS: [AtomicU32; NJOBS] = [const { AtomicU32::new(0) }; NJOBS];
 /// Which hart ran each job (0xffff_ffff = not yet) — to show the spread.
 pub(crate) static JOB_HART: [AtomicU32; NJOBS] = [const { AtomicU32::new(u32::MAX) }; NJOBS];
 pub(crate) static JOBS_DONE: AtomicU64 = AtomicU64::new(0);
 
-pub(crate) fn runq_push(id: u32) {
+/// Returns false when the ring is full, which the old version could not say:
+/// it overwrote the oldest unpopped entry instead, losing one job and running
+/// another twice. The demo never hit it because 48 jobs fit in 64 slots.
+pub(crate) fn runq_push(id: u32) -> bool {
     let _held = SMP_RUNQ_LOCK.lock();
-    unsafe {
-        let q = &mut *core::ptr::addr_of_mut!(RUNQ);
-        q.buf[q.tail % RUNQ_CAP] = id;
-        q.tail += 1;
-    }
+    unsafe { (*core::ptr::addr_of_mut!(RUNQ)).push(id) }
 }
 
 pub(crate) fn runq_pop() -> Option<u32> {
     let _held = SMP_RUNQ_LOCK.lock();
-    unsafe {
-        let q = &mut *core::ptr::addr_of_mut!(RUNQ);
-        if q.head == q.tail {
-            None
-        } else {
-            let v = q.buf[q.head % RUNQ_CAP];
-            q.head += 1;
-            Some(v)
-        }
-    }
+    unsafe { (*core::ptr::addr_of_mut!(RUNQ)).pop() }
 }
 
 /// Pop and "run" jobs until the queue is empty. Called concurrently by every hart.
@@ -439,11 +424,7 @@ static AP_SLOT_L1: [AtomicUsize; AP_SLOTS] = [const { AtomicUsize::new(0) }; AP_
 
 /// The task queue the harts pull from, plus liveness gauges.
 static AP_Q_LOCK: TicketLock = TicketLock::new();
-static mut AP_Q: RunQueue = RunQueue {
-    buf: [0; RUNQ_CAP],
-    head: 0,
-    tail: 0,
-};
+static mut AP_Q: RunQueue<RUNQ_CAP> = RunQueue::new();
 pub(crate) static AP_SCHED_ON: AtomicBool = AtomicBool::new(false);
 pub(crate) static AP_TASKS_DONE: AtomicU64 = AtomicU64::new(0);
 /// U-mode tasks executing right now, and the high-water mark — the number that
@@ -451,27 +432,14 @@ pub(crate) static AP_TASKS_DONE: AtomicU64 = AtomicU64::new(0);
 pub(crate) static AP_LIVE: AtomicU64 = AtomicU64::new(0);
 pub(crate) static AP_LIVE_MAX: AtomicU64 = AtomicU64::new(0);
 
-pub(crate) fn ap_q_push(slot: u32) {
+pub(crate) fn ap_q_push(slot: u32) -> bool {
     let _held = AP_Q_LOCK.lock();
-    unsafe {
-        let q = &mut *core::ptr::addr_of_mut!(AP_Q);
-        q.buf[q.tail % RUNQ_CAP] = slot;
-        q.tail += 1;
-    }
+    unsafe { (*core::ptr::addr_of_mut!(AP_Q)).push(slot) }
 }
 
 pub(crate) fn ap_q_pop() -> Option<u32> {
     let _held = AP_Q_LOCK.lock();
-    unsafe {
-        let q = &mut *core::ptr::addr_of_mut!(AP_Q);
-        if q.head == q.tail {
-            None
-        } else {
-            let v = q.buf[q.head % RUNQ_CAP];
-            q.head += 1;
-            Some(v)
-        }
-    }
+    unsafe { (*core::ptr::addr_of_mut!(AP_Q)).pop() }
 }
 
 /// Build a private address space for one task slot: copy the kernel page tables,
@@ -863,8 +831,15 @@ pub(crate) fn smp_round() -> SmpRound {
         JOB_RUNS[i].store(0, Ordering::Relaxed);
         JOB_HART[i].store(u32::MAX, Ordering::Relaxed);
     }
+    // A refused push is reported rather than dropped. It cannot happen at
+    // NJOBS=48 into RUNQ_CAP=64 - and that is the reason to say so out loud, not
+    // the reason to skip the check: the demo's whole claim is that every job
+    // runs exactly once, and a silently lost job is how that claim goes wrong.
     for id in 0..NJOBS {
-        runq_push(id as u32);
+        if !runq_push(id as u32) {
+            kprintln!("[smp] run queue full at job {id} of {NJOBS}; the round is short");
+            break;
+        }
     }
     // Release: orders both resets above before the secondaries observe the new
     // generation and start their work.
@@ -1012,7 +987,10 @@ pub(crate) fn ap_run_batch(n: usize) -> bool {
     AP_LIVE.store(0, Ordering::Relaxed);
     AP_LIVE_MAX.store(0, Ordering::Relaxed);
     for s in 0..n {
-        ap_q_push(s as u32);
+        if !ap_q_push(s as u32) {
+            kprintln!("[smp] task queue full at slot {s} of {n}; the batch is short");
+            break;
+        }
     }
     AP_SCHED_ON.store(true, Ordering::Release);
     let mut spins = 0u64;
