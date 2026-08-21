@@ -328,10 +328,18 @@ mod tests {
 
     /// `NONE` is not a slot. A namespace with no head must never be walked as
     /// though it pointed at one.
+    ///
+    /// Checked at compile time rather than in the test body: it is a fact about
+    /// the format, so a change that broke it should fail the build.
+    ///
+    /// Stated as an inequality rather than `NONE >= COMMIT_SLOTS`, which reads
+    /// like the stronger claim but is vacuous — `NONE` is `u32::MAX`, so that
+    /// comparison holds for every possible slot count including a wrong one.
+    const _: () = assert!(COMMIT_SLOTS != NONE);
+
     #[test]
     fn the_no_parent_sentinel_is_not_a_usable_slot() {
         assert!(!slot_available(NONE));
-        assert!(NONE >= COMMIT_SLOTS);
     }
 
     /// Walking a parent chain has to terminate even when the chain is a cycle,
