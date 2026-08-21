@@ -155,10 +155,20 @@ class Machine:
                 pcs.append(int(stripped.split()[1], 16))
         return pcs
 
-    def send(self, line: str) -> None:
+    def send(self, line: str, per_char: float = 0.05) -> None:
+        """Type it, one character at a time.
+
+        The console loses pasted input — issue #19, a 16-byte UART FIFO with no
+        flow control against a console that spends most of its time not in
+        `getc`. Writing the whole line at once turned `smp-console` into `s-`,
+        which is that defect, not a new one. A driver that trips over a known
+        bug while measuring a different one is worse than no driver.
+        """
         assert self.proc.stdin
-        self.proc.stdin.write((line + "\n").encode())
-        self.proc.stdin.flush()
+        for ch in line + "\n":
+            self.proc.stdin.write(ch.encode())
+            self.proc.stdin.flush()
+            time.sleep(per_char)
 
     def text(self) -> str:
         return self.output.decode("utf-8", "replace")

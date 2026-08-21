@@ -704,6 +704,9 @@ extern "C" fn hart_main(hartid: usize) -> ! {
         // at `-smp 4`, and 0/3 at `-smp 8`, where most lines never arrive at
         // all. That is issue #19, and it was never a race: it is starvation.
         while SMP_GEN.load(Ordering::Acquire) == served {
+            // A console task, if the merged scheduler is open. Returns at once
+            // when the switch is closed, which it is unless a demo opened it.
+            crate::sched::secondary_serve();
             if AP_SCHED_ON.load(Ordering::Acquire) {
                 // A U-mode scheduling window is open, so the boot hart may post
                 // work at any moment and the demos measure how much overlap it

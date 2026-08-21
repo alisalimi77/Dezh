@@ -17,7 +17,7 @@
 //! "only one hart reaches it".
 
 use core::arch::asm;
-use core::sync::atomic::Ordering;
+use core::sync::atomic::{AtomicBool, Ordering};
 
 use crate::dev::plic::{EXT_IRQS, SCAUSE_EXTERNAL};
 use crate::proc::loader::{ProcessSpec, EMPTY_TASK_RESOURCES, TaskKind, TaskResources};
@@ -27,7 +27,7 @@ use crate::abi::{
     typed_word, FIRST_FOREGROUND_TASK, IPC_OP_TIMEOUT, IPC_SERVICE_SYSTEM, IPC_STATUS_TIMEOUT,
 };
 use crate::arch::finisher::{shutdown, FINISH_FAIL};
-use crate::arch::timer::{rdtime, sbi_set_timer, QUANTUM, TICKS, TIMER_DELTA};
+use crate::arch::timer::{rdtime, sbi_set_timer, QUANTUM, STIE, TICKS, TIMER_DELTA};
 use crate::mm::global::Global;
 use crate::smp::{current_hart, BOOT_HART, MAX_HARTS};
 use crate::sync::TicketLock;
@@ -1093,6 +1093,101 @@ pub(crate) fn run_processes(specs: &[ProcessSpec]) {
             i += 1;
         }
     }
+}
+
+/// Off by default, and every existing demo depends on that.
+///
+/// A secondary joining the console scheduler changes which hart runs what, and
+/// therefore the order lines reach the UART. W13's acceptance says `smp-*` and
+/// every existing demo stay unchanged, so participation is opt-in for the run
+/// that wants to prove it rather than ambient for every run that does not.
+pub(crate) static CONSOLE_SMP_ON: AtomicBool = AtomicBool::new(false);
+
+/// A secondary hart takes one task from the console table and runs it.
+///
+/// This is the merge W13 exists for, and it is under active diagnosis: it works
+/// from a cold console and wedges after any demo that has run a U-mode task on a
+/// secondary through the AP path. `docs/ROADMAP.md` carries the evidence. It is
+/// in the tree behind a switch that is off so the defect can be reproduced with
+/// `tools/debug/hart_pcs.py` rather than reasoned about from what stopped
+/// printing.
+///
+/// Returns as soon as there is nothing this hart may run. It does not idle: only
+/// the boot hart owns the PLIC context, so waiting for a device is not this
+/// hart's job.
+pub(crate) fn secondary_serve() {
+    if !CONSOLE_SMP_ON.load(Ordering::Acquire) {
+        return;
+    }
+    unsafe {
+        // The claim and the address space it names, taken together, exactly as
+        // `schedule_or_return` does. Released before entering U-mode, because
+        // `run_first` comes back through `restore_kernel_ctx` and never here.
+        let next = {
+            let _held = SCHED_LOCK.lock();
+            match pick_next() {
+                Some(i) => {
+                    set_current_task(i);
+                    (*FRAMES.get())[i][F_HART] = current_hart();
+                    Some((i, (*TSATP.get())[i]))
+                }
+                None => None,
+            }
+        };
+        let Some((first, satp)) = next else {
+            return;
+        };
+
+        // `hart_main` runs bare: no trap vector, satp zero. Give this hart the
+        // console trap path, the task's address space, and SUM so the handler
+        // may read the task's U-mode pages - the same three the AP path sets.
+        asm!("csrw stvec, {}", in(reg) utrap as *const () as usize);
+        asm!("csrs sstatus, {}", in(reg) 1usize << 18);
+        asm!("sfence.vma");
+        asm!("csrw satp, {}", in(reg) satp);
+        asm!("sfence.vma");
+        sbi_set_timer(rdtime() + QUANTUM);
+        asm!("csrs sie, {}", in(reg) STIE);
+
+        run_first(frame_ptr(first) as *const usize);
+
+        // Back via `restore_kernel_ctx` once this hart found nothing more to
+        // run. Undo all three: the rounds `hart_main` serves next have no trap
+        // vector installed, so a timer arriving there would jump to zero.
+        asm!("csrc sie, {}", in(reg) STIE);
+        asm!("csrw stvec, {}", in(reg) 0usize);
+        asm!("sfence.vma");
+        asm!("csrw satp, {}", in(reg) 0usize);
+        asm!("sfence.vma");
+    }
+}
+
+/// Close the window and wait for every secondary to hand its task back.
+///
+/// `run_processes` returns as soon as the boot hart has nothing to run, and a
+/// task a secondary claimed is exactly that: invisible to `pick_next` here.
+/// Without this the console would come back while a task is still executing, and
+/// the next command that calls a run entry would wipe the table and free the
+/// frames of an address space a hart is running in.
+pub(crate) fn join_secondaries() -> bool {
+    const JOIN_SPIN_LIMIT: u64 = 300_000_000;
+    CONSOLE_SMP_ON.store(false, Ordering::Release);
+    let mut spins = 0u64;
+    while secondary_claims_outstanding() {
+        core::hint::spin_loop();
+        spins += 1;
+        if spins > JOIN_SPIN_LIMIT {
+            return false;
+        }
+    }
+    true
+}
+
+/// Does any hart other than the boot hart still hold a console task?
+fn secondary_claims_outstanding() -> bool {
+    let _held = SCHED_LOCK.lock();
+    let boot = BOOT_HART.load(Ordering::Relaxed);
+    unsafe { (0..MAX_HARTS).any(|h| h != boot && (*CURRENT.get())[h] != NO_TASK) }
 }
 
 pub(crate) fn run_scheduler_from(first: usize) {

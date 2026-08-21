@@ -351,6 +351,13 @@ pub(crate) const COMMANDS: &[CommandSpec] = &[
         help: "SMP: concurrent tasks on different harts cannot reach each other's memory (per-task address spaces)",
     },
     CommandSpec {
+        name: "smp-console",
+        cap: cap::INSPECT,
+        cap_name: "INSPECT",
+        group: "Inspect",
+        help: "SMP (under diagnosis): a secondary hart runs a task from the CONSOLE table on the console trap path",
+    },
+    CommandSpec {
         name: "ns-revoke",
         cap: cap::SPAWN,
         cap_name: "SPAWN",

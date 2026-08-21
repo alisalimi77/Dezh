@@ -883,12 +883,52 @@ tree, because it hangs. What was measured before backing it out:
 - Not `run_processes` itself: after `smp-task`, the existing `procs` command —
   the same entry with the switch off — is fine.
 
-The leading suspicion, unproven, is per-hart CSR state the AP path leaves behind
-and `secondary_serve` does not reset — `sscratch` is the one both trap paths use
-for different structures, and `frame_restore` only sets it at the very end of
-`run_first`. A trap taken in the window between `csrw stvec, utrap` and that
-store would enter `utrap` with the AP path's `sscratch` and save a console task's
-registers into an `ApCtx`. Proving or refuting that is the next step's first job.
+~~The leading suspicion is per-hart CSR state the AP path leaves behind —
+`sscratch`, which both trap paths use for different structures.~~ **Refuted, and
+replaced by a measurement.**
+
+`tools/debug/hart_pcs.py` was written for this and answered it on the first
+catch. At the wedge, **all four harts are in `Ticket::acquire`** — the spin loop.
+It is a lock, not a CSR. And the counters name which one:
+
+```text
+SCHED_LOCK      next=0x2e  serving=0x25     <- 9 outstanding
+RX_LOCK         next=serving
+TX_LOCK         next=serving
+SMP_RUNQ_LOCK   next=serving
+SMP_LOCK        next=serving
+AP_Q_LOCK       next=serving
+```
+
+Every other ticket lock in the kernel is balanced. `SCHED_LOCK` is not, and the
+gap grows with the run — a later catch read `next=0x44 serving=0x26`, thirty
+outstanding, with only four harts alive to hold them. **Four harts cannot hold
+thirty tickets**, so this is not one holder that vanished: `serving` is failing
+to keep up with `next`.
+
+What has been ruled out since:
+
+- Not a static escape. A scan for a guard still live across `restore_kernel_ctx`,
+  `run_first` or `shutdown` finds one hit, and it is the `shutdown` in the
+  address-space guard — which halts the machine, so holding the lock into it
+  costs nothing.
+- Not another lock's holder. Per-lock owner recording (temporary, not committed)
+  reads the holder's return address as `0` at the wedge, meaning the last `Drop`
+  ran. A holder that released is not a holder that disappeared.
+
+It is also **intermittent** — roughly one run in two with the same binary — which
+the old note's CSR theory could not explain, because stale `sscratch` would be
+deterministic.
+
+`secondary_serve`, `CONSOLE_SMP_ON` and `smp-console` are **in the tree now**,
+behind a switch that is off, so the reproduction is one console command away
+rather than a patch to re-apply. Every existing demo is unchanged with the switch
+closed, and the whole suite is green.
+
+The next question is narrow: which path advances `next` without advancing
+`serving`. `Ticket::release` does a plain load-then-store rather than a
+`fetch_add`, justified by "only the holder gets here" — and that justification is
+now the thing to check rather than assume.
 
 So the last piece is: let a secondary pull from the console task table, limited
 to tasks with their own address space, and then make a daemon migrate under
