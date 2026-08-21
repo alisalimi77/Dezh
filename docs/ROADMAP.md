@@ -927,7 +927,7 @@ lives in `dezh-core`, and x86 already derives authority through `mcap`.
 *Acceptance:* a task holds object handles, not a bitmask; delegation is a graph
 edge; `redteam`'s forgery escape still fails, now against a generation check.
 
-##### W15 — Edition 2024 and the rest of the kernel's tests (P5)
+##### W15 — Edition 2024 and the rest of the kernel's tests (P5) — **done**
 
 **The edition half is done.** Every live `Cargo.toml` is on edition 2024 — the
 two shared crates, both kernels, the nine embedded user programs, the three wasm
@@ -1028,10 +1028,37 @@ the lock serialises the unserialised, so an atomic would prove nothing — and
 every ticket handed out exactly once across eight racing threads. Before this,
 the only evidence was one QEMU demo counting to 200000. It still says `MUTEX-OK`.
 
-Three left: the Cairn record codec and the 255-slot boundary (both in the
-`virtio-blk` daemon, both reading through `d_read_u8` from a fixed data pointer,
-so both need the same treatment), and run-queue push/pop under simulated
-interleaving.
+**W15 is done. All five, and three of them found bugs rather than pinning known
+ones.** `dezh-core` went from 52 tests to 81.
+
+- **The run queue could silently lose a job.** `push` had no full check: the 65th
+  push into 64 slots overwrote the oldest unpopped entry. The demo asserts
+  exactly the property that breaks — `QUEUE-OK`, "each job ran exactly once, none
+  lost, none double-run" — and passed anyway, because it pushes 48 jobs into 64
+  slots. The claim was true of the workload, not of the queue. There were two
+  identical copies; now there is one `dezh_core::runq::RunQueue<N>` and `push`
+  reports a refusal. Control: with the check removed, six consumer threads
+  against a ring smaller than the workload return 2672 of 4000 items — 1328 lost
+  or double-popped — while three other tests stay green. `QUEUE-OK` in QEMU has
+  never reached that state.
+- **The Cairn record had two sides and no referee.** Encode and decode were both
+  open-coded in the daemon against a fixed data pointer, so the only thing
+  checking the format was that one file agreed with itself. `dezh_core::cairn`
+  now holds the header, the offsets, the classes and the slot bound, and the
+  daemon's constants are aliases of them. Three of the nine tests earn their
+  place beyond round-tripping: the generation is little-endian across two
+  hand-split bytes (any value under 256 round-trips either way, which is where
+  the slip hides); a pre-Sand record must still decode as a direct commit, which
+  is the compatibility claim the format makes in its own comment and had never
+  been checked; and slot 255 must be refused rather than wrapping onto slot 0 and
+  overwriting the first effect ever recorded.
+
+What the five have in common is worth keeping: **every one of them was
+untestable because it took its input from a fixed address rather than as an
+argument**, and two of the three bugs were unreachable by any amount of booting —
+a `u32` wraparound four billion acquisitions away, and a full ring the demo is
+sized never to reach. That is the argument for having tests at all, and it is now
+an observation rather than a position.
 
 The measured remainder: 81 attribute conversions and 65 `unsafe fn` bodies to
 wrap. Both are mechanical and both are much easier to review once W11 has split
