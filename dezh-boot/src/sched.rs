@@ -578,12 +578,19 @@ extern "C" fn utrap_handler(frame_ptr: *mut usize) -> *const usize {
             );
             shutdown(FINISH_FAIL);
         }
-        // Snapshot before any reschedule (avoids &static_mut), and under the
-        // lock because another hart may be choosing the next task right now.
-        let cur = {
-            let _held = SCHED_LOCK.lock();
-            current_task()
-        };
+        // The claim, read WITHOUT the lock, and that ordering is the point.
+        //
+        // `CURRENT[hart]` has exactly one writer - this hart, through
+        // `set_current_task`, which indexes by `current_hart()`. No other hart
+        // ever stores into this slot, so a bare read of it is sound and needs no
+        // section. What a section would add is a way to not get here at all: the
+        // check below exists for a hart that arrived in a trap holding no task,
+        // and reading `cur` from behind `SCHED_LOCK` made the guard depend on
+        // acquiring a lock in exactly the situation where the scheduler is the
+        // thing that has gone wrong. Measured, not supposed: at the wedge this
+        // handler is stopped in `Ticket::acquire` on this very line, on a hart
+        // whose claim is `NO_TASK` - the guard could never have fired.
+        let cur = current_task();
         // The identity check, and it names the invariant rather than a hart.
         //
         // It used to read `current_hart() != BOOT_HART`, which was true only
@@ -599,9 +606,11 @@ extern "C" fn utrap_handler(frame_ptr: *mut usize) -> *const usize {
         // Also load-bearing on its own: if the claim were dropped while the task
         // was live, another hart would be free to enter this same frame.
         if cur == NO_TASK {
+            let satp: usize;
+            asm!("csrr {}, satp", out(reg) satp);
             kprintln!(
                 "
-[dezh-boot] FATAL: trap on hart {} which holds no task -- halting",
+[dezh-boot] FATAL: trap on hart {} which holds no task (satp={satp:#x}, scause={scause:#x}) -- halting",
                 current_hart()
             );
             shutdown(FINISH_FAIL);

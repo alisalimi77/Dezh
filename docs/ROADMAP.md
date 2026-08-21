@@ -960,12 +960,48 @@ acquisition is not a call the source makes from inside the first. **Something
 re-enters `utrap_handler` while the lock is held**, and the lock masks
 `sstatus.SIE`, which gates S-mode interrupts only.
 
-That is the next question, and it is a much smaller one than the last two: what
-reaches this handler on a hart whose S-mode interrupts are masked. The static
-checker cannot see it by construction — it checks what the source calls, and this
-is something arriving from outside the source. A checker that only reads calls
-will keep saying "none re-entrant" about a re-entrancy, which is worth knowing
-about the checker as much as about the bug.
+**Answered, and it is worse and simpler than a re-entrancy.** Reading each hart's
+privilege, trap cause, `satp` and claim at the wedge:
+
+```text
+CURRENT[hart] = [0, 1, NO_TASK, 2]
+TSATP[task]   = [ffe, fea, fd5, 0]
+live satp     = [ffe, fea, ffe, fd5]
+                  ^         ^
+                hart 0    hart 2
+```
+
+All four harts have `SPP=0` — every one arrived from U-mode, so there is no
+S-mode exception and no masked-interrupt puzzle. **Hart 2 holds no claim at all
+and is executing in task 0's address space**, the one hart 0 claims. Two harts,
+one task. That is the exact failure the run claim exists to prevent, and the
+deadlock is downstream of it rather than the thing itself.
+
+**And the guard written for this could never fire.** `utrap_handler` opened by
+reading the claim *from behind* `SCHED_LOCK`, so the `cur == NO_TASK` check
+depended on acquiring a lock in precisely the situation where the scheduler is
+what has gone wrong. Measured, not supposed: at the wedge the handler is stopped
+in `Ticket::acquire` on that very line, on the hart whose claim is `NO_TASK`.
+
+`CURRENT[hart]` has exactly one writer — that hart — so the read needs no
+section, and it no longer takes one. With the guard reachable, two runs in eight
+now **name** the state instead of stopping silently:
+
+```text
+FATAL: trap on hart 0 which holds no task (satp=0x8000000000087fd5, scause=0x8000000000000005)
+FATAL: trap on hart 0 which holds no task (satp=0x8000000000087ffe, scause=0x8)
+```
+
+`scause=0x8000...05` is a supervisor timer interrupt; `0x8` is an `ecall`. So a
+hart is in U-mode running a task it does not claim, and either the timer or the
+task's own syscall brings it in. Three runs in eight still stop without a word,
+because a hart can reach one of the handler's later lock sites first — those
+still read under the lock, and legitimately so.
+
+Which leaves one question, and it is about the claim rather than the lock: **how
+does a hart come to be executing a task it never claimed?** The candidates are
+`restore_kernel_ctx` returning a secondary somewhere other than
+`secondary_serve`, and a stale `KCTX[hart]` — both testable with the same tool.
 
 So the last piece is: let a secondary pull from the console task table, limited
 to tasks with their own address space, and then make a daemon migrate under
