@@ -10,6 +10,12 @@ publish = false
 name = "virtio-blk"
 path = "src/main.rs"
 
+# The Cairn commit-record format only. Both sides of that format used to be
+# open-coded here against a fixed data pointer, so nothing could check them
+# against anything but each other. Unused items are dead-stripped by LTO below.
+[dependencies]
+dezh-core = { path = "../../dezh-core" }
+
 [profile.release]
 panic = "abort"
 opt-level = "s"

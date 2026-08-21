@@ -169,29 +169,32 @@ const PKG_BLOB_LAST_SECTOR: u64 = 1599;
 // namespace's head ref back along the parent chain; history is never erased.
 const CAIRN1_SUPER_SECTOR: u64 = 1600;
 const CAIRN1_COMMIT_FIRST_SECTOR: u64 = 1601;
-const CAIRN1_COMMIT_SLOTS: u32 = 255;
+const CAIRN1_COMMIT_SLOTS: u32 = dezh_core::cairn::COMMIT_SLOTS;
 const CAIRN1_NS_MAX: usize = 8;
-const CAIRN1_NONE: u32 = 0xffff_ffff;
-const CAIRN1_VALUE_OFF: usize = 64;
+const CAIRN1_NONE: u32 = dezh_core::cairn::NONE;
+const CAIRN1_VALUE_OFF: usize = dezh_core::cairn::VALUE_OFF;
 const CAIRN1_VALUE_MAX: usize = SECTOR_SIZE - CAIRN1_VALUE_OFF;
 // Sand enrichment lives in the commit-record header's previously-spare span
 // (offsets 36..64). It is additive: a freshly formatted store zeroes these, so
 // a direct/operator commit reads intent=0 (no Ahd). The DZC1 magic is unchanged
 // — Sand is the same commit record, richer, never a second log.
+// The offsets and the classes are `dezh_core::cairn`'s, not a second copy. They
+// were declared here and read back here, which meant the only thing checking the
+// format was that this file agreed with itself.
 const CAIRN1_OFF_INTENT: usize = 36; // u32: Ahd (intent) id; 0 = direct, no intent
 const CAIRN1_OFF_DERIVED: usize = 40; // u32: capability set derived under the Ahd
 const CAIRN1_OFF_REVCLASS: usize = 44; // u8: reversibility class (see SAND_REV_*)
 const CAIRN1_OFF_STATUS: usize = 45; // u8: effect status (see SAND_STATUS_*)
 const CAIRN1_OFF_GEN: usize = 46; // u16: this effect's generation on the ns chain
-const SAND_REV_REVERSIBLE: u8 = 0; // undo by moving the ref (a Cairn commit)
-const SAND_REV_COMPENSATABLE: u8 = 1; // undo needs a compensating effect
-const SAND_REV_IRREVERSIBLE: u8 = 2; // cannot be undone (e.g. an external send)
-const SAND_REV_UNKNOWN: u8 = 3; // connector did not declare — never assume reversible
-const SAND_STATUS_COMMITTED: u8 = 0;
+const SAND_REV_REVERSIBLE: u8 = dezh_core::cairn::rev::REVERSIBLE;
+const SAND_REV_COMPENSATABLE: u8 = dezh_core::cairn::rev::COMPENSATABLE;
+const SAND_REV_IRREVERSIBLE: u8 = dezh_core::cairn::rev::IRREVERSIBLE;
+const SAND_REV_UNKNOWN: u8 = dezh_core::cairn::rev::UNKNOWN;
+const SAND_STATUS_COMMITTED: u8 = dezh_core::cairn::status::COMMITTED;
 // A compensating action recorded during a Sfar rollback. It is a first-class,
 // accountable effect on the ledger — the honest way to "undo" a compensatable
 // effect is to perform and RECORD an inverse action, never to erase the record.
-const SAND_STATUS_COMPENSATION: u8 = 2;
+const SAND_STATUS_COMPENSATION: u8 = dezh_core::cairn::status::COMPENSATION;
 // The unit separator inside a compensatable effect's value: "forward\x1fcompensation".
 // The connector supplies the compensating action at commit time; the daemon
 // persists it in the commit record and replays it as a logged effect on rollback.
@@ -740,24 +743,24 @@ fn cairn_commit(
     // now doubles as a Sand effect record: actor + intent(Ahd) + derived cap +
     // reversibility class + status + generation, all on the same commit.
     zero_data();
-    set_data(b"DZC1");
-    d_write_u32(4, next);
-    d_write_u32(8, head); // parent
-    d_write_u32(12, ns as u32);
-    d_write_u64(16, hash);
-    d_write_u32(24, from as u32); // actor (kernel task id)
-    d_write_u32(28, 1); // flags bit0: reversible
-    d_write_u32(32, len as u32);
-    // Sand enrichment (offsets 36..48).
-    d_write_u32(CAIRN1_OFF_INTENT, intent);
-    d_write_u32(CAIRN1_OFF_DERIVED, derived);
     let generation = count + 1;
-    unsafe {
-        core::ptr::write_volatile(data_ptr().add(CAIRN1_OFF_REVCLASS), rev_class);
-        core::ptr::write_volatile(data_ptr().add(CAIRN1_OFF_STATUS), SAND_STATUS_COMMITTED);
-        core::ptr::write_volatile(data_ptr().add(CAIRN1_OFF_GEN), generation as u8);
-        core::ptr::write_volatile(data_ptr().add(CAIRN1_OFF_GEN + 1), (generation >> 8) as u8);
+    // One encoder, host-tested against real records, writing through this
+    // daemon's own volatile access to the DMA page.
+    dezh_core::cairn::CommitHeader {
+        slot: next,
+        parent: head,
+        ns: ns as u32,
+        hash,
+        actor: from as u32,
+        flags: 1, // bit0: reversible
+        len: len as u32,
+        intent,
+        derived,
+        rev_class,
+        status: SAND_STATUS_COMMITTED,
+        generation: generation as u16,
     }
+    .encode(|off, b| unsafe { core::ptr::write_volatile(data_ptr().add(off), b) });
     unsafe {
         core::ptr::copy_nonoverlapping(
             (DMA_VA + INPUT_OFF) as *const u8,
